@@ -982,12 +982,14 @@ import { bucketIndex, newHist, addToHist } from './histogram.js';
 
 describe('bucketIndex', () => {
   it('maps a duration to the bucket whose upper bound it falls under', () => {
-    expect(bucketIndex(101)).toBe(0);     // (…,250)
-    expect(bucketIndex(249)).toBe(0);
-    expect(bucketIndex(250)).toBe(1);     // bound is exclusive-below
-    expect(bucketIndex(999)).toBe(2);
-    expect(bucketIndex(1000)).toBe(3);
-    expect(bucketIndex(9999)).toBe(5);
+    expect(bucketIndex(50)).toBe(0);      // [0,100)  — only seen when thresholdMs < 100
+    expect(bucketIndex(99)).toBe(0);
+    expect(bucketIndex(101)).toBe(1);     // [100,250)
+    expect(bucketIndex(249)).toBe(1);
+    expect(bucketIndex(250)).toBe(2);     // bucket i covers [BOUNDS[i-1], BOUNDS[i])
+    expect(bucketIndex(999)).toBe(3);
+    expect(bucketIndex(1000)).toBe(4);
+    expect(bucketIndex(9999)).toBe(6);
     expect(bucketIndex(10000)).toBe(7);   // overflow bucket
     expect(bucketIndex(600000)).toBe(7);
   });
@@ -1003,7 +1005,7 @@ describe('newHist / addToHist', () => {
     addToHist(h, 120);
     addToHist(h, 120);
     addToHist(h, 30000);
-    expect(h).toEqual([2, 0, 0, 0, 0, 0, 0, 1]);
+    expect(h).toEqual([0, 2, 0, 0, 0, 0, 0, 1]);
   });
 });
 ```
@@ -1026,7 +1028,7 @@ describe('Aggregator', () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ hash: sigA.hash, count: 2, totalMs: 420, maxMs: 300, lastMs: 300 });
-    expect(items[0]!.hist).toEqual([1, 0, 0, 0, 0, 0, 0, 0].map((v, i) => (i === 0 ? 1 : i === 1 ? 1 : 0)));
+    expect(items[0]!.hist).toEqual([0, 1, 1, 0, 0, 0, 0, 0]);   // 120ms → bucket 1, 300ms → bucket 2
   });
 
   it('keeps distinct signatures apart', () => {
@@ -1089,8 +1091,8 @@ describe('Aggregator', () => {
     const { items } = agg.swap();
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ count: 2, totalMs: 420, maxMs: 300 });
-    expect(items[0]!.hist[0]).toBe(1);
     expect(items[0]!.hist[1]).toBe(1);
+    expect(items[0]!.hist[2]).toBe(1);
   });
 
   it('refuses to merge past the cap rather than growing without bound', () => {
@@ -1132,7 +1134,7 @@ export function addToHist(hist: number[], ms: number): void {
 }
 ```
 
-Note on `bucketIndex(101) === 0`: the first bucket is everything below 250 ms. Durations below the SDK threshold never reach the histogram, so bucket 0 is effectively `[threshold, 250)`.
+Note on bucket semantics: bucket `i` covers `[BOUNDS[i-1], BOUNDS[i])`, so bucket 0 is `[0, 100)` and bucket 7 is `[10000, ∞)`. With the default `thresholdMs` of 100, bucket 0 stays empty; it fills only when a customer lowers the threshold. This makes the histogram independent of the threshold setting, which is what lets the server compare apps configured differently.
 
 `packages/sdk/src/aggregator.ts`:
 ```ts
