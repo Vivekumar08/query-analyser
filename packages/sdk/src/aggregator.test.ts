@@ -14,7 +14,7 @@ describe('Aggregator', () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ hash: sigA.hash, count: 2, totalMs: 420, maxMs: 300, lastMs: 300 });
-    expect(items[0]!.hist).toEqual([1, 1, 0, 0, 0, 0, 0, 0]);
+    expect(items[0]!.hist).toEqual([0, 1, 1, 0, 0, 0, 0, 0]);
   });
 
   it('keeps distinct signatures apart', () => {
@@ -77,8 +77,8 @@ describe('Aggregator', () => {
     const { items } = agg.swap();
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ count: 2, totalMs: 420, maxMs: 300 });
-    expect(items[0]!.hist[0]).toBe(1);
     expect(items[0]!.hist[1]).toBe(1);
+    expect(items[0]!.hist[2]).toBe(1);
   });
 
   it('refuses to merge past the cap rather than growing without bound', () => {
