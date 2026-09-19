@@ -650,7 +650,8 @@ git commit -m "feat(sdk): add value redaction"
   - `normalizeKey(path: string): string`
   - `flattenFilter(filter: unknown): FilterShapeItem[]`
   - `normalizeSort(sort: unknown): SortKey[]`
-  - `buildSignature(input: { model: string; operation: string; filter?: unknown; sort?: unknown; pipeline?: unknown[] }): { signature: string; hash: string; filterShape: FilterShapeItem[]; sortKeys: SortKey[]; stages: string[] }`
+  - `buildSignature(input: { model: string; operation: string; filter?: unknown; sort?: unknown; pipeline?: unknown[] }): SignatureResult`
+  - `interface SignatureResult { signature: string; hash: string; model: string; operation: string; filterShape: FilterShapeItem[]; sortKeys: SortKey[]; stages: string[] }` — `model` and `operation` are echoed back so consumers never have to re-parse the rendered signature string.
 
 `hash` is the first 16 hex characters of the SHA-256 of `signature`.
 
@@ -765,6 +766,8 @@ describe('buildSignature', () => {
     });
     expect(s.signature).toBe('Order.find(createdAt:range,status:eq)[placedAt:-1]');
     expect(s.hash).toMatch(/^[0-9a-f]{16}$/);
+    expect(s.model).toBe('Order');
+    expect(s.operation).toBe('find');
   });
 
   it('renders an aggregate signature from stage operators', () => {
@@ -904,6 +907,8 @@ export interface SignatureInput {
 export interface SignatureResult {
   signature: string;
   hash: string;
+  model: string;
+  operation: string;
   filterShape: FilterShapeItem[];
   sortKeys: SortKey[];
   stages: string[];
@@ -926,7 +931,15 @@ export function buildSignature(input: SignatureInput): SignatureResult {
   const signature = `${input.model}.${input.operation}(${body})${sortPart}`.slice(0, MAX_SIGNATURE_LEN);
   const hash = createHash('sha256').update(signature).digest('hex').slice(0, 16);
 
-  return { signature, hash, filterShape, sortKeys, stages };
+  return {
+    signature,
+    hash,
+    model: input.model,
+    operation: isAggregate ? 'aggregate' : input.operation,
+    filterShape,
+    sortKeys,
+    stages,
+  };
 }
 ```
 
@@ -1153,8 +1166,8 @@ export class Aggregator {
       item = {
         signature: sig.signature,
         hash: sig.hash,
-        model: sig.signature.split('.')[0] ?? 'unknown',
-        operation: sig.signature.slice(sig.signature.indexOf('.') + 1, sig.signature.indexOf('(')),
+        model: sig.model,
+        operation: sig.operation,
         filterShape: sig.filterShape,
         sortKeys: sig.sortKeys,
         stages: sig.stages,
@@ -1215,8 +1228,6 @@ export class Aggregator {
   }
 }
 ```
-
-Deriving `model` and `operation` by slicing the signature string is fragile. Change `SignatureResult` in `packages/sdk/src/signature.ts` to carry them directly — add `model: input.model` and `operation: input.operation` to the returned object and to the `SignatureResult` interface, then read `sig.model` and `sig.operation` here. Update the Task 5 tests only if they assert on the returned object's exact key set (they do not).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
