@@ -80,6 +80,18 @@ describe('redact', () => {
     });
   });
 
+  it('handles Proxy with throwing get trap and real keys', () => {
+    const proxy = new Proxy({ a: 1 }, {
+      get() {
+        throw new Error('get trap throws');
+      },
+    });
+    expect(() => redact(proxy)).not.toThrow();
+    expect(redact(proxy)).toEqual({
+      a: '<error>',
+    });
+  });
+
   it('never throws on hostile inputs', () => {
     const testCases = [
       // Throwing getter
@@ -88,10 +100,22 @@ describe('redact', () => {
           throw new Error('getter throws');
         },
       }),
-      // Proxy with throwing traps
+      // Proxy with throwing ownKeys trap
       new Proxy({}, {
+        ownKeys() {
+          throw new Error('ownKeys trap');
+        },
+      }),
+      // Proxy with throwing getOwnPropertyDescriptor trap
+      new Proxy({}, {
+        getOwnPropertyDescriptor() {
+          throw new Error('getOwnPropertyDescriptor trap');
+        },
+      }),
+      // Proxy with throwing get trap and real key
+      new Proxy({ a: 1 }, {
         get() {
-          throw new Error('proxy get throws');
+          throw new Error('get trap');
         },
       }),
       // Frozen object
@@ -114,6 +138,18 @@ describe('redact', () => {
     testCases.forEach((testCase) => {
       expect(() => redact(testCase)).not.toThrow();
     });
+  });
+
+  it('handles throwing elements in arrays without throwing', () => {
+    const hostileProxy = new Proxy({}, {
+      get() {
+        throw new Error('hostile element');
+      },
+    });
+    expect(() => redact([hostileProxy, 1])).not.toThrow();
+    const result = redact([hostileProxy, 1]);
+    expect(typeof result).toBe('string');
+    expect(result).toMatch(/^<array\[/);
   });
 
   it('transmits keys by design', () => {

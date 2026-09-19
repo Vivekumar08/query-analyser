@@ -33,9 +33,13 @@ function scalarToken(v: unknown): string | null {
 function arrayToken(arr: unknown[]): string {
   if (arr.length === 0) return '<array[]>';
   const kinds = new Set(arr.slice(0, 16).map((el) => {
-    const t = scalarToken(el);
-    if (t) return t.slice(1, -1);
-    return Array.isArray(el) ? 'array' : 'object';
+    try {
+      const t = scalarToken(el);
+      if (t) return t.slice(1, -1);
+      return Array.isArray(el) ? 'array' : 'object';
+    } catch {
+      return 'error';
+    }
   }));
   return kinds.size === 1 ? `<array[${[...kinds][0]}]>` : '<array[mixed]>';
 }
