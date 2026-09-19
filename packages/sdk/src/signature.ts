@@ -6,6 +6,7 @@ const MAX_KEYS = 64;
 
 const RANGE_OPS = new Set(['$gt', '$gte', '$lt', '$lte']);
 const IN_OPS = new Set(['$in', '$all']);
+// $not is treated as negation regardless of what it wraps, because a negated predicate cannot use an index in the E or R position either way.
 const NE_OPS = new Set(['$ne', '$nin', '$not']);
 const LOGICAL_OPS = new Set(['$and', '$or', '$nor']);
 
@@ -116,8 +117,9 @@ export function buildSignature(input: SignatureInput): SignatureResult {
     ? `[${sortKeys.map((s) => `${s.key}:${s.dir}`).join(',')}]`
     : '';
 
-  const signature = `${input.model}.${input.operation}(${body})${sortPart}`.slice(0, MAX_SIGNATURE_LEN);
-  const hash = createHash('sha256').update(signature).digest('hex').slice(0, 16);
+  const fullSignature = `${input.model}.${input.operation}(${body})${sortPart}`;
+  const hash = createHash('sha256').update(fullSignature).digest('hex').slice(0, 16);
+  const signature = fullSignature.slice(0, MAX_SIGNATURE_LEN);
 
   return {
     signature,

@@ -137,4 +137,56 @@ describe('buildSignature', () => {
     expect(buildSignature({ model: 'O', operation: 'find', filter }).signature.length)
       .toBeLessThanOrEqual(400);
   });
+
+  it('hashes before truncation to prevent collision', () => {
+    // Two filters with 30 keys each; their signatures share first 400 chars but differ beyond
+    const filter1: Record<string, number> = {};
+    const filter2: Record<string, number> = {};
+    for (let i = 0; i < 30; i++) {
+      filter1[`aaa_key_${String(i).padStart(2, '0')}`] = 1;
+      filter2[`aaa_key_${String(i).padStart(2, '0')}`] = 1;
+    }
+    // Add differing final keys to both filters
+    filter1['zzz_final_key_a'] = 1;
+    filter2['zzz_final_key_b'] = 1;
+
+    const a = buildSignature({ model: 'O', operation: 'find', filter: filter1 });
+    const b = buildSignature({ model: 'O', operation: 'find', filter: filter2 });
+
+    // Signatures may be truncated to 400 chars, but hashes should differ
+    expect(a.hash).not.toBe(b.hash);
+  });
+
+  it('enforces 64-key limit on filter shape', () => {
+    const filter: Record<string, number> = {};
+    for (let i = 0; i < 80; i++) {
+      filter[`field_${String(i).padStart(2, '0')}`] = i;
+    }
+    const s = buildSignature({ model: 'O', operation: 'find', filter });
+    expect(s.filterShape.length).toBe(64);
+    // Verify the 64 retained are the first 64 in sorted order
+    for (let i = 0; i < 64; i++) {
+      const item = s.filterShape[i];
+      expect(item).toBeDefined();
+      expect(item?.key).toBe(`field_${String(i).padStart(2, '0')}`);
+    }
+  });
+
+  it('enforces 32-key limit on sort spec', () => {
+    const sort: Record<string, number> = {};
+    for (let i = 0; i < 40; i++) {
+      sort[`sort_${i}`] = i % 2 === 0 ? 1 : -1;
+    }
+    const s = buildSignature({ model: 'O', operation: 'find', sort });
+    expect(s.sortKeys.length).toBe(32);
+  });
+
+  it('enforces 64-stage limit on aggregate pipeline', () => {
+    const pipeline: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 70; i++) {
+      pipeline.push({ [`$stage_${i}`]: { dummy: true } });
+    }
+    const s = buildSignature({ model: 'O', operation: 'aggregate', pipeline });
+    expect(s.stages.length).toBe(64);
+  });
 });
