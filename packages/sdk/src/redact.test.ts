@@ -17,6 +17,19 @@ describe('redact', () => {
     expect(redact(/abc/i)).toBe('<RegExp>');
   });
 
+  it('handles boxed primitives without leaking length', () => {
+    expect(redact(new String('a-nineteen-char-str'))).toBe('<string>');
+    expect(redact(new Number(42))).toBe('<number>');
+    expect(redact(new Boolean(true))).toBe('<boolean>');
+  });
+
+  it('recognises Map and Set', () => {
+    expect(redact(new Map())).toBe('<Map>');
+    expect(redact(new Set())).toBe('<Set>');
+    expect(redact(new Map([['key', 'secret']]))).toBe('<Map>');
+    expect(redact(new Set(['secret']))).toBe('<Set>');
+  });
+
   it('keeps object keys and redacts values recursively', () => {
     expect(redact({ status: 'paid', createdAt: { $gte: new Date() } })).toEqual({
       status: '<string>',
@@ -40,6 +53,102 @@ describe('redact', () => {
     const o: Record<string, unknown> = { a: 1 };
     o.self = o;
     expect(() => redact(o)).not.toThrow();
+  });
+
+  it('truncates objects beyond MAX_KEYS with truncation marker', () => {
+    const obj: Record<string, number> = {};
+    for (let i = 0; i < 40; i++) {
+      obj[`key${i}`] = i;
+    }
+    const result = redact(obj) as Record<string, unknown>;
+    const keys = Object.keys(result);
+    expect(keys).toHaveLength(33); // 32 keys + '…'
+    expect(result['…']).toBe('<truncated>');
+  });
+
+  it('handles throwing getters without throwing', () => {
+    const obj = {
+      x: 1,
+      get y() {
+        throw new Error('boom');
+      },
+    };
+    expect(() => redact(obj)).not.toThrow();
+    expect(redact(obj)).toEqual({
+      x: '<number>',
+      y: '<error>',
+    });
+  });
+
+  it('never throws on hostile inputs', () => {
+    const testCases = [
+      // Throwing getter
+      Object.defineProperty({}, 'x', {
+        get() {
+          throw new Error('getter throws');
+        },
+      }),
+      // Proxy with throwing traps
+      new Proxy({}, {
+        get() {
+          throw new Error('proxy get throws');
+        },
+      }),
+      // Frozen object
+      Object.freeze({ a: 1 }),
+      // Object.create(null)
+      Object.create(null),
+      // Boxed String
+      new String('secret'),
+      // Map
+      new Map([['key', 'value']]),
+      // Sparse array
+      [, , 1],
+      // Symbol
+      Symbol('test'),
+      // BigInt
+      BigInt(42),
+      // Function
+      () => {},
+    ];
+    testCases.forEach((testCase) => {
+      expect(() => redact(testCase)).not.toThrow();
+    });
+  });
+
+  it('transmits keys by design', () => {
+    const result = redact({ ['user_' + 'x@y.z']: 1 }) as Record<string, unknown>;
+    expect(result).toEqual({ 'user_x@y.z': '<number>' });
+    expect(Object.keys(result)).toContain('user_x@y.z');
+  });
+
+  it('maintains vocabulary invariant for type tokens', () => {
+    const secret = 'super-secret-email@example.com';
+    const anotherSecret = 123456789;
+    const fixture = {
+      email: secret,
+      nested: { list: [secret, anotherSecret] },
+      date: new Date(),
+      id: new Types.ObjectId(),
+    };
+    const result = redact(fixture);
+    const output = JSON.stringify(result);
+
+    // All string leaves must match the type token pattern
+    const validateTokens = (obj: unknown): boolean => {
+      if (typeof obj === 'string') {
+        return /^<[A-Za-z\[\]]+>$/.test(obj);
+      }
+      if (typeof obj === 'object' && obj !== null && !Array.isArray(obj)) {
+        return Object.values(obj as Record<string, unknown>).every(validateTokens);
+      }
+      return true;
+    };
+    expect(validateTokens(result)).toBe(true);
+
+    // No secret values must appear in output
+    expect(output).not.toContain('super-secret');
+    expect(output).not.toContain('123456789');
   });
 
   it('leaks no input value anywhere in the output', () => {

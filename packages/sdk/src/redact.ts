@@ -12,6 +12,13 @@ function scalarToken(v: unknown): string | null {
     case 'function': return '<function>';
     case 'symbol': return '<symbol>';
   }
+  // Handle boxed primitives
+  if (v instanceof String) return '<string>';
+  if (v instanceof Number) return '<number>';
+  if (v instanceof Boolean) return '<boolean>';
+  // Handle Map and Set
+  if (v instanceof Map) return '<Map>';
+  if (v instanceof Set) return '<Set>';
   if (v instanceof Date) return '<Date>';
   if (v instanceof RegExp) return '<RegExp>';
   // Duck-typed so we never import mongoose or bson here.
@@ -38,7 +45,13 @@ function arrayToken(arr: unknown[]): string {
  * structure and the keys. No input value can appear in the output.
  */
 export function redact(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
-  const scalar = scalarToken(value);
+  let scalar: string | null;
+  try {
+    scalar = scalarToken(value);
+  } catch {
+    // If type checking throws (e.g., Proxy trap), treat as object
+    scalar = null;
+  }
   if (scalar !== null) return scalar;
 
   if (Array.isArray(value)) return arrayToken(value);
@@ -50,9 +63,21 @@ export function redact(value: unknown, depth = 0, seen = new WeakSet<object>()):
 
   const out: Record<string, unknown> = {};
   let n = 0;
-  for (const key of Object.keys(obj)) {
+  let keys: string[] = [];
+  try {
+    keys = Object.keys(obj);
+  } catch {
+    // If Object.keys() throws (e.g., Proxy trap), treat as empty object
+    seen.delete(obj);
+    return out;
+  }
+  for (const key of keys) {
     if (n++ >= MAX_KEYS) { out['…'] = '<truncated>'; break; }
-    out[key] = redact(obj[key], depth + 1, seen);
+    try {
+      out[key] = redact(obj[key], depth + 1, seen);
+    } catch {
+      out[key] = '<error>';
+    }
   }
   seen.delete(obj);
   return out;
