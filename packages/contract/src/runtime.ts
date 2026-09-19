@@ -4,7 +4,7 @@
  * and the SDK ships with no runtime dependencies.
  */
 
-export const HIST_BOUNDS = [250, 500, 1000, 2500, 5000, 10000] as const;
+export const HIST_BOUNDS = [100, 250, 500, 1000, 2500, 5000, 10000] as const;
 export const HIST_SIZE = 8;
 
 export type OpClass = 'eq' | 'in' | 'range' | 'regex' | 'exists' | 'ne' | 'other';
