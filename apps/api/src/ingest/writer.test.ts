@@ -107,4 +107,14 @@ describe('writeBatch', () => {
     const app = await seedApp();
     expect(await writeBatch(prisma, app.id, payload([]))).toEqual({ signatures: 0, rollups: 0 });
   });
+
+  it('rejects a hist array that is not exactly 8 elements at the database level', async () => {
+    const app = await seedApp();
+    // The contract's zod schema (`hist.length(HIST_SIZE)`) is the normal
+    // gate, but this proves the database itself enforces the invariant
+    // (via the hist_length_check migration) no matter what path writes the
+    // row, so a bypassed or buggy validator still can't corrupt a rollup.
+    const bad = item({ hist: [0, 1, 2, 3, 4, 5, 6] as unknown as number[] });
+    await expect(writeBatch(prisma, app.id, payload([bad]))).rejects.toThrow(/hist_length_check/);
+  });
 });

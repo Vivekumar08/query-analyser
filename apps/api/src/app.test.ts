@@ -121,3 +121,16 @@ describe('error handler resilience', () => {
     expect(res.json()).toEqual({ error: 'nope' });
   });
 });
+
+describe('BigInt reply serialization', () => {
+  it('serializes a stray BigInt in a reply instead of throwing', async () => {
+    const bigIntApp = await buildApp({ logger: false });
+    bigIntApp.get('/bigint', () => ({ totalMs: 9007199254740993n }));
+
+    const res = await bigIntApp.inject({ method: 'GET', url: '/bigint' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ totalMs: '9007199254740993' });
+
+    await bigIntApp.close();
+  });
+});

@@ -43,6 +43,15 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
 
   app.decorate('config', config);
 
+  // Prisma returns BigInt for QueryRollup/QueryDailyRollup's `totalMs`
+  // column, and JSON.stringify throws on a bare BigInt. Every route that
+  // might ever return one already converts it to a plain number, but this
+  // is a safety net: if a stray BigInt reaches a reply anyway, serialize it
+  // as a string instead of crashing the response.
+  app.setReplySerializer((payload) =>
+    JSON.stringify(payload, (_key, value) => (typeof value === 'bigint' ? value.toString() : value)),
+  );
+
   app.get('/healthz', async () => ({ status: 'ok' }));
 
   app.setNotFoundHandler((_req, reply) => {
