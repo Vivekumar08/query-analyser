@@ -1781,7 +1781,8 @@ export function init(options: InitOptions): Analyser {
 
   const onExit = () => { void flush(); };
   process.once('beforeExit', onExit);
-  process.once('SIGTERM', onExit);
+  // Deliberately no SIGTERM handler: registering one disables Node's default
+  // terminate-on-SIGTERM and would hang the host until SIGKILL. See spec §4.
 
   const analyser: Analyser & { _stop(): void } = {
     flush,
@@ -1789,7 +1790,6 @@ export function init(options: InitOptions): Analyser {
     async shutdown() {
       clearInterval(timer);
       process.off('beforeExit', onExit);
-      process.off('SIGTERM', onExit);
       backoffUntil = 0;
       await flush();
     },
@@ -2119,7 +2119,16 @@ with a type-only sample: `{ email: '<string>', total: { $gte: '<number>' } }`.
 - If the endpoint is unreachable the SDK retries with backoff and then drops.
   Your queries are never affected.
 - `await require('@vivekumar08/query-analyser').shutdown()` drains the buffer
-  before exit. `SIGTERM` and `beforeExit` do this for you.
+  before exit. `beforeExit` does this for you when the event loop empties. For a
+  graceful shutdown on SIGTERM, call it from your own handler — the SDK never
+  registers signal handlers, because that would change how your process exits:
+
+  ```js
+  process.on('SIGTERM', async () => {
+    await require('@vivekumar08/query-analyser').shutdown();
+    server.close(() => process.exit(0));
+  });
+  ```
 
 MIT
 ````
