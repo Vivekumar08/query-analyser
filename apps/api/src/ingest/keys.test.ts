@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { createPrisma } from '../db.js';
 import { resetDb } from '../test/db.js';
 import { loadConfig } from '../config.js';
@@ -6,12 +6,6 @@ import { generateKey, hashKey, KeyResolver } from './keys.js';
 
 const prisma = createPrisma(loadConfig().DATABASE_URL);
 beforeEach(async () => { await resetDb(prisma); });
-
-// Ensure spies are properly cleaned up between tests
-afterEach(() => {
-  vi.clearAllMocks();
-});
-
 afterAll(async () => { await prisma.$disconnect(); });
 
 async function seedApp() {
@@ -53,20 +47,6 @@ describe('KeyResolver', () => {
     expect(await r.resolve('qa_live_' + 'f'.repeat(32))).toBeNull();
   });
 
-  it('caches lookups for the TTL, including misses', async () => {
-    const app = await seedApp();
-    const k = generateKey();
-    await prisma.ingestKey.create({ data: { appId: app.id, keyHash: k.hash, prefix: k.prefix } });
-    const r = new KeyResolver(prisma, 60_000);
-    const spy = vi.spyOn(prisma.ingestKey, 'findUnique');
-
-    await r.resolve(k.key);
-    await r.resolve(k.key);
-    await r.resolve('qa_live_' + '0'.repeat(32));
-    await r.resolve('qa_live_' + '0'.repeat(32));
-    expect(spy).toHaveBeenCalledTimes(2);
-  });
-
   it('reflects a suspended org', async () => {
     const app = await seedApp();
     await prisma.organization.update({ where: { id: app.orgId }, data: { suspendedAt: new Date() } });
@@ -85,5 +65,28 @@ describe('KeyResolver', () => {
     expect(await r.resolve(k.key)).not.toBeNull();   // still cached
     r.invalidate(k.hash);
     expect(await r.resolve(k.key)).toBeNull();
+  });
+
+  // NOTE: kept as the last test in this describe block. Prisma's generated
+  // delegate exposes model methods as lazily-synthesized Proxy properties
+  // whose own descriptor always reports `value: undefined` regardless of the
+  // real bound function underneath. vi.spyOn captures that fake descriptor as
+  // "the original", so mockRestore() (here, or automatically via the
+  // project's `restoreMocks: true` vitest config) reinstates a dead
+  // `findUnique`. Running this test last means no later test in this file
+  // depends on the delegate afterwards; each test file gets its own isolated
+  // PrismaClient instance, so this does not leak across files.
+  it('caches lookups for the TTL, including misses', async () => {
+    const app = await seedApp();
+    const k = generateKey();
+    await prisma.ingestKey.create({ data: { appId: app.id, keyHash: k.hash, prefix: k.prefix } });
+    const r = new KeyResolver(prisma, 60_000);
+    const spy = vi.spyOn(prisma.ingestKey, 'findUnique');
+    await r.resolve(k.key);
+    await r.resolve(k.key);
+    await r.resolve('qa_live_' + '0'.repeat(32));
+    await r.resolve('qa_live_' + '0'.repeat(32));
+    expect(spy).toHaveBeenCalledTimes(2);
+    spy.mockRestore();
   });
 });
