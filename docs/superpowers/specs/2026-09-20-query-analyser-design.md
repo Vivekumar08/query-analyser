@@ -169,8 +169,11 @@ the SDK flushes early, and if still full, drops new signatures and increments a
 
 Every `flushIntervalMs` the buffer is swapped for a fresh `Map` and the old one is POSTed
 as one batch. The timer is `unref()`'d so it never keeps a process alive. `beforeExit`
-and `SIGTERM` trigger a final drain with a short timeout, so a scaling-down pod does not
-lose its last window.
+triggers a final drain. The SDK deliberately does **not** register a `SIGTERM` handler:
+doing so removes Node's default terminate-on-signal behaviour, and a host process with an
+open server would then never exit on SIGTERM until the orchestrator SIGKILLs it. A customer
+who wants the last window drained on shutdown calls `await shutdown()` from their own
+signal handler; the README shows the three-line pattern.
 
 On a failed flush the batch is folded back into the buffer and retried on the next tick,
 bounded by the same cap, with exponential backoff up to a ceiling. A 401 disables the
