@@ -32,13 +32,19 @@ is reported as:
 Order.find(email:eq,total:range)
 ```
 
-with a type-only sample: `{ email: '<string>', total: { $gte: '<number>' } }`.
+with a type-only sample: `{"filter":{"email":"<string>","total":{"$gte":"<number>"}}}`.
+`update` and `sort` are included in the sample only when the query actually
+has one — a plain `find()` with no sort reports as
+`{"filter":{...}}`, not `{"filter":{...},"update":"<undefined>","sort":"<undefined>"}`.
 **No queried value ever leaves your process.** There is no option to turn that off.
 
 Object *key* names are transmitted by design — they are what the index advice
-is computed from. If you build a filter key out of user-controlled data (for
-example `{ ['email_' + userInput]: 1 }`), that data becomes a key name and
-does leave your process. Do not put sensitive values in filter keys.
+is computed from, and this applies to any object key in a filter, update or
+sort, at any depth, not just the top-level filter keys. If you build a key out
+of user-controlled data anywhere in one of those three — a filter key like
+`{ ['email_' + userInput]: 1 }`, or an update like `{ $set: { [userKey]: 1 } }`
+— that data becomes a key name and does leave your process. Do not put
+sensitive values in filter, update, or sort keys.
 
 ## Options
 

@@ -22,7 +22,7 @@
     "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "pnpm build && pnpm test"
+    "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test"
   },
   "dependencies": {},
   "peerDependencies": { "mongoose": ">=8 <9" },

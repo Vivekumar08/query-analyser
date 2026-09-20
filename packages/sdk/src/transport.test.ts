@@ -106,7 +106,12 @@ describe('transport', () => {
       status: 429,
     })));
     const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl });
-    expect(await t.send(payload)).toEqual({ status: 'retry', afterMs: 5000 });
+    const result = await t.send(payload);
+    // Important 5: the first failure's backoff is 5000ms +/-20% jitter,
+    // not the old flat constant.
+    expect(result.status).toBe('retry');
+    expect((result as { afterMs: number }).afterMs).toBeGreaterThanOrEqual(4000);
+    expect((result as { afterMs: number }).afterMs).toBeLessThanOrEqual(6000);
   });
 
   it('ignores HTTP-date form Retry-After on 429', async () => {
@@ -114,7 +119,10 @@ describe('transport', () => {
       status: 429, headers: { 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' },
     })));
     const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl });
-    expect(await t.send(payload)).toEqual({ status: 'retry', afterMs: 5000 });
+    const result = await t.send(payload);
+    expect(result.status).toBe('retry');
+    expect((result as { afterMs: number }).afterMs).toBeGreaterThanOrEqual(4000);
+    expect((result as { afterMs: number }).afterMs).toBeLessThanOrEqual(6000);
   });
 
   it('times out and retries with error reporting', async () => {
@@ -127,7 +135,9 @@ describe('transport', () => {
     const onError = vi.fn();
     const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl, timeoutMs: 10, onError });
     const result = await t.send(payload);
-    expect(result).toEqual({ status: 'retry', afterMs: 5000 });
+    expect(result.status).toBe('retry');
+    expect((result as { afterMs: number }).afterMs).toBeGreaterThanOrEqual(4000);
+    expect((result as { afterMs: number }).afterMs).toBeLessThanOrEqual(6000);
     expect(onError).toHaveBeenCalledWith(expect.any(Error));
     expect(onError.mock.calls[0]![0]!.message).toMatch(/timed out after 10ms/);
   });
@@ -137,7 +147,62 @@ describe('transport', () => {
     const onError = vi.fn(() => { throw new Error('oops'); });
     const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl, onError });
     const result = await t.send(payload);
-    expect(result).toEqual({ status: 'retry', afterMs: 5000 });
+    expect(result.status).toBe('retry');
+    expect((result as { afterMs: number }).afterMs).toBeGreaterThanOrEqual(4000);
+    expect((result as { afterMs: number }).afterMs).toBeLessThanOrEqual(6000);
     expect(onError).toHaveBeenCalled();
+  });
+
+  // Important 5: exponential backoff up to a 60s ceiling, with jitter, so an
+  // ingest outage doesn't produce an undamped retry storm below the 10s
+  // flush interval.
+  it('backs off exponentially across consecutive failures, capped at 60s, and resets on success', async () => {
+    const fail = () => Promise.resolve(new Response('boom', { status: 503 }));
+    const fetchImpl = vi.fn(fail);
+    const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl });
+
+    const r1 = await t.send(payload);
+    const r2 = await t.send(payload);
+    const r3 = await t.send(payload);
+    expect(r1.status).toBe('retry');
+    expect(r2.status).toBe('retry');
+    expect(r3.status).toBe('retry');
+    const a1 = (r1 as { afterMs: number }).afterMs;
+    const a2 = (r2 as { afterMs: number }).afterMs;
+    const a3 = (r3 as { afterMs: number }).afterMs;
+
+    // Strictly increasing, within the jittered bounds of 5000 * 2^(n-1).
+    expect(a1).toBeGreaterThanOrEqual(4000);
+    expect(a1).toBeLessThanOrEqual(6000);
+    expect(a2).toBeGreaterThanOrEqual(8000);
+    expect(a2).toBeLessThanOrEqual(12000);
+    expect(a3).toBeGreaterThanOrEqual(16000);
+    expect(a3).toBeLessThanOrEqual(24000);
+    expect(a1).toBeLessThan(a2);
+    expect(a2).toBeLessThan(a3);
+
+    fetchImpl.mockImplementation(ok);
+    const r4 = await t.send(payload);
+    expect(r4).toEqual({ status: 'ok' });
+
+    fetchImpl.mockImplementation(fail);
+    const r5 = await t.send(payload);
+    const a5 = (r5 as { afterMs: number }).afterMs;
+    // The sequence reset after the success — back to the first-failure range.
+    expect(a5).toBeGreaterThanOrEqual(4000);
+    expect(a5).toBeLessThanOrEqual(6000);
+  });
+
+  it('caps backoff at 60000ms after many consecutive failures', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response('boom', { status: 503 })));
+    const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl });
+
+    let last = 0;
+    for (let i = 0; i < 10; i++) {
+      const r = await t.send(payload);
+      last = (r as { afterMs: number }).afterMs;
+    }
+    expect(last).toBeLessThanOrEqual(60_000);
+    expect(last).toBeGreaterThanOrEqual(48_000);
   });
 });

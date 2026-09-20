@@ -102,7 +102,16 @@ export function installHooks(schema: MongooseSchemaLike, getCtx: GetHookContext)
         filter, sort, pipeline,
       });
 
-      const sample = redact(isAggregate ? { pipeline } : { filter, update, sort });
+      // Minor fix 9: `update`/`sort` were always included even when
+      // `undefined` (most finds have no update; unsorted queries have no
+      // sort), so the real sample looked like
+      // `{"filter":{...},"update":"<undefined>","sort":"<undefined>"}` —
+      // not the README's example. Omit a key entirely when its value is
+      // undefined, matching what the README now shows.
+      const sampleInput: Record<string, unknown> = isAggregate
+        ? { pipeline }
+        : { filter, ...(update !== undefined ? { update } : {}), ...(sort !== undefined ? { sort } : {}) };
+      const sample = redact(sampleInput);
       ctx.aggregator.add(sig, duration, sample);
     } catch (err) {
       ctx.onError(err instanceof Error ? err : new Error(String(err)));

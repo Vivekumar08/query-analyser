@@ -1,7 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { gunzipSync } from 'node:zlib';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { init, shutdown } from '../index.js';
+// Critical 2 test-only import: the contract is a dev dependency of the SDK
+// (never a runtime one — see types.ts for why SDK source never imports it),
+// used here purely to prove the SDK's real serialised output parses under
+// the same schema the ingest API enforces.
+import { ingestPayloadSchema } from '@query-analyser/contract';
 
 let mongod: MongoMemoryServer;
 
@@ -25,7 +31,18 @@ afterEach(async () => { await shutdown(); });
 function capture() {
   const bodies: string[] = [];
   const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-    bodies.push(typeof init?.body === 'string' ? init.body : String(init?.body));
+    // The transport gzips bodies over 1KB (see transport.ts) — recursing
+    // into pipeline/filter arrays (Important 6) makes samples bigger, so a
+    // multi-item payload can now cross that threshold where it didn't
+    // before. Decode it the same way a real ingest server would.
+    const isGzipped = (init?.headers as Record<string, string> | undefined)?.['Content-Encoding'] === 'gzip';
+    const body = init?.body;
+    if (isGzipped && body) {
+      const buf = Buffer.isBuffer(body) ? body : Buffer.from(body as unknown as Uint8Array);
+      bodies.push(gunzipSync(buf).toString('utf8'));
+    } else {
+      bodies.push(typeof body === 'string' ? body : String(body));
+    }
     return new Response('{}', { status: 202 });
   }) as unknown as typeof fetch;
   return { bodies, fetchImpl };
@@ -194,23 +211,54 @@ describe('end to end', () => {
     const body = bodies.join('');
     expect(body).not.toContain('agg-secret-note-4242');
     expect(body).not.toContain('sort-secret@example.com');
-    // For an aggregate, redact() collapses the whole pipeline to a type
-    // summary ("<array[object]>") rather than a per-key token — pipelines
-    // are arbitrary and only their stage *names* ($match, $sort) are
-    // analysed, so no field name from inside a stage is expected to survive
-    // either. That's confirmed here, not assumed: the stage names are
-    // still present (what the SDK does analyse)…
+    // Important 6: redact() now recurses into the pipeline's stages instead
+    // of collapsing the whole array to a type summary, so field *names*
+    // inside a stage ($match's "note", $sort's "region") ARE now part of the
+    // sample — same as any other filter/sort key, by the same "keys are
+    // transmitted by design" rule documented in the README. What must never
+    // appear is the field *value*, already asserted above.
     expect(body).toContain('$match');
     expect(body).toContain('$sort');
-    // …and neither is the pipeline's field name, proving redact() doesn't
-    // leak structure it wasn't asked to keep.
-    expect(body).not.toContain('"note"');
-    expect(body).not.toContain('"region"');
+    expect(body).toContain('"note"');
+    expect(body).toContain('"region"');
     // The find().sort() form DOES keep key names (filterShape/sortKeys are
     // computed for non-aggregate ops), so this is where key-name retention
     // is actually proven for a sorted query.
     expect(body).toContain('email');
     expect(body).toContain('rank');
+  });
+
+  // Critical 2: the real bug — the SDK could accept and emit options its
+  // own wire contract rejects (thresholdMs: 0, an empty NODE_ENV, a
+  // maxSignatures above the items cap), each causing the ingest API to 400,
+  // which transport.ts classifies as "drop the batch": silent, permanent
+  // data loss. This is the test that would have caught all of it: real
+  // queries, the real serialised request body, parsed against the actual
+  // contract schema the ingest API enforces.
+  it('produces a request body that ingestPayloadSchema accepts, for a find, an aggregate and an update in one payload, with thresholdMs: 0', async () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = ''; // the exact empty-string case Critical 2 fixed
+    try {
+      const Combo = mongoose.model(`IntCombo${suffix()}`, new mongoose.Schema({ status: String, region: String, amt: Number }));
+      const { bodies, fetchImpl } = capture();
+      const a = init({
+        apiKey: 'k', app: 'int-app', thresholdMs: 0, maxSignatures: 999_999, mongoose, fetchImpl,
+      });
+
+      await Combo.find({ status: 'paid' }).exec();
+      await Combo.aggregate([{ $match: { region: 'IN' } }, { $group: { _id: '$region', t: { $sum: '$amt' } } }]);
+      await Combo.updateMany({ status: 'paid' }, { $set: { region: 'US' } }).exec();
+      await a.flush();
+
+      expect(bodies).toHaveLength(1);
+      const parsed = JSON.parse(bodies[0]!);
+      expect(() => ingestPayloadSchema.parse(parsed)).not.toThrow();
+      expect(parsed.items.length).toBeGreaterThanOrEqual(2);
+      expect(parsed.env).toBe('development'); // empty NODE_ENV fell through to the default
+      expect(parsed.thresholdMs).toBe(0);
+    } finally {
+      process.env.NODE_ENV = prevNodeEnv;
+    }
   });
 
   it('does not break the query when the endpoint is dead', async () => {
