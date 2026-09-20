@@ -1,11 +1,28 @@
 {
-  "name": "@query-analyser/sdk",
+  "name": "@vivekumar08/query-analyser",
   "version": "0.1.0",
+  "description": "Find your slow MongoDB queries. One line of setup.",
+  "license": "MIT",
   "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "keywords": ["mongodb", "mongoose", "slow-query", "performance", "apm", "profiler"],
+  "publishConfig": { "access": "public" },
   "scripts": {
+    "build": "tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build": "tsup"
+    "prepublishOnly": "pnpm build && pnpm test"
   },
   "dependencies": {},
   "peerDependencies": { "mongoose": ">=8 <9" },
