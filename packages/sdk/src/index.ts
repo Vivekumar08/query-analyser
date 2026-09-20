@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { bucketOf } from '@query-analyser/contract/runtime';
 import type { IngestPayload } from '@query-analyser/contract/runtime';
 import { Aggregator } from './aggregator.js';
-import { installHooks, type MongooseSchemaLike, type HookContext } from './hooks.js';
+import { installHooks, INSTALLED, type MongooseSchemaLike, type HookContext, type GetHookContext } from './hooks.js';
 import { createTransport } from './transport.js';
 
 export const SDK_VERSION = '0.1.0';
@@ -42,6 +42,17 @@ type PreCompiledModel = {
  * confirmed with a bare mongoose repro for each — so both are rebuilt here
  * immediately after installHooks() mutates the schema of an
  * already-compiled model.
+ *
+ * Fix round 1, Important 3 (controller ruling): this depends on two pieces
+ * of undocumented mongoose internals — `schema.s.hooks` (a kareem instance,
+ * with a `.clone()` method) and `Model._applyQueryMiddleware` — whose shape
+ * has moved across major mongoose versions and is only verified here against
+ * 8.24.4. Every access below is guarded (`typeof === 'function'` /  optional
+ * chaining); if a future mongoose major changes this shape, the guards fail
+ * closed — the model is silently left uninstrumented rather than throwing.
+ * `peerDependencies.mongoose` in package.json is pinned to `>=8 <9`
+ * accordingly; do not widen it without re-verifying this function against
+ * the new major.
  */
 function reapplyPreCompiledHooks(model: PreCompiledModel): void {
   model._applyQueryMiddleware?.();
@@ -190,22 +201,43 @@ export function init(options: InitOptions): Analyser {
     const mgState = mg as MongooseWithState;
     // This init() call is now "current" for any model compiled from here on.
     mgState[CURRENT_CTX] = ctx;
+    // Fix round 1, Important 2: a single resolver, shared by both the
+    // future-models plugin and the already-compiled-models loop below,
+    // read at QUERY TIME by the installed pre/post closures (see
+    // GetHookContext in hooks.ts) rather than captured once at install
+    // time. That is what makes a model instrumented in an earlier
+    // init()/shutdown() cycle automatically start (and, on shutdown, stop)
+    // routing to whichever analyser is current, instead of leaking into a
+    // dead one forever.
+    const getCurrentCtx: GetHookContext = () => mgState[CURRENT_CTX] ?? null;
+
     // Future models — register the plugin function itself only once ever
     // for this mongoose instance; see the CURRENT_CTX comment above for why.
     if (!mgState[PLUGIN_REGISTERED]) {
       mgState[PLUGIN_REGISTERED] = true;
-      mg.plugin((schema) => {
-        const liveCtx = mgState[CURRENT_CTX];
-        if (liveCtx) installHooks(schema, liveCtx);
-      });
+      mg.plugin((schema) => { installHooks(schema, getCurrentCtx); });
     }
     // Models already compiled before init ran — without this, setup is
     // order-dependent and the one-line promise is false. See
     // reapplyPreCompiledHooks() above for why installHooks() alone is not
     // enough for a model that already existed.
+    //
+    // Fix round 1, Important 1 (live probe): a schema shared by two models
+    // (discriminators, or two `mongoose.model()` calls given the same
+    // Schema instance) is the SAME object — `installHooks` marks it
+    // INSTALLED while processing the first model, so it returns `false`
+    // for the second. The second model's own middleware snapshot (taken at
+    // ITS `Model.compile()`, before the shared schema was ever mutated) was
+    // never rebuilt, leaving it silently uninstrumented. Installing on the
+    // schema (idempotent, gated by the schema's own INSTALLED symbol) and
+    // reapplying on the model (once per model, whenever ITS schema ends up
+    // instrumented — whether by this call or an earlier one) are now two
+    // independent steps.
     for (const name of Object.keys(mg.models)) {
       const model = mg.models[name]! as unknown as PreCompiledModel;
-      if (installHooks(model.schema, ctx)) {
+      installHooks(model.schema, getCurrentCtx);
+      const marked = model.schema as unknown as { [INSTALLED]?: boolean };
+      if (marked[INSTALLED]) {
         installedModels++;
         reapplyPreCompiledHooks(model);
       }

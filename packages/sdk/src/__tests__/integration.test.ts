@@ -114,6 +114,105 @@ describe('end to end', () => {
     expect(body).toContain('pin');
   });
 
+  // Fix round 1, Important 1 (live probe against mongoose 8.24.4): two
+  // models compiled from the SAME schema instance (discriminators, or a
+  // shared base schema) are a realistic case. `installHooks` marks the
+  // schema INSTALLED while processing the first model, so it used to
+  // return `false` for the second — and since the pre-init loop only
+  // rebuilt a model's own middleware snapshot when installHooks() returned
+  // `true` for THAT model, the second model's snapshot (taken at its own
+  // Model.compile(), before the shared schema was ever mutated) was never
+  // rebuilt, leaving it silently uninstrumented.
+  it('instruments every model when two models share one schema', async () => {
+    const sharedSchema = new mongoose.Schema({ a: String });
+    const s = suffix();
+    const ShareA = mongoose.model(`ShareA${s}`, sharedSchema);
+    const ShareB = mongoose.model(`ShareB${s}`, sharedSchema);
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+
+    await ShareA.find({ a: 'x' }).exec();
+    await ShareB.find({ a: 'y' }).exec();
+    await a.flush();
+
+    const models = JSON.parse(bodies[0]!).items.map((i: { model: string }) => i.model);
+    expect(models).toContain(ShareA.modelName);
+    expect(models).toContain(ShareB.modelName);
+  });
+
+  // Fix round 1, Important 2 (live probe against mongoose 8.24.4): the
+  // pre/post closures installed on a model's schema used to capture the
+  // `HookContext` object directly, so a model instrumented during one
+  // init() cycle kept reporting into that cycle's aggregator/transport
+  // forever, even across shutdown() + a brand new init() — under-reporting
+  // to the new analyser and leaking the old one's aggregator indefinitely.
+  it('routes a pre-existing model to the new analyser after shutdown() + init()', async () => {
+    const Model = mongoose.model(`IntReinit${suffix()}`, new mongoose.Schema({ a: String }));
+    const first = capture();
+    const a1 = init({ apiKey: 'k1', app: 'int-app-1', thresholdMs: 0, mongoose, fetchImpl: first.fetchImpl });
+
+    await Model.find({ a: 'x' }).exec();
+    await a1.flush();
+    expect(first.fetchImpl).toHaveBeenCalledTimes(1);
+
+    await shutdown();
+
+    const second = capture();
+    const a2 = init({ apiKey: 'k2', app: 'int-app-2', thresholdMs: 0, mongoose, fetchImpl: second.fetchImpl });
+
+    await Model.find({ a: 'y' }).exec();
+    await a2.flush();
+
+    expect(second.fetchImpl).toHaveBeenCalledTimes(1);
+    // The first (now-dead) analyser must never be called again.
+    expect(first.fetchImpl).toHaveBeenCalledTimes(1);
+    const sentToSecond = JSON.parse(second.bodies[0]!);
+    expect(sentToSecond.app).toBe('int-app-2');
+    expect(sentToSecond.items).toHaveLength(1);
+  });
+
+  // Fix round 1, Important 4: the original privacy test only exercised
+  // find()/updateMany() filter and update values. The product's central
+  // promise — no queried value ever leaves the process — has to hold for
+  // every query form the SDK instruments, so this proves it for an
+  // aggregate pipeline (a secret inside a $match stage, alongside a $sort
+  // stage) and for a find().sort() call, all against the real serialised
+  // request bodies.
+  it('never puts a queried value in the payload for aggregate pipelines or sorted finds either', async () => {
+    const SecretAgg = mongoose.model(`IntSecretAgg${suffix()}`, new mongoose.Schema({ region: String, note: String }));
+    const SecretSort = mongoose.model(`IntSecretSort${suffix()}`, new mongoose.Schema({ email: String, rank: Number }));
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+
+    await SecretAgg.aggregate([
+      { $match: { note: 'agg-secret-note-4242' } },
+      { $sort: { region: -1 } },
+    ]);
+    await SecretSort.find({ email: 'sort-secret@example.com' }).sort({ rank: -1 }).exec();
+    await a.flush();
+
+    const body = bodies.join('');
+    expect(body).not.toContain('agg-secret-note-4242');
+    expect(body).not.toContain('sort-secret@example.com');
+    // For an aggregate, redact() collapses the whole pipeline to a type
+    // summary ("<array[object]>") rather than a per-key token — pipelines
+    // are arbitrary and only their stage *names* ($match, $sort) are
+    // analysed, so no field name from inside a stage is expected to survive
+    // either. That's confirmed here, not assumed: the stage names are
+    // still present (what the SDK does analyse)…
+    expect(body).toContain('$match');
+    expect(body).toContain('$sort');
+    // …and neither is the pipeline's field name, proving redact() doesn't
+    // leak structure it wasn't asked to keep.
+    expect(body).not.toContain('"note"');
+    expect(body).not.toContain('"region"');
+    // The find().sort() form DOES keep key names (filterShape/sortKeys are
+    // computed for non-aggregate ops), so this is where key-name retention
+    // is actually proven for a sorted query.
+    expect(body).toContain('email');
+    expect(body).toContain('rank');
+  });
+
   it('does not break the query when the endpoint is dead', async () => {
     const Live = mongoose.model(`IntLive${suffix()}`, new mongoose.Schema({ a: String }));
     const fetchImpl = (() => Promise.reject(new Error('ECONNREFUSED'))) as unknown as typeof fetch;

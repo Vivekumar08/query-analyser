@@ -8,7 +8,7 @@
     "build": "tsup"
   },
   "dependencies": {},
-  "peerDependencies": { "mongoose": ">=6 <9" },
+  "peerDependencies": { "mongoose": ">=8 <9" },
   "devDependencies": {
     "@query-analyser/contract": "workspace:*",
     "@types/node": "^22.0.0",
