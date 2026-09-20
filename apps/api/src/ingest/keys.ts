@@ -24,7 +24,15 @@ interface CacheEntry { value: ResolvedKey | null; expiresAt: number }
 export class KeyResolver {
   private cache = new Map<string, CacheEntry>();
 
-  constructor(private readonly prisma: PrismaClient, private readonly ttlMs = 60_000) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly ttlMs = 60_000,
+    private readonly maxEntries = 10_000,
+  ) {}
+
+  get size(): number {
+    return this.cache.size;
+  }
 
   async resolve(key: string): Promise<ResolvedKey | null> {
     if (!key.startsWith(PREFIX)) return null;
@@ -41,6 +49,10 @@ export class KeyResolver {
       ? { keyId: row.id, appId: row.app.id, orgId: row.app.orgId, suspended: row.app.org.suspendedAt !== null }
       : null;
 
+    if (!this.cache.has(hash) && this.cache.size >= this.maxEntries) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) this.cache.delete(oldestKey);
+    }
     this.cache.set(hash, { value, expiresAt: Date.now() + this.ttlMs });
     return value;
   }
