@@ -337,8 +337,11 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
+
+// Prisma 7.10 REJECTS `url` here (P1012, verified against the real CLI — the
+// upgrade guide is wrong on this). The connection string reaches the CLI
+// through prisma.config.ts and the runtime through the PrismaPg adapter.
 
 enum Role {
   OWNER
