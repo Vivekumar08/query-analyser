@@ -1,10 +1,42 @@
 import { describe, it, expect, vi } from 'vitest';
 import mongoose from 'mongoose';
-import { installHooks } from './hooks.js';
+import { installHooks, type MongooseSchemaLike } from './hooks.js';
 import { Aggregator } from './aggregator.js';
 
-function ctx(threshold = 0) {
-  return { aggregator: new Aggregator(100), thresholdMs: threshold, onError: vi.fn() };
+function ctx(threshold = 0, isDisabled: () => boolean = () => false) {
+  return { aggregator: new Aggregator(100), thresholdMs: threshold, onError: vi.fn(), isDisabled };
+}
+
+type RecordedFns = {
+  pre?: (this: unknown, next: () => void) => void;
+  post?: (this: unknown, res: unknown, next: () => void) => void;
+};
+
+function fakeSchemaRecording(recorded: RecordedFns): MongooseSchemaLike {
+  const schema: MongooseSchemaLike = {
+    pre(_match, fn) {
+      recorded.pre = fn;
+      return schema;
+    },
+    post(_match, fn) {
+      recorded.post = fn;
+      return schema;
+    },
+  };
+  return schema;
+}
+
+function fakeQuery() {
+  return {
+    op: 'find',
+    _model: { modelName: 'Fake' },
+    getQuery: () => ({ a: 1 }),
+  } as {
+    _qaStart?: number;
+    op: string;
+    _model: { modelName: string };
+    getQuery: () => unknown;
+  };
 }
 
 describe('installHooks', () => {
@@ -25,30 +57,10 @@ describe('installHooks', () => {
       throw new Error('boom');
     });
 
-    const recorded: { pre?: (this: unknown, next: () => void) => void; post?: (this: unknown, res: unknown, next: () => void) => void } = {};
-    const fakeSchema = {
-      pre(_match: RegExp | string, fn: (this: unknown, next: () => void) => void) {
-        recorded.pre = fn;
-        return fakeSchema;
-      },
-      post(_match: RegExp | string, fn: (this: unknown, res: unknown, next: () => void) => void) {
-        recorded.post = fn;
-        return fakeSchema;
-      },
-    };
+    const recorded: RecordedFns = {};
+    installHooks(fakeSchemaRecording(recorded), c);
 
-    installHooks(fakeSchema, c);
-
-    const fakeThis: {
-      _qaStart?: number;
-      op: string;
-      _model: { modelName: string };
-      getQuery: () => unknown;
-    } = {
-      op: 'find',
-      _model: { modelName: 'Fake' },
-      getQuery: () => ({ a: 1 }),
-    };
+    const fakeThis = fakeQuery();
 
     const preNext = vi.fn();
     recorded.pre!.call(fakeThis, preNext);
@@ -64,5 +76,29 @@ describe('installHooks', () => {
     expect(postNext).toHaveBeenCalledTimes(1);
     expect(c.onError).toHaveBeenCalledTimes(1);
     expect((c.onError.mock.calls[0]![0] as Error).message).toBe('boom');
+  });
+
+  // Fix round 1, Important 2: once the transport latch trips (401/403), the
+  // hot path must stop touching the aggregator entirely, not just stop
+  // flushing.
+  it('skips the aggregator entirely once disabled', () => {
+    const c = ctx(0, () => true);
+    const addSpy = vi.spyOn(c.aggregator, 'add');
+
+    const recorded: RecordedFns = {};
+    installHooks(fakeSchemaRecording(recorded), c);
+
+    const fakeThis = fakeQuery();
+
+    const preNext = vi.fn();
+    recorded.pre!.call(fakeThis, preNext);
+    fakeThis._qaStart = (fakeThis._qaStart as number) - 5;
+
+    const postNext = vi.fn();
+    recorded.post!.call(fakeThis, {}, postNext);
+
+    expect(addSpy).not.toHaveBeenCalled();
+    expect(postNext).toHaveBeenCalledTimes(1);
+    expect(c.onError).not.toHaveBeenCalled();
   });
 });

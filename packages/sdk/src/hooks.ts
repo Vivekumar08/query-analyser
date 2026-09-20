@@ -10,6 +10,7 @@ export interface HookContext {
   aggregator: Aggregator;
   thresholdMs: number;
   onError: (e: Error) => void;
+  isDisabled: () => boolean;
 }
 
 /** Minimal structural type so the SDK never imports mongoose at runtime. */
@@ -48,6 +49,7 @@ export function installHooks(schema: MongooseSchemaLike, ctx: HookContext): bool
   const post = function (this: unknown, _res: unknown, next: () => void) {
     const self = this as TimedQuery;
     try {
+      if (ctx.isDisabled()) return next();
       if (self._qaStart == null) return next();
       const duration = Date.now() - self._qaStart;
       if (duration <= ctx.thresholdMs) return next();
