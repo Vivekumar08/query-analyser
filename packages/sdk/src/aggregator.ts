@@ -1,4 +1,4 @@
-import type { IngestItem } from '@query-analyser/contract/runtime';
+import type { IngestItem } from './types.js';
 import { HIST_SIZE } from '@query-analyser/contract/runtime';
 import { addToHist, newHist } from './histogram.js';
 import type { SignatureResult } from './signature.js';

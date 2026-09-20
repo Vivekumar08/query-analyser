@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { FilterShapeItem, OpClass, SortKey } from '@query-analyser/contract/runtime';
+import type { FilterShapeItem, OpClass, SortKey } from './types.js';
 
 const MAX_SIGNATURE_LEN = 400;
 const MAX_KEYS = 64;

@@ -1,7 +1,7 @@
 import { hostname } from 'node:os';
 import { createRequire } from 'node:module';
 import { bucketOf } from '@query-analyser/contract/runtime';
-import type { IngestPayload } from '@query-analyser/contract/runtime';
+import type { IngestPayload } from './types.js';
 import { Aggregator } from './aggregator.js';
 import { installHooks, INSTALLED, type MongooseSchemaLike, type HookContext, type GetHookContext } from './hooks.js';
 import { createTransport } from './transport.js';
