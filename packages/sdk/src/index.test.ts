@@ -13,7 +13,13 @@ const okFetch = () => Promise.resolve(new Response('{}', { status: 202 }));
  * aggregator directly, since there is no live mongoose connection here to
  * produce it via real queries.
  */
-type Seedable = { _aggregator: { add(sig: SignatureResult, ms: number, sample: unknown): void; size: number } };
+type Seedable = {
+  _aggregator: {
+    add(sig: SignatureResult, ms: number, sample: unknown): void;
+    swap(): { items: unknown[]; dropped: number };
+    size: number;
+  };
+};
 
 function seed(a: ReturnType<typeof init>, key = 'x'): SignatureResult {
   const sig = buildSignature({ model: 'M', operation: 'find', filter: { [key]: 1 } });
@@ -198,6 +204,34 @@ describe('init', () => {
       .join('\n');
     expect(allBodies).toContain(sigA.hash);
     expect(allBodies).toContain(sigB.hash);
+  });
+
+  // Fix round 3: transport.send() never rejects, but a future edit (or
+  // swap()/bucketOf()/hostname() misbehaving) could throw inside doFlush.
+  // Since flush() is called fire-and-forget from the interval tick and
+  // beforeExit, an unhandled rejection there would crash the host process —
+  // the SDK must swallow it instead.
+  it('never rejects when something inside flush throws, and recovers afterward', async () => {
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError });
+    seed(a);
+
+    const seedable = a as unknown as Seedable;
+    const realSwap = seedable._aggregator.swap.bind(seedable._aggregator);
+    seedable._aggregator.swap = () => { throw new Error('swap boom'); };
+
+    await expect(a.flush()).resolves.toBeUndefined();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]![0] as Error).message).toBe('swap boom');
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    // Restore swap and seed again; a later flush must work normally,
+    // proving `inFlight` was cleared by the failed attempt.
+    seedable._aggregator.swap = realSwap;
+    seed(a);
+    await a.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   // Fix round 1, Minor: a second init() with a different apiKey/app reuses
