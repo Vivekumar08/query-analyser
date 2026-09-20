@@ -253,4 +253,123 @@ describe('init', () => {
     const a2 = init({ apiKey: '', app: 'x', mongoose, fetchImpl: okFetch });
     expect(a2).toBe(a1);
   });
+
+  // Fix round 4, Critical 1: init()'s mongoose-instrumentation block reaches
+  // into internals (`mg.models`, `schema.pre`, kareem's shape) that are not
+  // guaranteed stable. A `models` getter that throws must never crash the
+  // host's boot file.
+  it('never throws when mongoose.models is a throwing getter, and still returns a usable Analyser', () => {
+    const onError = vi.fn();
+    const fakeMongoose = {
+      plugin: () => {},
+      get models(): never {
+        throw new Error('models getter boom');
+      },
+    };
+    let a: ReturnType<typeof init> | undefined;
+    expect(() => {
+      a = init({ apiKey: 'k', app: 'x', mongoose: fakeMongoose as unknown as Parameters<typeof init>[0]['mongoose'], fetchImpl: okFetch, onError });
+    }).not.toThrow();
+    expect(a).toBeDefined();
+    expect(a!.installedModels).toBe(0);
+    expect(onError).toHaveBeenCalled();
+  });
+
+  // Fix round 4, Critical 1: one bad model's schema (throws in pre()) must
+  // not stop the other models in the same mongoose instance from being
+  // instrumented.
+  it('instruments the other models when one model schema throws during install', () => {
+    const onError = vi.fn();
+    function makeSchema(shouldThrow: boolean) {
+      return {
+        pre(_match: unknown, _fn: unknown) {
+          if (shouldThrow) throw new Error('schema.pre boom');
+          return this;
+        },
+        post(_match: unknown, _fn: unknown) {
+          return this;
+        },
+      };
+    }
+    const fakeMongoose = {
+      plugin: () => {},
+      models: {
+        First: { schema: makeSchema(false) },
+        Middle: { schema: makeSchema(true) },
+        Last: { schema: makeSchema(false) },
+      },
+    };
+    const a = init({
+      apiKey: 'k', app: 'x',
+      mongoose: fakeMongoose as unknown as Parameters<typeof init>[0]['mongoose'],
+      fetchImpl: okFetch, onError,
+    });
+    expect(a.installedModels).toBe(2);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]![0] as Error).message).toBe('schema.pre boom');
+  });
+
+  // Important 4: mongoose was resolved and has models, but the install loop
+  // instrumented none of them — a silent "the SDK does nothing" failure
+  // worth its own explicit warning, distinct from any per-model error.
+  it('warns once when mongoose is resolved but zero models end up instrumented', () => {
+    const onError = vi.fn();
+    function throwingSchema() {
+      return {
+        pre() { throw new Error('always throws'); },
+        post() { return this; },
+      };
+    }
+    const fakeMongoose = {
+      plugin: () => {},
+      models: { A: { schema: throwingSchema() }, B: { schema: throwingSchema() } },
+    };
+    const a = init({
+      apiKey: 'k', app: 'x',
+      mongoose: fakeMongoose as unknown as Parameters<typeof init>[0]['mongoose'],
+      fetchImpl: okFetch, onError,
+    });
+    expect(a.installedModels).toBe(0);
+    // Two per-model errors, plus one "zero models instrumented" summary.
+    expect(onError).toHaveBeenCalledTimes(3);
+    expect(onError.mock.calls.some((c) => (c[0] as Error).message.includes('no models were instrumented'))).toBe(true);
+  });
+
+  // Important 3: calling the returned analyser's own shutdown() — the
+  // natural call for a TS user — must clear module-level state exactly like
+  // the module-level shutdown() does, so a later init() gets a fresh, live
+  // instance instead of the same dead one.
+  it('instance.shutdown() clears module state so a later init() returns a new live instance', async () => {
+    mongoose.model(`ShutdownReinit_${Date.now()}`, new mongoose.Schema({ a: String }));
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch });
+    await a.shutdown();
+
+    const fetchImpl = vi.fn(okFetch);
+    const b = init({ apiKey: 'k2', app: 'y', mongoose, fetchImpl });
+    expect(b).not.toBe(a);
+    expect(b.installedModels).toBeGreaterThan(0);
+
+    // A second init() call with the SAME identity as `b` just returns `b`
+    // (by design — see "returns the existing instance" tests above), which
+    // is itself proof `b` is the genuinely live, current instance and not
+    // another orphan left behind by a botched shutdown.
+    const c = init({ apiKey: 'k2', app: 'y', mongoose, fetchImpl: vi.fn(okFetch) });
+    expect(c).toBe(b);
+
+    seed(b);
+    await b.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  // Minor fix 7: SDK_VERSION must never drift from package.json's version —
+  // it's wired at build/test time via tsup's/vitest's `define`, not
+  // hand-typed.
+  it('SDK_VERSION matches package.json', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const pkgPath = fileURLToPath(new URL('../package.json', import.meta.url));
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string };
+    const { SDK_VERSION } = await import('./index.js');
+    expect(SDK_VERSION).toBe(pkg.version);
+  });
 });

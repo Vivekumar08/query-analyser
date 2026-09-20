@@ -37,10 +37,38 @@ describe('redact', () => {
     });
   });
 
-  it('summarises arrays by element type without keeping length-dependent data', () => {
+  it('summarises scalar arrays by element type without keeping length-dependent data', () => {
     expect(redact(['a', 'b', 'c'])).toBe('<array[string]>');
     expect(redact([1, 'a'])).toBe('<array[mixed]>');
     expect(redact([])).toBe('<array[]>');
+  });
+
+  // Important 6: an array of OBJECTS (an aggregate pipeline, a $or clause)
+  // used to collapse to a useless '<array[object]>' token. It now recurses
+  // into each element, keeping keys and redacting values, same as any
+  // other object — this is what makes the dashboard sample useful for
+  // aggregates and $or/$in filters.
+  it('recurses into arrays of objects instead of collapsing them to a token', () => {
+    expect(redact({ $or: [{ status: 'paid' }, { total: { $gte: 5 } }] })).toEqual({
+      $or: [{ status: '<string>' }, { total: { $gte: '<number>' } }],
+    });
+  });
+
+  it('bounds array recursion to the first 8 elements', () => {
+    const arr = Array.from({ length: 20 }, (_, i) => ({ n: i }));
+    const result = redact(arr) as unknown[];
+    expect(result).toHaveLength(9); // 8 elements + '<truncated>'
+    expect(result[8]).toBe('<truncated>');
+    expect(result[0]).toEqual({ n: '<number>' });
+  });
+
+  it('respects the depth limit when recursing into arrays', () => {
+    const deep = { a: { b: { c: { d: [{ e: 'secret' }] } } } };
+    const result = redact(deep) as Record<string, unknown>;
+    // depth: a=1, b=2, c=3, d(array)=4 >= MAX_DEPTH(5)? d is at depth 4,
+    // still under the limit, so it recurses one more level into the array's
+    // object element, which then hits the depth ceiling.
+    expect(JSON.stringify(result)).not.toContain('secret');
   });
 
   it('truncates beyond the depth limit rather than recursing forever', () => {
@@ -146,10 +174,14 @@ describe('redact', () => {
         throw new Error('hostile element');
       },
     });
+    // A throwing element can't be proven scalar, so isAllScalar() falls back
+    // to structural recursion (the safer default) rather than the collapsed
+    // token — the array is redacted element-by-element instead of as a
+    // whole. Either way it must never throw and never leak anything.
     expect(() => redact([hostileProxy, 1])).not.toThrow();
     const result = redact([hostileProxy, 1]);
-    expect(typeof result).toBe('string');
-    expect(result).toMatch(/^<array\[/);
+    expect(Array.isArray(result)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain('hostile');
   });
 
   it('transmits keys by design', () => {

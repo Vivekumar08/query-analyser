@@ -36,7 +36,10 @@ export const ingestPayloadSchema = z.object({
   host: z.string().max(200),
   sdkVersion: z.string().max(40),
   bucket: z.string().regex(/^\d{10}$/),
-  thresholdMs: z.number().int().positive(),
+  // Fix round 4, Critical 2: `thresholdMs: 0` ("capture every query") is a
+  // legitimate, SDK-accepted debugging setting — the schema, not the SDK,
+  // was wrong to reject it with `.positive()`.
+  thresholdMs: z.number().int().nonnegative(),
   dropped: z.number().int().nonnegative(),
   items: z.array(ingestItemSchema).max(5000),
 });

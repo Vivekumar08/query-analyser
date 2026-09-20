@@ -1,5 +1,12 @@
 const MAX_DEPTH = 5;
 const MAX_KEYS = 32;
+// Important 6: an aggregate's `pipeline` and a `$or`/`$in`-shaped filter are
+// both arrays of objects. Collapsing every array to a bare type token made
+// the dashboard sample for those queries useless (`{"pipeline":
+// "<array[object]>"}`). Recursing a bounded number of elements keeps that
+// promise (still tokens, still never a value) while making the structure
+// spec §4 asks for ("redaction applies to pipeline stages") actually show up.
+const MAX_ARRAY_ELEMENTS = 8;
 
 function scalarToken(v: unknown): string | null {
   if (v === null) return '<null>';
@@ -44,6 +51,45 @@ function arrayToken(arr: unknown[]): string {
   return kinds.size === 1 ? `<array[${[...kinds][0]}]>` : '<array[mixed]>';
 }
 
+/** true only if every one of the first 16 sampled elements is a scalar. */
+function isAllScalar(arr: unknown[]): boolean {
+  const sampleSize = Math.min(arr.length, 16);
+  for (let i = 0; i < sampleSize; i++) {
+    try {
+      if (scalarToken(arr[i]) === null) return false;
+    } catch {
+      // Can't prove it's a scalar — fall back to structural recursion,
+      // the safer default, rather than the collapsed token.
+      return false;
+    }
+  }
+  return true;
+}
+
+// Important 6: arrays of scalars (`['a','b','c']`) keep the old collapse —
+// there is no per-key structure to preserve there. Arrays of objects
+// (aggregate pipeline stages, `$or`/`$in` filter clauses) recurse into a
+// bounded number of elements instead, redacting each one exactly like any
+// other object — every existing privacy guarantee (never throws, values
+// become tokens, depth is still bounded) applies per element.
+function redactArray(arr: unknown[], depth: number, seen: WeakSet<object>): unknown {
+  if (arr.length === 0) return '<array[]>';
+  if (isAllScalar(arr)) return arrayToken(arr);
+  if (depth >= MAX_DEPTH) return '<array>';
+
+  const limit = Math.min(arr.length, MAX_ARRAY_ELEMENTS);
+  const out: unknown[] = [];
+  for (let i = 0; i < limit; i++) {
+    try {
+      out.push(redact(arr[i], depth + 1, seen));
+    } catch {
+      out.push('<error>');
+    }
+  }
+  if (arr.length > limit) out.push('<truncated>');
+  return out;
+}
+
 /**
  * Replace every leaf value with a token naming its type, keeping only the
  * structure and the keys. No input value can appear in the output.
@@ -58,7 +104,7 @@ export function redact(value: unknown, depth = 0, seen = new WeakSet<object>()):
   }
   if (scalar !== null) return scalar;
 
-  if (Array.isArray(value)) return arrayToken(value);
+  if (Array.isArray(value)) return redactArray(value, depth, seen);
 
   const obj = value as Record<string, unknown>;
   if (seen.has(obj)) return '<circular>';
