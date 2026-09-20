@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { gunzipSync } from 'node:zlib';
 import { createTransport } from './transport.js';
-import type { IngestPayload } from '@query-analyser/contract/runtime';
+import type { IngestPayload } from './types.js';
 
 const payload: IngestPayload = {
   app: 'test-app', env: 'test', host: 'h', sdkVersion: '0.1.0',

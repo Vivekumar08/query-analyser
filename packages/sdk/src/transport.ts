@@ -1,5 +1,5 @@
 import { gzipSync } from 'node:zlib';
-import type { IngestPayload } from '@query-analyser/contract/runtime';
+import type { IngestPayload } from './types.js';
 
 export type SendResult =
   | { status: 'ok' }

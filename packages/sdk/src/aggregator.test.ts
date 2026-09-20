@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import type { IngestItem } from '@query-analyser/contract/runtime';
+import type { IngestItem } from './types.js';
 import type { SignatureResult } from './signature.js';
 import { Aggregator } from './aggregator.js';
 import { buildSignature } from './signature.js';
