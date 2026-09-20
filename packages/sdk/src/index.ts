@@ -128,27 +128,37 @@ export function init(options: InitOptions): Analyser {
   }
 
   const doFlush = async (): Promise<void> => {
-    const { items, dropped } = aggregator.swap();
-    if (items.length === 0 && dropped === 0) return;
+    // Fix round 3: transport.send() never rejects, but swap()/bucketOf()/
+    // hostname() — or a future edit — theoretically could. flush() is
+    // called fire-and-forget (`void flush()`) from the interval tick and
+    // beforeExit, so an unhandled rejection here would, by default since
+    // Node 15, crash the host process. The SDK's contract is that it never
+    // takes the host down, so every failure must resolve, not reject.
+    try {
+      const { items, dropped } = aggregator.swap();
+      if (items.length === 0 && dropped === 0) return;
 
-    const payload: IngestPayload = {
-      app: options.app,
-      env: options.env ?? process.env.NODE_ENV ?? 'development',
-      host: hostname(),
-      sdkVersion: SDK_VERSION,
-      bucket: bucketOf(new Date()),
-      thresholdMs,
-      dropped,
-      items,
-    };
+      const payload: IngestPayload = {
+        app: options.app,
+        env: options.env ?? process.env.NODE_ENV ?? 'development',
+        host: hostname(),
+        sdkVersion: SDK_VERSION,
+        bucket: bucketOf(new Date()),
+        thresholdMs,
+        dropped,
+        items,
+      };
 
-    const result = await transport.send(payload);
-    if (result.status === 'retry') {
-      backoffUntil = Date.now() + result.afterMs;
-      aggregator.merge(items);
-    } else if (result.status === 'disabled') {
-      disabled = true;
-      onError(new Error(result.reason));
+      const result = await transport.send(payload);
+      if (result.status === 'retry') {
+        backoffUntil = Date.now() + result.afterMs;
+        aggregator.merge(items);
+      } else if (result.status === 'disabled') {
+        disabled = true;
+        onError(new Error(result.reason));
+      }
+    } catch (err) {
+      onError(err instanceof Error ? err : new Error(String(err)));
     }
   };
 
