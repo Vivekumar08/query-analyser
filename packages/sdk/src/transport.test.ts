@@ -83,4 +83,61 @@ describe('transport', () => {
     expect(await t.send(payload)).toMatchObject({ status: 'retry' });
     expect(onError).toHaveBeenCalledWith(expect.any(Error));
   });
+
+  it('returns ok and reports when payload cannot be serialized (e.g. BigInt)', async () => {
+    const fetchImpl = vi.fn(ok);
+    const onError = vi.fn();
+    const badPayload: IngestPayload = {
+      ...payload,
+      items: [{
+        ...payload.items[0]!,
+        sample: { n: 10n },
+      }],
+    };
+    const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl, onError });
+    const result = await t.send(badPayload);
+    expect(result).toEqual({ status: 'ok' });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]![0]!.message).toMatch(/serialize|JSON/);
+  });
+
+  it('handles 429 without Retry-After header', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response('slow down', {
+      status: 429,
+    })));
+    const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl });
+    expect(await t.send(payload)).toEqual({ status: 'retry', afterMs: 5000 });
+  });
+
+  it('ignores HTTP-date form Retry-After on 429', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response('slow down', {
+      status: 429, headers: { 'Retry-After': 'Wed, 21 Oct 2026 07:28:00 GMT' },
+    })));
+    const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl });
+    expect(await t.send(payload)).toEqual({ status: 'retry', afterMs: 5000 });
+  });
+
+  it('times out and retries with error reporting', async () => {
+    const fetchImpl = vi.fn((url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_, reject) => {
+      (init?.signal as AbortSignal).addEventListener('abort', () => {
+        const err = Object.assign(new Error('aborted'), { name: 'AbortError' });
+        reject(err);
+      });
+    }));
+    const onError = vi.fn();
+    const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl, timeoutMs: 10, onError });
+    const result = await t.send(payload);
+    expect(result).toEqual({ status: 'retry', afterMs: 5000 });
+    expect(onError).toHaveBeenCalledWith(expect.any(Error));
+    expect(onError.mock.calls[0]![0]!.message).toMatch(/timed out after 10ms/);
+  });
+
+  it('does not reject when onError throws', async () => {
+    const fetchImpl = vi.fn(() => Promise.reject(new Error('ECONNREFUSED')));
+    const onError = vi.fn(() => { throw new Error('oops'); });
+    const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl, onError });
+    const result = await t.send(payload);
+    expect(result).toEqual({ status: 'retry', afterMs: 5000 });
+    expect(onError).toHaveBeenCalled();
+  });
 });
