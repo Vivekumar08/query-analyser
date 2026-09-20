@@ -1,9 +1,33 @@
 import { describe, it, expect } from 'vitest';
+import type { IngestItem } from '@query-analyser/contract/runtime';
+import type { SignatureResult } from './signature.js';
 import { Aggregator } from './aggregator.js';
 import { buildSignature } from './signature.js';
+import { newHist, addToHist } from './histogram.js';
 
 const sigA = buildSignature({ model: 'Order', operation: 'find', filter: { status: 'paid' } });
 const sigB = buildSignature({ model: 'User', operation: 'findOne', filter: { email: 'x' } });
+
+function buildItem(sig: SignatureResult): IngestItem {
+  const hist = newHist();
+  addToHist(hist, 120);
+  return {
+    signature: sig.signature,
+    hash: sig.hash,
+    model: sig.model,
+    operation: sig.operation,
+    filterShape: sig.filterShape,
+    sortKeys: sig.sortKeys,
+    stages: sig.stages,
+    count: 1,
+    totalMs: 120,
+    maxMs: 120,
+    lastMs: 120,
+    lastTs: Date.now(),
+    hist,
+    sample: null,
+  };
+}
 
 describe('Aggregator', () => {
   it('folds repeated occurrences of one signature into a single item', () => {
@@ -81,11 +105,25 @@ describe('Aggregator', () => {
     expect(items[0]!.hist[2]).toBe(1);
   });
 
-  it('refuses to merge past the cap rather than growing without bound', () => {
+  it('refuses to merge an unseen signature past the cap and counts the drop', () => {
     const agg = new Aggregator(1);
-    agg.add(sigA, 120, null);
-    agg.merge([{ ...agg.swap().items[0]!, hash: 'ffffffffffffffff' }]);
-    agg.add(sigA, 120, null);
-    expect(agg.size).toBeLessThanOrEqual(1);
+    agg.add(sigA, 120, null);                         // buffer is now at cap (1)
+    const foreign = { ...buildItem(sigB), hash: 'ffffffffffffffff' };
+    agg.merge([foreign]);                             // unseen hash, buffer full → must drop
+    expect(agg.size).toBe(1);
+    const { items, dropped } = agg.swap();
+    expect(items[0]!.hash).toBe(sigA.hash);
+    expect(dropped).toBe(1);
+  });
+
+  it('still folds a known signature when merging at cap', () => {
+    const agg = new Aggregator(1);
+    agg.add(sigA, 120, null);                         // buffer is now at cap (1)
+    const sameHash = { ...buildItem(sigA), hash: sigA.hash };
+    agg.merge([sameHash]);                            // known hash → must fold in, no drop
+    expect(agg.size).toBe(1);
+    const { items, dropped } = agg.swap();
+    expect(items[0]!.count).toBe(2);                  // 1 from add + 1 from merge
+    expect(dropped).toBe(0);
   });
 });
