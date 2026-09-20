@@ -106,7 +106,13 @@ export function init(options: InitOptions): Analyser {
   const ctx = { aggregator, thresholdMs, onError, isDisabled: () => disabled };
   let installedModels = 0;
   let backoffUntil = 0;
-  let flushing = false;
+  // Fix round 2: was a boolean `flushing` guard. That made a timer-driven
+  // flush and a shutdown()-driven flush mutually exclusive but not joined —
+  // shutdown() could resolve while the real network call from an in-flight
+  // flush was still pending, dropping the last window on process.exit().
+  // Tracking the in-flight promise lets every caller (timer, shutdown, a
+  // customer's own flush()) await the SAME send instead of one bailing out.
+  let inFlight: Promise<void> | null = null;
 
   const mg = resolveMongoose(options.mongoose);
   if (!mg) {
@@ -121,39 +127,41 @@ export function init(options: InitOptions): Analyser {
     }
   }
 
-  const flush = async (): Promise<void> => {
-    if (disabled || Date.now() < backoffUntil) return;
-    // Important fix 1: setInterval doesn't await flush(), so a send() slower
-    // than flushIntervalMs could otherwise let two flushes overlap, each
-    // swap()ing the buffer concurrently. Guard against that.
-    if (flushing) return;
-    flushing = true;
-    try {
-      const { items, dropped } = aggregator.swap();
-      if (items.length === 0 && dropped === 0) return;
+  const doFlush = async (): Promise<void> => {
+    const { items, dropped } = aggregator.swap();
+    if (items.length === 0 && dropped === 0) return;
 
-      const payload: IngestPayload = {
-        app: options.app,
-        env: options.env ?? process.env.NODE_ENV ?? 'development',
-        host: hostname(),
-        sdkVersion: SDK_VERSION,
-        bucket: bucketOf(new Date()),
-        thresholdMs,
-        dropped,
-        items,
-      };
+    const payload: IngestPayload = {
+      app: options.app,
+      env: options.env ?? process.env.NODE_ENV ?? 'development',
+      host: hostname(),
+      sdkVersion: SDK_VERSION,
+      bucket: bucketOf(new Date()),
+      thresholdMs,
+      dropped,
+      items,
+    };
 
-      const result = await transport.send(payload);
-      if (result.status === 'retry') {
-        backoffUntil = Date.now() + result.afterMs;
-        aggregator.merge(items);
-      } else if (result.status === 'disabled') {
-        disabled = true;
-        onError(new Error(result.reason));
-      }
-    } finally {
-      flushing = false;
+    const result = await transport.send(payload);
+    if (result.status === 'retry') {
+      backoffUntil = Date.now() + result.afterMs;
+      aggregator.merge(items);
+    } else if (result.status === 'disabled') {
+      disabled = true;
+      onError(new Error(result.reason));
     }
+  };
+
+  // setInterval doesn't await flush(), so a send() slower than
+  // flushIntervalMs could otherwise let two flushes overlap, each swap()ing
+  // the buffer concurrently. A single shared in-flight promise means a
+  // second caller (the timer, shutdown(), or a customer calling flush()
+  // directly) joins the same send instead of racing it or silently no-oping.
+  const flush = (): Promise<void> => {
+    if (disabled || Date.now() < backoffUntil) return Promise.resolve();
+    if (inFlight) return inFlight;
+    inFlight = doFlush().finally(() => { inFlight = null; });
+    return inFlight;
   };
 
   const timer = setInterval(() => { void flush(); }, flushIntervalMs);
@@ -174,6 +182,17 @@ export function init(options: InitOptions): Analyser {
     async shutdown() {
       clearInterval(timer);
       process.off('beforeExit', onExit);
+      // Fix round 2: the first await joins whatever flush is already in
+      // flight (started by the timer or a caller) rather than racing past
+      // it — shutdown() must not resolve while a real send is still
+      // pending, or a customer doing `await shutdown(); process.exit(0)`
+      // would exit mid-send and drop the last window. The second await
+      // drains anything that arrived (via the post hook, or a test seam)
+      // while that first flush was in flight, since swap() only takes what
+      // existed at the moment it ran. backoffUntil is reset before each
+      // await so a retry() from either flush doesn't suppress the drain.
+      backoffUntil = 0;
+      await flush();
       backoffUntil = 0;
       await flush();
     },
