@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { bucketOf } from '@query-analyser/contract/runtime';
 import type { IngestPayload } from '@query-analyser/contract/runtime';
 import { Aggregator } from './aggregator.js';
-import { installHooks, type MongooseSchemaLike } from './hooks.js';
+import { installHooks, type MongooseSchemaLike, type HookContext } from './hooks.js';
 import { createTransport } from './transport.js';
 
 export const SDK_VERSION = '0.1.0';
@@ -11,7 +11,44 @@ const DEFAULT_ENDPOINT = 'https://ingest.query-analyser.dev/v1/ingest';
 
 export interface MongooseLike {
   plugin(fn: (schema: MongooseSchemaLike) => void): unknown;
-  models: Record<string, { schema: MongooseSchemaLike }>;
+  models: Record<string, { schema: MongooseSchemaLike; _applyQueryMiddleware?: () => void }>;
+}
+
+// Structural shape of the internal bits of a compiled mongoose Model/Schema
+// that `reapplyPreCompiledHooks` below needs to touch. Not part of the
+// public MongooseLike surface — reached into only for models that existed
+// before init() ran, and guarded with `typeof === 'function'`/optional
+// chaining everywhere so an unexpected mongoose internals shape degrades to
+// "leave this model alone" instead of throwing.
+type PreCompiledModel = {
+  schema: MongooseSchemaLike & { s?: { hooks?: { clone?: () => unknown } } };
+  _applyQueryMiddleware?: () => void;
+  hooks?: unknown;
+};
+
+/**
+ * Bug found by the real-mongoose integration test: mongoose takes TWO
+ * separate snapshots of a schema's middleware at Model.compile() time, and
+ * neither updates on its own once new hooks are added to the schema
+ * afterwards (which is exactly what installHooks() does for a model that
+ * was compiled before init() ran):
+ *
+ *  - `Model._applyQueryMiddleware()` filters `schema.s.hooks` into
+ *    `Query.prototype._queryMiddleware`, read by find/update/delete/etc.
+ *  - `model.hooks = schema.s.hooks.clone()` is a separate clone read by
+ *    `Model.aggregate()`.
+ *
+ * Both are re-derivable from the schema's live hook list after the fact —
+ * confirmed with a bare mongoose repro for each — so both are rebuilt here
+ * immediately after installHooks() mutates the schema of an
+ * already-compiled model.
+ */
+function reapplyPreCompiledHooks(model: PreCompiledModel): void {
+  model._applyQueryMiddleware?.();
+  const clone = model.schema.s?.hooks?.clone;
+  if (typeof clone === 'function') {
+    model.hooks = clone.call(model.schema.s!.hooks);
+  }
 }
 
 export interface InitOptions {
@@ -44,6 +81,38 @@ type InternalAnalyser = Analyser & { _stop(): void; _aggregator: Aggregator };
 
 let active: InternalAnalyser | null = null;
 let activeOptions: { apiKey: string; app: string } | null = null;
+
+// Bug found by the real-mongoose integration test: `mg.plugin(fn)` registers
+// `fn` on mongoose PERMANENTLY — mongoose has no way to unregister a global
+// plugin. The original code called `mg.plugin((schema) => installHooks(schema,
+// ctx))` fresh inside every init() call, closing over that call's `ctx`. In a
+// test suite (or any process that calls shutdown() then init() again — a
+// config reload, a hot-reloaded dev server) this means every `init()` call
+// after the first adds ANOTHER permanent plugin, all still registered. When a
+// later model compiles, mongoose runs every registered plugin against its
+// schema in registration order; `installHooks` short-circuits on the
+// `INSTALLED` schema symbol, so only the FIRST-ever-registered plugin's
+// closure — bound to the FIRST init() call's (long-dead) aggregator and
+// transport — ever actually attaches hooks. Every query on every model
+// created after the first `init()` call silently reported to a discarded
+// analyser instead of the current one, so subsequent flush() calls saw
+// nothing. Confirmed with a bare mongoose repro: a second `mongoose.plugin()`
+// call never fires its callback for a schema an earlier-registered plugin
+// already marked installed.
+//
+// Fix: register the mongoose-level plugin function exactly ONCE per mongoose
+// instance (marked with a symbol, mirroring the per-schema INSTALLED guard),
+// and have that single, permanent plugin dispatch to whichever ctx is
+// "current" at the moment a schema is compiled, via a mutable holder that
+// each init() call overwrites. Models compiled while no analyser is active
+// (holder empty) are simply left uninstrumented, same as before.
+const CURRENT_CTX = Symbol.for('query-analyser.current-ctx');
+const PLUGIN_REGISTERED = Symbol.for('query-analyser.plugin-registered');
+
+type MongooseWithState = MongooseLike & {
+  [CURRENT_CTX]?: HookContext;
+  [PLUGIN_REGISTERED]?: boolean;
+};
 
 // Controller Ruling A: the brief's original body referenced module.require,
 // which is undefined in the ESM build Task 10's bundler emits — silent
@@ -118,12 +187,28 @@ export function init(options: InitOptions): Analyser {
   if (!mg) {
     onError(new Error('mongoose could not be resolved — pass it as init({ mongoose })'));
   } else {
-    // Future models.
-    mg.plugin((schema) => { installHooks(schema, ctx); });
+    const mgState = mg as MongooseWithState;
+    // This init() call is now "current" for any model compiled from here on.
+    mgState[CURRENT_CTX] = ctx;
+    // Future models — register the plugin function itself only once ever
+    // for this mongoose instance; see the CURRENT_CTX comment above for why.
+    if (!mgState[PLUGIN_REGISTERED]) {
+      mgState[PLUGIN_REGISTERED] = true;
+      mg.plugin((schema) => {
+        const liveCtx = mgState[CURRENT_CTX];
+        if (liveCtx) installHooks(schema, liveCtx);
+      });
+    }
     // Models already compiled before init ran — without this, setup is
-    // order-dependent and the one-line promise is false.
+    // order-dependent and the one-line promise is false. See
+    // reapplyPreCompiledHooks() above for why installHooks() alone is not
+    // enough for a model that already existed.
     for (const name of Object.keys(mg.models)) {
-      if (installHooks(mg.models[name]!.schema, ctx)) installedModels++;
+      const model = mg.models[name]! as unknown as PreCompiledModel;
+      if (installHooks(model.schema, ctx)) {
+        installedModels++;
+        reapplyPreCompiledHooks(model);
+      }
     }
   }
 
@@ -205,6 +290,13 @@ export function init(options: InitOptions): Analyser {
       await flush();
       backoffUntil = 0;
       await flush();
+      // Stop instrumenting any model compiled after shutdown — the plugin
+      // function itself stays registered forever (mongoose can't unregister
+      // it), but it becomes a no-op once nothing is "current". Guarded so a
+      // shutdown() racing a newer init() never clobbers the newer ctx.
+      if (mg && (mg as MongooseWithState)[CURRENT_CTX] === ctx) {
+        delete (mg as MongooseWithState)[CURRENT_CTX];
+      }
     },
     _stop() { clearInterval(timer); },
     _aggregator: aggregator,

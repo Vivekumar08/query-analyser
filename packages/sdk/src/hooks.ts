@@ -30,8 +30,16 @@ type TimedQuery = {
   pipeline?: () => unknown[];
 };
 
+// Bug found by the real-mongoose integration test: `q.model` on a mongoose
+// Query is the Model *constructor itself* (a function), not a getter to
+// call — mongoose Models can legally be invoked without `new` to build a
+// bare document, so treating `typeof q.model === 'function'` as "call it to
+// get the model" silently built a throwaway document with no `modelName`
+// and produced `model: 'unknown'` for every real query. Read `.modelName`
+// directly off whichever of `_model` (set on Aggregate) or `model` (set on
+// Query) is present instead of ever invoking it.
 function modelNameOf(q: TimedQuery): string {
-  const m = q._model ?? (typeof q.model === 'function' ? (q.model as () => unknown)() : q.model);
+  const m = q._model ?? q.model;
   return (m as { modelName?: string } | undefined)?.modelName ?? 'unknown';
 }
 
@@ -52,7 +60,16 @@ export function installHooks(schema: MongooseSchemaLike, ctx: HookContext): bool
       if (ctx.isDisabled()) return next();
       if (self._qaStart == null) return next();
       const duration = Date.now() - self._qaStart;
-      if (duration <= ctx.thresholdMs) return next();
+      // Bug found by the real-mongoose integration test: `Date.now()` has
+      // millisecond granularity, so a query on an in-memory mongod
+      // frequently completes within the same millisecond it started in,
+      // measuring as a 0ms duration. With `thresholdMs: 0` (meaning "every
+      // query counts", per the integration tests) a strict `duration <=
+      // thresholdMs` skip silently dropped every 0ms-duration query even
+      // though 0 >= 0. A query at exactly the threshold is "at least this
+      // slow" and should count; only strictly-faster-than-threshold queries
+      // are skipped.
+      if (duration < ctx.thresholdMs) return next();
 
       const isAggregate = typeof self.pipeline === 'function';
       const pipeline = isAggregate ? self.pipeline!() : undefined;
