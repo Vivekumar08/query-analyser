@@ -42,8 +42,8 @@ function fakeQuery() {
 describe('installHooks', () => {
   it('installs only once per schema', () => {
     const schema = new mongoose.Schema({ a: String });
-    expect(installHooks(schema, ctx())).toBe(true);
-    expect(installHooks(schema, ctx())).toBe(false);
+    expect(installHooks(schema, () => ctx())).toBe(true);
+    expect(installHooks(schema, () => ctx())).toBe(false);
   });
 
   // Controller Ruling C: the brief's version runs a real query with no live
@@ -58,7 +58,7 @@ describe('installHooks', () => {
     });
 
     const recorded: RecordedFns = {};
-    installHooks(fakeSchemaRecording(recorded), c);
+    installHooks(fakeSchemaRecording(recorded), () => c);
 
     const fakeThis = fakeQuery();
 
@@ -86,7 +86,7 @@ describe('installHooks', () => {
     const addSpy = vi.spyOn(c.aggregator, 'add');
 
     const recorded: RecordedFns = {};
-    installHooks(fakeSchemaRecording(recorded), c);
+    installHooks(fakeSchemaRecording(recorded), () => c);
 
     const fakeThis = fakeQuery();
 

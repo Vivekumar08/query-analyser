@@ -2,7 +2,10 @@ import type { Aggregator } from './aggregator.js';
 import { buildSignature } from './signature.js';
 import { redact } from './redact.js';
 
-const INSTALLED = Symbol.for('query-analyser.installed');
+// Exported so index.ts can check "is this schema already instrumented?"
+// without re-deriving the same Symbol.for key in two places (fix round 1,
+// Important 1 — see reapplyPreCompiledHooks's caller in index.ts).
+export const INSTALLED = Symbol.for('query-analyser.installed');
 
 const QUERY_OPS = /^(find|findOne|findOneAnd|count|countDocuments|distinct|update|updateOne|updateMany|replaceOne|deleteOne|deleteMany)/;
 
@@ -43,7 +46,21 @@ function modelNameOf(q: TimedQuery): string {
   return (m as { modelName?: string } | undefined)?.modelName ?? 'unknown';
 }
 
-export function installHooks(schema: MongooseSchemaLike, ctx: HookContext): boolean {
+// Fix round 1, Important 2: `installHooks` used to take a concrete
+// `HookContext` object, captured directly by the pre/post closures below.
+// That was fine for models compiled while a plugin fires (the caller
+// re-resolved "current" before calling installHooks), but for a model
+// instrumented once and then left alone across a shutdown()+init() cycle,
+// the OLD ctx (its aggregator, its transport) stayed captured forever — a
+// live-verified leak: a model instrumented in cycle 1 kept silently
+// reporting into cycle 1's orphaned aggregator after cycle 2's init(),
+// under-reporting to the new analyser and leaking memory indefinitely.
+// Taking a resolver instead — called fresh on every query — means every
+// already-instrumented schema always routes to whatever context is
+// current *right now*, and to nothing (a clean no-op) when there is none.
+export type GetHookContext = () => HookContext | null;
+
+export function installHooks(schema: MongooseSchemaLike, getCtx: GetHookContext): boolean {
   const s = schema as MongooseSchemaLike & { [INSTALLED]?: boolean };
   if (s[INSTALLED]) return false;
   Object.defineProperty(s, INSTALLED, { value: true, enumerable: false });
@@ -56,6 +73,8 @@ export function installHooks(schema: MongooseSchemaLike, ctx: HookContext): bool
 
   const post = function (this: unknown, _res: unknown, next: () => void) {
     const self = this as TimedQuery;
+    const ctx = getCtx();
+    if (!ctx) return next();
     try {
       if (ctx.isDisabled()) return next();
       if (self._qaStart == null) return next();
