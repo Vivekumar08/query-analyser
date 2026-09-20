@@ -1,0 +1,185 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum AdviceStatus {
+  OPEN
+  APPLIED
+  DISMISSED
+}
+
+model User {
+  id              String         @id @default(uuid())
+  email           String         @unique
+  passwordHash    String
+  name            String
+  isPlatformAdmin Boolean        @default(false)
+  createdAt       DateTime       @default(now())
+  memberships     Membership[]
+  refreshTokens   RefreshToken[]
+}
+
+model Organization {
+  id          String       @id @default(uuid())
+  name        String
+  slug        String       @unique
+  plan        String       @default("free")
+  suspendedAt DateTime?
+  createdAt   DateTime     @default(now())
+  memberships Membership[]
+  apps        App[]
+  invites     Invite[]
+}
+
+model Membership {
+  id        String       @id @default(uuid())
+  userId    String
+  orgId     String
+  role      Role
+  createdAt DateTime     @default(now())
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+  @@index([orgId])
+}
+
+model Invite {
+  id         String       @id @default(uuid())
+  orgId      String
+  email      String
+  role       Role
+  tokenHash  String       @unique
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  createdAt  DateTime     @default(now())
+  org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  familyId   String
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([familyId])
+  @@index([userId])
+}
+
+model App {
+  id         String           @id @default(uuid())
+  orgId      String
+  name       String
+  env        String
+  createdAt  DateTime         @default(now())
+  org        Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  keys       IngestKey[]
+  signatures QuerySignature[]
+
+  @@unique([orgId, name, env])
+  @@index([orgId])
+}
+
+model IngestKey {
+  id         String    @id @default(uuid())
+  appId      String
+  keyHash    String    @unique
+  prefix     String
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  app        App       @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@index([appId])
+}
+
+model QuerySignature {
+  id             String        @id @default(uuid())
+  appId          String
+  hash           String
+  signature      String
+  model          String
+  operation      String
+  filterShape    Json
+  sortKeys       Json
+  stages         String[]
+  redactedSample Json?
+  firstSeen      DateTime      @default(now())
+  lastSeen       DateTime      @default(now())
+  app            App           @relation(fields: [appId], references: [id], onDelete: Cascade)
+  rollups        QueryRollup[]
+  dailyRollups   QueryDailyRollup[]
+  alerts         Alert[]
+  advice         Advice?
+
+  @@unique([appId, hash])
+  @@index([appId, lastSeen])
+}
+
+model QueryRollup {
+  id          String         @id @default(uuid())
+  signatureId String
+  bucketHour  DateTime
+  count       Int
+  totalMs     BigInt
+  maxMs       Int
+  hist        Int[]
+  signature   QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
+
+  @@unique([signatureId, bucketHour])
+  @@index([bucketHour])
+}
+
+model QueryDailyRollup {
+  id          String         @id @default(uuid())
+  signatureId String
+  day         DateTime
+  count       Int
+  totalMs     BigInt
+  maxMs       Int
+  hist        Int[]
+  signature   QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
+
+  @@unique([signatureId, day])
+  @@index([day])
+}
+
+model Alert {
+  id             String         @id @default(uuid())
+  signatureId    String
+  kind           String
+  detectedAt     DateTime       @default(now())
+  details        Json
+  acknowledgedAt DateTime?
+  signature      QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
+
+  @@index([signatureId, detectedAt])
+}
+
+model Advice {
+  id          String         @id @default(uuid())
+  signatureId String         @unique
+  suggestion  Json
+  rationale   String
+  status      AdviceStatus   @default(OPEN)
+  updatedAt   DateTime       @updatedAt
+  signature   QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
+}
