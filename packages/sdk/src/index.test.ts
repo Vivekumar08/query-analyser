@@ -73,9 +73,11 @@ describe('init', () => {
     expect(process.listenerCount('SIGTERM')).toBe(before);
   });
 
-  // Fix round 1, Important 1: setInterval doesn't await flush(), so a
-  // send() slower than flushIntervalMs could otherwise let two flushes
-  // overlap, each swap()ing the buffer concurrently.
+  // Fix round 1, Important 1 (updated in round 2): setInterval doesn't await
+  // flush(), so a send() slower than flushIntervalMs could otherwise let two
+  // flushes overlap, each swap()ing the buffer concurrently. The second
+  // caller now joins the same in-flight send rather than bailing out or
+  // racing it.
   it('never runs two flushes concurrently', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -88,8 +90,8 @@ describe('init', () => {
 
     const p1 = a.flush();
     const p2 = a.flush();
-    // Both calls have started, but the second must have bailed out via the
-    // in-flight guard before ever reaching the network.
+    // Both calls have started, but the second must have joined the
+    // in-flight promise rather than starting a second network call.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
 
     release();
@@ -133,6 +135,69 @@ describe('init', () => {
     const call = fetchImpl.mock.calls[0]!;
     const reqInit = call[1] as RequestInit;
     expect(String(reqInit.body)).toContain(sig.hash);
+  });
+
+  // Fix round 2: shutdown() must not resolve while a network send it
+  // triggered (or joined) is still pending — otherwise `await shutdown();
+  // process.exit(0)` would exit mid-send and drop the last window.
+  it('shutdown waits for an in-flight flush', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fetchImpl = vi.fn(async (_url: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) => {
+      await gate;
+      return new Response('{}', { status: 202 });
+    });
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl });
+    seed(a);
+
+    void a.flush(); // starts a real flush, in flight, awaiting the gate
+
+    let resolved = false;
+    const shutdownPromise = a.shutdown().then(() => { resolved = true; });
+
+    // Let pending microtasks run without releasing the gate; shutdown must
+    // still be pending because the in-flight send has not completed.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    release();
+    await shutdownPromise;
+
+    expect(resolved).toBe(true);
+    // shutdown's first await joined the in-flight send; nothing was left
+    // for a second network call.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  // Fix round 2: an item added to the aggregator while a flush is already
+  // in flight must not be lost — swap() only took what existed at the
+  // moment the in-flight flush started, so shutdown() must drain again
+  // after joining it.
+  it('shutdown drains items that arrived during an in-flight flush', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fetchImpl = vi.fn(async (_url: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) => {
+      await gate;
+      return new Response('{}', { status: 202 });
+    });
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl });
+    const sigA = seed(a, 'a-item');
+
+    void a.flush(); // swaps out item A, now in flight awaiting the gate
+
+    const sigB = seed(a, 'b-item'); // arrives while the first flush is in flight
+
+    release();
+    await a.shutdown();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const allBodies = fetchImpl.mock.calls
+      .map((call) => String((call[1] as RequestInit).body))
+      .join('\n');
+    expect(allBodies).toContain(sigA.hash);
+    expect(allBodies).toContain(sigB.hash);
   });
 
   // Fix round 1, Minor: a second init() with a different apiKey/app reuses
