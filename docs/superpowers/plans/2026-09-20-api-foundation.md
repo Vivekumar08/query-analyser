@@ -2434,9 +2434,17 @@ Expected: FAIL.
 In `apps/api/src/plugins/auth.ts` add after `authenticate`:
 ```ts
   app.decorate('requirePlatformAdmin', async (req: FastifyRequest, reply: FastifyReply) => {
-    await app.authenticate(req, reply);
-    if (reply.sent) return;
-    const u = await app.prisma.user.findUnique({ where: { id: req.user.id }, select: { isPlatformAdmin: true } });
+    // Verify the JWT here rather than delegating to `authenticate`: Fastify 5
+    // has no reliable "was a reply already sent" flag to branch on afterwards.
+    let userId: string;
+    try {
+      userId = (await req.jwtVerify<{ sub: string }>()).sub;
+    } catch {
+      await reply.code(401).send({ error: 'unauthorized' });
+      return;
+    }
+    req.user = { id: userId };
+    const u = await app.prisma.user.findUnique({ where: { id: userId }, select: { isPlatformAdmin: true } });
     if (!u?.isPlatformAdmin) await reply.code(404).send({ error: 'Not Found' });
   });
 ```
