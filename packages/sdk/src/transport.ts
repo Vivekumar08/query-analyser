@@ -28,22 +28,39 @@ export function createTransport(opts: TransportOptions): Transport {
 
   return {
     async send(payload) {
-      const json = JSON.stringify(payload);
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${opts.apiKey}`,
-      };
-
-      let body: string | Buffer = json;
-      if (Buffer.byteLength(json) > GZIP_THRESHOLD_BYTES) {
-        body = gzipSync(json);
-        headers['Content-Encoding'] = 'gzip';
-      }
-
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      let timer: NodeJS.Timeout | undefined;
 
       try {
+        // Serialize and compress; if this fails, the batch is unserviceable — drop it.
+        let json: string;
+        try {
+          json = JSON.stringify(payload);
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          report(error);
+          return { status: 'ok' };
+        }
+
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${opts.apiKey}`,
+        };
+
+        let body: string | Buffer = json;
+        if (Buffer.byteLength(json) > GZIP_THRESHOLD_BYTES) {
+          try {
+            body = gzipSync(json);
+          } catch (err) {
+            const error = err instanceof Error ? err : new Error(String(err));
+            report(error);
+            return { status: 'ok' };
+          }
+          headers['Content-Encoding'] = 'gzip';
+        }
+
+        const controller = new AbortController();
+        timer = setTimeout(() => controller.abort(), timeoutMs);
+
         const res = await doFetch(opts.endpoint, {
           method: 'POST', headers, body, signal: controller.signal,
         });
@@ -69,10 +86,15 @@ export function createTransport(opts: TransportOptions): Transport {
 
         return { status: 'retry', afterMs: DEFAULT_RETRY_MS };
       } catch (err) {
-        report(err instanceof Error ? err : new Error(String(err)));
+        const error = err instanceof Error ? err : new Error(String(err));
+        if (error.name === 'AbortError') {
+          report(new Error(`ingest request timed out after ${timeoutMs}ms`));
+        } else {
+          report(error);
+        }
         return { status: 'retry', afterMs: DEFAULT_RETRY_MS };
       } finally {
-        clearTimeout(timer);
+        if (timer !== undefined) clearTimeout(timer);
       }
     },
   };
