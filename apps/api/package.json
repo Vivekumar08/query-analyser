@@ -32,7 +32,10 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "@types/pg": "^8.11.10",
+    "@vivekumar08/query-analyser": "^0.1.0",
     "dotenv": "^16.4.7",
+    "mongodb-memory-server": "^10.1.2",
+    "mongoose": "^8.9.0",
     "prisma": "^7.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

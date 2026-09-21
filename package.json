@@ -12,5 +12,10 @@
     "turbo": "^2.3.3",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
+  },
+  "pnpm": {
+    "overrides": {
+      "@vivekumar08/query-analyser": "npm:@vivekumar08/query-analyser@0.1.0"
+    }
   }
 }
