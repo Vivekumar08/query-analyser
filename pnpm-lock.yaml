@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: false
   excludeLinksFromLockfile: false
 
+overrides:
+  '@vivekumar08/query-analyser': npm:@vivekumar08/query-analyser@0.1.0
+
 importers:
 
   .:
@@ -66,9 +69,18 @@ importers:
       '@types/pg':
         specifier: ^8.11.10
         version: 8.23.1
+      '@vivekumar08/query-analyser':
+        specifier: npm:@vivekumar08/query-analyser@0.1.0
+        version: 0.1.0(mongoose@8.24.4)
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1
+      mongodb-memory-server:
+        specifier: ^10.1.2
+        version: 10.4.3
+      mongoose:
+        specifier: ^8.9.0
+        version: 8.24.4
       prisma:
         specifier: ^7.10.0
         version: 7.10.0(@types/react@19.3.0)(typescript@5.9.3)
@@ -1066,6 +1078,12 @@ packages:
 
   '@vitest/utils@2.1.9':
     resolution: {integrity: sha512-v0psaMSkNJ3A2NMrUEHFRzJtDPFn+/VWZ5WxImB21T9fjucJRmS7xCS3ppEnARb9y11OAzaD+P2Ps+b+BGX5iQ==}
+
+  '@vivekumar08/query-analyser@0.1.0':
+    resolution: {integrity: sha512-0yDRhuFmVG4ZP/P+CO4P4sPNgl7Z/UTevapsOR+ubwGmbnzrzDPEvE02vP4xbr6/QVZsaUYk6Sm8tAYOBQKJig==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      mongoose: '>=8 <9'
 
   abort-controller@3.0.0:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
@@ -3059,6 +3077,10 @@ snapshots:
       '@vitest/pretty-format': 2.1.9
       loupe: 3.2.1
       tinyrainbow: 1.2.0
+
+  '@vivekumar08/query-analyser@0.1.0(mongoose@8.24.4)':
+    dependencies:
+      mongoose: 8.24.4
 
   abort-controller@3.0.0:
     dependencies:
