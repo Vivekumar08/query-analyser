@@ -108,6 +108,31 @@ describe('writeBatch', () => {
     expect(await writeBatch(prisma, app.id, payload([]))).toEqual({ signatures: 0, rollups: 0 });
   });
 
+  it('stores bucketHour as the exact UTC instant regardless of session timezone', async () => {
+    // Regression test for the timestamptz corruption bug: bucketHour was
+    // (and, defense-in-depth, the pool's session timezone still is) subject
+    // to a session-timezone-dependent conversion. This test must fail if
+    // that conversion is ever wrong again, independent of whatever timezone
+    // the connection happens to be in — so it reads the value back two
+    // ways: once through the driver, and once with an explicit
+    // `AT TIME ZONE 'UTC'` cast in raw SQL, and requires both to agree with
+    // the expected instant.
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, payload([item()], '2026092014'));
+
+    const sig = await prisma.querySignature.findFirstOrThrow({ where: { appId: app.id } });
+    const roll = await prisma.queryRollup.findFirstOrThrow({ where: { signatureId: sig.id } });
+    const expected = new Date('2026-09-20T14:00:00.000Z');
+    expect(roll.bucketHour.getTime()).toBe(expected.getTime());
+
+    const rows = await prisma.$queryRaw<{ bucketHourUtc: Date }[]>`
+      SELECT "bucketHour" AT TIME ZONE 'UTC' AS "bucketHourUtc"
+      FROM "QueryRollup"
+      WHERE id = ${roll.id}
+    `;
+    expect(rows[0]?.bucketHourUtc.getTime()).toBe(expected.getTime());
+  });
+
   it('rejects a hist array that is not exactly 8 elements at the database level', async () => {
     const app = await seedApp();
     // The contract's zod schema (`hist.length(HIST_SIZE)`) is the normal

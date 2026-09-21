@@ -26,7 +26,7 @@ model User {
   passwordHash    String
   name            String
   isPlatformAdmin Boolean        @default(false)
-  createdAt       DateTime       @default(now())
+  createdAt       DateTime       @default(now()) @db.Timestamptz(3)
   memberships     Membership[]
   refreshTokens   RefreshToken[]
 }
@@ -36,8 +36,8 @@ model Organization {
   name        String
   slug        String       @unique
   plan        String       @default("free")
-  suspendedAt DateTime?
-  createdAt   DateTime     @default(now())
+  suspendedAt DateTime?    @db.Timestamptz(3)
+  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
   memberships Membership[]
   apps        App[]
   invites     Invite[]
@@ -48,7 +48,7 @@ model Membership {
   userId    String
   orgId     String
   role      Role
-  createdAt DateTime     @default(now())
+  createdAt DateTime     @default(now()) @db.Timestamptz(3)
   user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
@@ -62,9 +62,9 @@ model Invite {
   email      String
   role       Role
   tokenHash  String       @unique
-  expiresAt  DateTime
-  acceptedAt DateTime?
-  createdAt  DateTime     @default(now())
+  expiresAt  DateTime     @db.Timestamptz(3)
+  acceptedAt DateTime?    @db.Timestamptz(3)
+  createdAt  DateTime     @default(now()) @db.Timestamptz(3)
   org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@index([orgId])
@@ -75,9 +75,9 @@ model RefreshToken {
   userId     String
   familyId   String
   tokenHash  String    @unique
-  expiresAt  DateTime
-  consumedAt DateTime?
-  createdAt  DateTime  @default(now())
+  expiresAt  DateTime  @db.Timestamptz(3)
+  consumedAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
   user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([familyId])
@@ -89,7 +89,7 @@ model App {
   orgId      String
   name       String
   env        String
-  createdAt  DateTime         @default(now())
+  createdAt  DateTime         @default(now()) @db.Timestamptz(3)
   org        Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
   keys       IngestKey[]
   signatures QuerySignature[]
@@ -103,16 +103,16 @@ model IngestKey {
   appId      String
   keyHash    String    @unique
   prefix     String
-  lastUsedAt DateTime?
-  revokedAt  DateTime?
-  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime? @db.Timestamptz(3)
+  revokedAt  DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
   app        App       @relation(fields: [appId], references: [id], onDelete: Cascade)
 
   @@index([appId])
 }
 
 model QuerySignature {
-  id             String        @id @default(uuid())
+  id             String             @id @default(uuid())
   appId          String
   hash           String
   signature      String
@@ -122,9 +122,9 @@ model QuerySignature {
   sortKeys       Json
   stages         String[]
   redactedSample Json?
-  firstSeen      DateTime      @default(now())
-  lastSeen       DateTime      @default(now())
-  app            App           @relation(fields: [appId], references: [id], onDelete: Cascade)
+  firstSeen      DateTime           @default(now()) @db.Timestamptz(3)
+  lastSeen       DateTime           @default(now()) @db.Timestamptz(3)
+  app            App                @relation(fields: [appId], references: [id], onDelete: Cascade)
   rollups        QueryRollup[]
   dailyRollups   QueryDailyRollup[]
   alerts         Alert[]
@@ -137,7 +137,7 @@ model QuerySignature {
 model QueryRollup {
   id          String         @id @default(uuid())
   signatureId String
-  bucketHour  DateTime
+  bucketHour  DateTime       @db.Timestamptz(3)
   count       Int
   totalMs     BigInt
   maxMs       Int
@@ -151,7 +151,7 @@ model QueryRollup {
 model QueryDailyRollup {
   id          String         @id @default(uuid())
   signatureId String
-  day         DateTime
+  day         DateTime       @db.Timestamptz(3)
   count       Int
   totalMs     BigInt
   maxMs       Int
@@ -166,9 +166,9 @@ model Alert {
   id             String         @id @default(uuid())
   signatureId    String
   kind           String
-  detectedAt     DateTime       @default(now())
+  detectedAt     DateTime       @default(now()) @db.Timestamptz(3)
   details        Json
-  acknowledgedAt DateTime?
+  acknowledgedAt DateTime?      @db.Timestamptz(3)
   signature      QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
 
   @@index([signatureId, detectedAt])
@@ -180,6 +180,6 @@ model Advice {
   suggestion  Json
   rationale   String
   status      AdviceStatus   @default(OPEN)
-  updatedAt   DateTime       @updatedAt
+  updatedAt   DateTime       @updatedAt @db.Timestamptz(3)
   signature   QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
 }

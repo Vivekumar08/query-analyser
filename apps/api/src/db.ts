@@ -10,6 +10,13 @@ export function createPrisma(connectionString: string): PrismaClient {
   // timezone to UTC on every connection in the pool so raw-query timestamps
   // (e.g. bucketHour round-trips) and model DateTime fields are correct, not
   // just self-consistent.
+  //
+  // This is now belt-and-braces, not the only defence: every DateTime
+  // column in prisma/schema.prisma is `@db.Timestamptz(3)`, so the columns
+  // themselves store real instants and are immune to session-timezone drift
+  // even if a future connection (a transaction-mode pooler, a managed
+  // Postgres that resets session state, or code that opens its own
+  // connection) doesn't carry this option.
   const adapter = new PrismaPg({ connectionString, options: '-c timezone=UTC' });
   return new PrismaClient({ adapter });
 }
