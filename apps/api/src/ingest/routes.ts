@@ -4,13 +4,24 @@ import { writeBatch } from './writer.js';
 
 const SIGNATURE_QUOTA = 5000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+// A legitimate SDK instance flushes once per 10s (6 requests/min), so
+// 600/min supports ~100 instances sharing one egress IP (e.g. behind a
+// corporate NAT or a serverless platform's shared outbound IP) while still
+// bounding a single-source flood. The per-app signature quota (below) is
+// the control for authenticated abuse; this is only the pre-auth backstop.
+const DEFAULT_RATE_LIMIT_MAX = 600;
 
-export async function ingestRoutes(app: FastifyInstance): Promise<void> {
+export interface IngestRoutesOptions {
+  rateLimitMax?: number;
+}
+
+export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptions = {}): Promise<void> {
+  const rateLimitMax = opts.rateLimitMax ?? DEFAULT_RATE_LIMIT_MAX;
   app.post(
     '/v1/ingest',
     {
       bodyLimit: MAX_BODY_BYTES,
-      config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+      config: { rateLimit: { max: rateLimitMax, timeWindow: '1 minute' } },
     },
     async (req, reply) => {
       const auth = req.headers.authorization ?? '';

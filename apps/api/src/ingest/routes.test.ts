@@ -59,9 +59,15 @@ describe('POST /v1/ingest', () => {
     expect(row.lastUsedAt).not.toBeNull();
   });
 
-  it('401s without a key, with a malformed key, and with an unknown key', async () => {
+  it('401s without a key', async () => {
     expect((await post(null, payload())).statusCode).toBe(401);
+  });
+
+  it('401s a malformed key', async () => {
     expect((await post('nope', payload())).statusCode).toBe(401);
+  });
+
+  it('401s an unknown key', async () => {
     expect((await post('qa_live_' + 'f'.repeat(32), payload())).statusCode).toBe(401);
   });
 
@@ -123,6 +129,12 @@ describe('POST /v1/ingest', () => {
     expect((await post(key, huge)).statusCode).toBe(413);
   });
 
+  it('415s an unsupported content-encoding', async () => {
+    const { key } = await seedKey();
+    const res = await post(key, payload(1), { 'content-encoding': 'br' });
+    expect(res.statusCode).toBe(415);
+  });
+
   it('does not leak raw Postgres constraint text when writeBatch throws a database error', async () => {
     const { key } = await seedKey();
     const spy = vi.spyOn(writer, 'writeBatch').mockRejectedValueOnce(
@@ -137,5 +149,36 @@ describe('POST /v1/ingest', () => {
     expect(body).toEqual({ error: 'Internal Server Error' });
     expect(JSON.stringify(body)).not.toMatch(/constraint|QueryRollup|relation/i);
     spy.mockRestore();
+  });
+});
+
+describe('POST /v1/ingest — rate limiting', () => {
+  // The production default (600/min) is too slow to exercise directly in a
+  // test. `rateLimitMax` (a test-only BuildOptions field, never lowered in
+  // production — see app.ts) drives a dedicated app instance with a tiny
+  // window so we can prove the limiter actually engages, keyed on the
+  // request IP rather than on attacker-controlled request content.
+  let limitedApp: FastifyInstance;
+  beforeAll(async () => { limitedApp = await buildApp({ logger: false, rateLimitMax: 3 }); });
+  afterAll(async () => { await limitedApp.close(); });
+
+  it('429s a single source once it exceeds the per-minute limit, even when every request carries a fresh unknown key', async () => {
+    // Every request below uses a distinct, never-seen Authorization value.
+    // If the limiter were keyed on request content (the bug this fixes),
+    // each request would land in its own bucket and this would 401 forever
+    // without ever 429ing. Keying on `req.ip` (all `inject()` calls share
+    // one socket address) means the shared bucket fills regardless.
+    const statuses: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await limitedApp.inject({
+        method: 'POST', url: '/v1/ingest',
+        headers: { 'content-type': 'application/json', authorization: `Bearer qa_live_${i.toString().padStart(32, '0')}` },
+        payload: JSON.stringify(payload(1)),
+      });
+      statuses.push(res.statusCode);
+    }
+    expect(statuses.slice(0, 3)).toEqual([401, 401, 401]);
+    expect(statuses[3]).toBe(429);
   });
 });

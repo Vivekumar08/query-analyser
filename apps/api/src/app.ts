@@ -5,6 +5,12 @@ import { ingestRoutes } from './ingest/routes.js';
 export interface BuildOptions {
   logger?: boolean;
   config?: Config;
+  /**
+   * Per-IP requests/minute allowed on `POST /v1/ingest`. Defaults to 600 in
+   * production. Exposed here only so tests can drive a rate-limit 429
+   * without sending 600 real requests — never lower this in production.
+   */
+  rateLimitMax?: number;
 }
 
 /**
@@ -64,10 +70,17 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   });
   await app.register(import('@fastify/rate-limit'), {
     global: false,
-    keyGenerator: (req) => req.headers.authorization ?? req.ip,
+    // The bucket key must never be derived from request content: an
+    // attacker sending a fresh random `Authorization` header on every
+    // request would get a brand-new bucket each time, so the limiter would
+    // never engage — while every request still costs a KeyResolver.resolve
+    // DB round-trip on a novel hash before returning 401. `req.ip` is the
+    // only safe key (the socket address, or the real client address once a
+    // deployment sets TRUST_PROXY to resolve it behind a trusted proxy).
+    keyGenerator: (req) => req.ip,
   });
   await app.register(import('./plugins/prisma.js'));
-  await app.register(ingestRoutes);
+  await app.register(ingestRoutes, { rateLimitMax: opts.rateLimitMax });
 
   // Prisma returns BigInt for QueryRollup/QueryDailyRollup's `totalMs`
   // column, and JSON.stringify throws on a bare BigInt. Every route that
