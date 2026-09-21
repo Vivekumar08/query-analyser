@@ -46,6 +46,22 @@ describe('login', () => {
     expect(res.statusCode).toBe(401);
     expect(res.json()).toEqual({ error: 'invalid credentials' });
   });
+
+  it('takes comparable time for an unknown email and a wrong password (both pay argon2 cost)', async () => {
+    await signup();
+    const timeIt = async (fn: () => Promise<unknown>) => {
+      const start = performance.now();
+      await fn();
+      return performance.now() - start;
+    };
+    const unknownMs = await timeIt(() => login({ ...creds, email: 'ghost@x.io' }));
+    const wrongPasswordMs = await timeIt(() => login({ ...creds, password: 'nope-nope-nope' }));
+    const [faster, slower] = unknownMs < wrongPasswordMs ? [unknownMs, wrongPasswordMs] : [wrongPasswordMs, unknownMs];
+    // Loose tolerance: this only needs to catch a regression that skips
+    // argon2id entirely (which would be an order of magnitude faster), not
+    // measure precisely on a loaded/shared CI machine.
+    expect(faster).toBeGreaterThanOrEqual(slower * 0.5);
+  });
 });
 
 describe('me', () => {
@@ -86,6 +102,19 @@ describe('refresh', () => {
 
   it('401s with no cookie', async () => {
     expect((await app.inject({ method: 'POST', url: '/v1/auth/refresh' })).statusCode).toBe(401);
+  });
+
+  it('an expired token replay revokes the whole family', async () => {
+    const t0 = cookieOf(await signup());
+    const t1 = cookieOf(await app.inject({ method: 'POST', url: '/v1/auth/refresh', cookies: { qa_refresh: t0 } }));
+    // Force the still-live successor token to have already expired.
+    await app.prisma.refreshToken.updateMany({ where: { consumedAt: null }, data: { expiresAt: new Date(Date.now() - 1000) } });
+
+    const res = await app.inject({ method: 'POST', url: '/v1/auth/refresh', cookies: { qa_refresh: t1 } });
+    expect(res.statusCode).toBe(401);
+
+    const rows = await app.prisma.refreshToken.findMany();
+    expect(rows.every((r) => r.consumedAt !== null)).toBe(true);
   });
 });
 

@@ -20,7 +20,15 @@ export type RotateResult = { userId: string; token: string; expiresAt: Date } | 
  */
 export async function rotateRefreshToken(prisma: PrismaClient, token: string): Promise<RotateResult> {
   const row = await prisma.refreshToken.findUnique({ where: { tokenHash: hashToken(token) } });
-  if (!row || row.expiresAt < new Date()) return 'invalid';
+  if (!row) return 'invalid';
+
+  // An expired token being presented is as much an anomaly as a replayed
+  // one — revoke the whole family rather than silently accepting that this
+  // one token is merely stale.
+  if (row.expiresAt < new Date()) {
+    await prisma.refreshToken.updateMany({ where: { familyId: row.familyId, consumedAt: null }, data: { consumedAt: new Date() } });
+    return 'invalid';
+  }
 
   if (row.consumedAt) {
     await prisma.refreshToken.updateMany({ where: { familyId: row.familyId, consumedAt: null }, data: { consumedAt: new Date() } });
