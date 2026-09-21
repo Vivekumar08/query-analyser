@@ -1229,7 +1229,9 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 export async function ingestRoutes(app: FastifyInstance): Promise<void> {
   app.post('/v1/ingest', {
     bodyLimit: MAX_BODY_BYTES,
-    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+    // 600/min: a legit SDK instance flushes every 10s (6/min), so this allows
+    // ~100 instances behind one egress IP while still bounding a flood.
+    config: { rateLimit: { max: 600, timeWindow: '1 minute' } },
   }, async (req, reply) => {
     const auth = req.headers.authorization ?? '';
     const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
@@ -1276,7 +1278,10 @@ Modify `apps/api/src/app.ts` — after `app.decorate('config', config)` add:
   });
   await app.register(import('@fastify/rate-limit'), {
     global: false,
-    keyGenerator: (req) => req.headers.authorization ?? req.ip,
+    // NEVER key the bucket on request content: an attacker rotating fake
+    // bearer tokens would mint a fresh bucket per request and the limiter
+    // would never engage, while each request still costs a key lookup.
+    keyGenerator: (req) => req.ip,
   });
   await app.register(import('./plugins/prisma.js'));
   await app.register(ingestRoutes);
