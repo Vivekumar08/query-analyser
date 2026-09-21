@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyError } from 'fastify';
 import { loadConfig, type Config } from './config.js';
+import { ingestRoutes } from './ingest/routes.js';
 
 export interface BuildOptions {
   logger?: boolean;
@@ -42,6 +43,31 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   });
 
   app.decorate('config', config);
+
+  // Installed @fastify/compress (8.x) splits `global` into two independent
+  // flags — `globalCompression` and `globalDecompression` — each defaulting
+  // to `true` when `global` is unset. A bare `global: false` (as an older
+  // README/brief suggested) disables BOTH, which silently breaks gzip
+  // request bodies (Fastify's content-length check then fails because the
+  // body was never decompressed). We only want to turn off *response*
+  // compression, so we disable `globalCompression` and leave
+  // `globalDecompression` at its default (true) — request decompression
+  // still runs as an onRequest/preParsing hook on every route.
+  await app.register(import('@fastify/compress'), {
+    globalCompression: false,
+    requestEncodings: ['gzip', 'deflate'],
+    onUnsupportedRequestEncoding: (encoding) => {
+      const err = new Error(`unsupported content-encoding: ${encoding}`) as FastifyError;
+      err.statusCode = 415;
+      return err;
+    },
+  });
+  await app.register(import('@fastify/rate-limit'), {
+    global: false,
+    keyGenerator: (req) => req.headers.authorization ?? req.ip,
+  });
+  await app.register(import('./plugins/prisma.js'));
+  await app.register(ingestRoutes);
 
   // Prisma returns BigInt for QueryRollup/QueryDailyRollup's `totalMs`
   // column, and JSON.stringify throws on a bare BigInt. Every route that
