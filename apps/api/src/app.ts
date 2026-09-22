@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance, type FastifyError } from 'fastify';
 import { loadConfig, type Config } from './config.js';
 import { ingestRoutes } from './ingest/routes.js';
 import { authRoutes } from './auth/routes.js';
+import { orgRoutes } from './orgs/routes.js';
 
 export interface BuildOptions {
   logger?: boolean;
@@ -84,6 +85,7 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   await app.register(import('./plugins/auth.js'));
   await app.register(ingestRoutes, { rateLimitMax: opts.rateLimitMax });
   await app.register(authRoutes);
+  await app.register(orgRoutes);
 
   // Prisma returns BigInt for QueryRollup/QueryDailyRollup's `totalMs`
   // column, and JSON.stringify throws on a bare BigInt. Every route that
