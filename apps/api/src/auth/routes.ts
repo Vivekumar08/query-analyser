@@ -30,7 +30,11 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return accessToken;
   };
 
-  app.post('/v1/auth/signup', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+  // The limiter keys on IP only, so a shared egress address (an office, a
+  // university, CGNAT) must not get locked out by a normal team signing up
+  // together — 10/minute was tight enough to do that. 30/minute still
+  // blocks a scripted signup-spam run while giving real teams headroom.
+  app.post('/v1/auth/signup', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (req, reply) => {
     const parsed = signupSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body', issues: parsed.error.issues });
     const { email, password, name } = parsed.data;

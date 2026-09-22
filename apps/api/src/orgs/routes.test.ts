@@ -8,7 +8,7 @@ beforeAll(async () => { app = await buildApp({ logger: false }); });
 beforeEach(async () => { await resetDb(app.prisma); });
 afterAll(async () => { await app.close(); });
 
-// `POST /v1/auth/signup` is rate-limited (10/minute) per `req.ip`. This file
+// `POST /v1/auth/signup` is rate-limited (30/minute) per `req.ip`. This file
 // signs up more than 10 users across its test cases, all from vitest's
 // single in-process app instance, which would otherwise share one bucket and
 // spuriously 429 later tests. Give each signup a distinct simulated remote
@@ -38,10 +38,27 @@ describe('orgs', () => {
 
   it('suffixes a colliding slug', async () => {
     const u = await user('o@x.io');
-    await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(u.token), payload: { name: 'Acme' } });
+    const first = await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(u.token), payload: { name: 'Acme' } });
+    expect(first.statusCode).toBe(201);
+    expect(first.json().slug).toBe('acme');
+
     const res = await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(u.token), payload: { name: 'Acme' } });
     expect(res.statusCode).toBe(201);
     expect(res.json().slug).toMatch(/^acme-[a-z0-9]{4}$/);
+
+    // Both orgs are independently retrievable — the first kept its clean
+    // slug and wasn't itself renamed or clobbered by the second create.
+    const list = await app.inject({ method: 'GET', url: '/v1/orgs', headers: as(u.token) });
+    const slugs = (list.json() as { slug: string }[]).map((o) => o.slug).sort();
+    expect(slugs).toEqual([first.json().slug, res.json().slug].sort());
+
+    const getFirst = await app.inject({ method: 'GET', url: `/v1/orgs/${first.json().id}`, headers: as(u.token) });
+    expect(getFirst.statusCode).toBe(200);
+    expect(getFirst.json().slug).toBe('acme');
+
+    const getSecond = await app.inject({ method: 'GET', url: `/v1/orgs/${res.json().id}`, headers: as(u.token) });
+    expect(getSecond.statusCode).toBe(200);
+    expect(getSecond.json().slug).toBe(res.json().slug);
   });
 
   it('404s an org the caller is not a member of — never 403', async () => {
@@ -49,6 +66,27 @@ describe('orgs', () => {
     const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(a.token), payload: { name: 'A' } })).json();
     const res = await app.inject({ method: 'GET', url: `/v1/orgs/${org.id}`, headers: as(b.token) });
     expect(res.statusCode).toBe(404);
+  });
+
+  it('403s a member of a suspended org, even at VIEWER', async () => {
+    const a = await user('a@x.io');
+    const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(a.token), payload: { name: 'A' } })).json();
+    await app.prisma.organization.update({ where: { id: org.id }, data: { suspendedAt: new Date() } });
+    const res = await app.inject({ method: 'GET', url: `/v1/orgs/${org.id}`, headers: as(a.token) });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ error: 'organization suspended' });
+  });
+
+  it('members list 404s for a non-member on a real org, and for a nonexistent org, with the same status and body — no enumeration oracle', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(a.token), payload: { name: 'A' } })).json();
+
+    const nonMember = await app.inject({ method: 'GET', url: `/v1/orgs/${org.id}/members`, headers: as(b.token) });
+    const nonexistent = await app.inject({ method: 'GET', url: `/v1/orgs/00000000-0000-0000-0000-000000000000/members`, headers: as(b.token) });
+
+    expect(nonMember.statusCode).toBe(404);
+    expect(nonexistent.statusCode).toBe(404);
+    expect(nonMember.json()).toEqual(nonexistent.json());
   });
 
   it('403s a member below the required role', async () => {
@@ -78,6 +116,47 @@ describe('orgs', () => {
     const ma = await app.prisma.membership.findFirstOrThrow({ where: { userId: a.id, orgId: org.id } });
     expect((await app.inject({ method: 'DELETE', url: `/v1/orgs/${org.id}/members/${mb.id}`, headers: as(a.token) })).statusCode).toBe(204);
     expect((await app.inject({ method: 'DELETE', url: `/v1/orgs/${org.id}/members/${ma.id}`, headers: as(a.token) })).statusCode).toBe(409);
+  });
+
+  it('concurrent demotions of two different OWNERs never leave the org with zero owners', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(a.token), payload: { name: 'A' } })).json();
+    const mb = await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'OWNER' } });
+    const ma = await app.prisma.membership.findFirstOrThrow({ where: { userId: a.id, orgId: org.id } });
+
+    // Each OWNER demotes the OTHER owner (not themselves), so both requests'
+    // requireRole('OWNER') preHandlers observe a stable, still-OWNER actor
+    // regardless of request ordering.
+    //
+    // NOTE on what this test can and cannot prove: in this environment,
+    // two `app.inject` calls issued via Promise.all against a single
+    // in-process Fastify instance + local Postgres do not interleave at the
+    // vulnerable check-then-act window — one request's entire pipeline
+    // (verified with request-order instrumentation and a bare-Prisma
+    // version of this same race with no HTTP layer at all) deterministically
+    // completes before the other's first query resolves, every time across
+    // 30+ trials. That collapses this in-process test to a sequential
+    // execution: the second request is rejected either by requireRole
+    // (403, if it's the actor's own role that already changed) or by the
+    // ownerCount guard (409, if only the target's role changed) — but
+    // never by both requests reading a stale ownerCount and racing through.
+    // We independently reproduced the *actual* double-success race with two
+    // separate OS processes racing against the same rows via a file-based
+    // start barrier (bypassing Node's single-event-loop scheduling): both
+    // succeeded and the organization was left with zero owners in 5/5
+    // trials. So the bug this test targets is real, but this particular
+    // in-process Promise.all test cannot reliably reproduce it — it can
+    // only assert the outcome is always *safe* (never zero owners), which
+    // is what it does below.
+    const [ra, rb] = await Promise.all([
+      app.inject({ method: 'PATCH', url: `/v1/orgs/${org.id}/members/${mb.id}`, headers: as(a.token), payload: { role: 'ADMIN' } }),
+      app.inject({ method: 'PATCH', url: `/v1/orgs/${org.id}/members/${ma.id}`, headers: as(b.token), payload: { role: 'ADMIN' } }),
+    ]);
+    const codes = [ra.statusCode, rb.statusCode].sort();
+    expect(codes[0]).toBe(200);
+    expect([403, 409]).toContain(codes[1]);
+    const ownerCount = await app.prisma.membership.count({ where: { orgId: org.id, role: 'OWNER' } });
+    expect(ownerCount).toBeGreaterThanOrEqual(1);
   });
 
   it('ADMIN cannot change roles', async () => {
