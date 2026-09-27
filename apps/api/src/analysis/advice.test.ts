@@ -63,4 +63,14 @@ describe('adviceFor', () => {
     const r = adviceFor([{ key: 'status', op: 'eq' }], []);
     expect(r!.rationale).toMatch(/heuristic|never seen/i);
   });
+
+  it('excludes _id from equality fields when mixed with meaningful fields', () => {
+    const r = adviceFor([{ key: '_id', op: 'eq' }, { key: 'status', op: 'eq' }], []);
+    expect(Object.keys(r!.suggestion)).toEqual(['status']);
+  });
+
+  it('excludes _id from range fields when mixed with meaningful fields', () => {
+    const r = adviceFor([{ key: '_id', op: 'range' }, { key: 'status', op: 'eq' }], []);
+    expect(Object.keys(r!.suggestion)).toEqual(['status']);
+  });
 });
