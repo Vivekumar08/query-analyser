@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { resetDb } from '../test/db.js';
+import type { OpClass } from '@query-analyser/contract/runtime';
 
 // `vi.spyOn(compaction, 'compactDay')` cannot work here: Vitest cannot
 // redefine bindings on a native ES module namespace object, so the spy
@@ -27,9 +28,11 @@ let app: FastifyInstance;
 beforeEach(async () => {
   app = await buildApp();
   await resetDb(app.prisma);
-  vi.mocked(compaction.compactDay).mockClear();
-  vi.mocked(compaction.pruneHourly).mockClear();
-  vi.mocked(compaction.pruneDaily).mockClear();
+  // `mockReset` (not `mockClear`) so a `mockImplementation` set by one test
+  // can never leak into the next test's default behaviour.
+  vi.mocked(compaction.compactDay).mockReset().mockResolvedValue(0);
+  vi.mocked(compaction.pruneHourly).mockReset().mockResolvedValue(0);
+  vi.mocked(compaction.pruneDaily).mockReset().mockResolvedValue(0);
 });
 
 afterAll(async () => {
@@ -120,6 +123,87 @@ describe('runNightlyJobs', () => {
   });
 });
 
+/**
+ * Creates an org/app/signature with the given filter shape and sort keys,
+ * independent of any rollup data. Used to drive `refreshAdvice` through
+ * `runNightlyJobs`.
+ */
+async function seedSignature(
+  filterShape: { key: string; op: OpClass }[],
+  sortKeys: { key: string; dir: 1 | -1 }[],
+) {
+  const org = await app.prisma.organization.create({
+    data: { name: 'Advice Co', slug: `advice-${Date.now()}-${Math.random()}` },
+  });
+  const a = await app.prisma.app.create({
+    data: { orgId: org.id, name: 'advice', env: 'production' },
+  });
+  const sig = await app.prisma.querySignature.create({
+    data: {
+      appId: a.id,
+      hash: `h${Date.now()}${Math.random()}`.slice(0, 16).padEnd(16, '0'),
+      signature: 'advice.find({x})',
+      model: 'advice',
+      operation: 'find',
+      filterShape,
+      sortKeys,
+      stages: [],
+    },
+  });
+  return sig.id;
+}
+
+describe('refreshAdvice (via runNightlyJobs)', () => {
+  it('leaves DISMISSED advice untouched, creates advice for a fresh indexable signature, and writes nothing for a non-indexable one', async () => {
+    // Dismissed: indexable filter shape, so if the DISMISSED guard were
+    // removed, `adviceFor` would compute a *different* suggestion/rationale
+    // than the one seeded below — making the mutation check meaningful.
+    const dismissedId = await seedSignature([{ key: 'email', op: 'eq' }], []);
+    const dismissedAdvice = await app.prisma.advice.create({
+      data: {
+        signatureId: dismissedId,
+        status: 'DISMISSED',
+        suggestion: { untouched: 1 },
+        rationale: 'manually dismissed — should never be overwritten',
+      },
+    });
+
+    // Fresh signature with an indexable shape and no existing advice row.
+    const freshId = await seedSignature(
+      [{ key: 'status', op: 'eq' }],
+      [{ key: 'createdAt', dir: -1 }],
+    );
+
+    // Non-indexable: empty filter shape and no sort keys — `adviceFor`
+    // returns null, so nothing should be written.
+    const nullId = await seedSignature([], []);
+
+    const result = await runNightlyJobs({
+      prisma: app.prisma,
+      now: new Date('2026-09-20T02:00:00.000Z'),
+    });
+
+    // Only the fresh signature produced advice.
+    expect(result.adviceWritten).toBe(1);
+
+    const dismissedAfter = await app.prisma.advice.findUniqueOrThrow({
+      where: { signatureId: dismissedId },
+    });
+    expect(dismissedAfter.status).toBe('DISMISSED');
+    expect(dismissedAfter.suggestion).toEqual({ untouched: 1 });
+    expect(dismissedAfter.rationale).toBe(dismissedAdvice.rationale);
+    expect(dismissedAfter.updatedAt.getTime()).toBe(dismissedAdvice.updatedAt.getTime());
+
+    const freshAfter = await app.prisma.advice.findUnique({ where: { signatureId: freshId } });
+    expect(freshAfter).not.toBeNull();
+    expect(freshAfter?.status).toBe('OPEN');
+    expect(freshAfter?.suggestion).toEqual({ status: 1, createdAt: -1 });
+
+    const nullAfter = await app.prisma.advice.findUnique({ where: { signatureId: nullId } });
+    expect(nullAfter).toBeNull();
+  });
+});
+
 describe('runHourlyJobs', () => {
   it('returns a result without throwing when there is no data at all', async () => {
     const r = await runHourlyJobs({
@@ -127,5 +211,71 @@ describe('runHourlyJobs', () => {
       now: new Date('2026-09-20T02:00:00.000Z'),
     });
     expect(r.alertsCreated).toBe(0);
+  });
+
+  /**
+   * `now` is deliberately mid-hour: `runHourlyJobs` computes `lastComplete`
+   * as the start of `now`'s hour minus one hour, so with
+   * now = 2026-09-20T03:30, lastComplete = 2026-09-20T02:00. Trailing hours
+   * sit in the preceding days, well inside the 7-day window.
+   */
+  const NOW = new Date('2026-09-20T03:30:00.000Z');
+  const LAST_COMPLETE = new Date('2026-09-20T02:00:00.000Z');
+  const TRAILING_HOURS = [
+    new Date('2026-09-19T02:00:00.000Z'),
+    new Date('2026-09-18T02:00:00.000Z'),
+    new Date('2026-09-17T02:00:00.000Z'),
+  ];
+
+  /**
+   * Trailing hours: 20 observations concentrated in the [0,100) bucket —
+   * p95 interpolates to ~95ms. Latest hour: `latestCount` observations
+   * concentrated in the [500,1000) bucket — p95 interpolates to ~975ms,
+   * comfortably more than 2x the ~95ms trailing median.
+   */
+  async function seedRegressionCandidate(latestCount: number) {
+    const sigId = await seedSignature([{ key: 'email', op: 'eq' }], []);
+    await app.prisma.queryRollup.createMany({
+      data: TRAILING_HOURS.map((bucketHour) => ({
+        signatureId: sigId,
+        bucketHour,
+        count: 20,
+        totalMs: 20n * 90n,
+        maxMs: 99,
+        hist: [20, 0, 0, 0, 0, 0, 0, 0],
+      })),
+    });
+    await app.prisma.queryRollup.create({
+      data: {
+        signatureId: sigId,
+        bucketHour: LAST_COMPLETE,
+        count: latestCount,
+        totalMs: BigInt(latestCount) * 975n,
+        maxMs: 999,
+        hist: [0, 0, 0, latestCount, 0, 0, 0, 0],
+      },
+    });
+    return sigId;
+  }
+
+  it('creates a regression alert when the latest p95 exceeds 2x the trailing median and the count floor is met', async () => {
+    const sigId = await seedRegressionCandidate(25);
+
+    const r = await runHourlyJobs({ prisma: app.prisma, now: NOW });
+
+    expect(r.alertsCreated).toBe(1);
+    const alerts = await app.prisma.alert.findMany({ where: { signatureId: sigId } });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.kind).toBe('regression');
+  });
+
+  it('creates no alert when the same p95 jump does not meet the minimum count floor', async () => {
+    const sigId = await seedRegressionCandidate(10);
+
+    const r = await runHourlyJobs({ prisma: app.prisma, now: NOW });
+
+    expect(r.alertsCreated).toBe(0);
+    const alerts = await app.prisma.alert.findMany({ where: { signatureId: sigId } });
+    expect(alerts).toHaveLength(0);
   });
 });
