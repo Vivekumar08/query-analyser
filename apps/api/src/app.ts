@@ -15,6 +15,13 @@ export interface BuildOptions {
    * without sending 600 real requests — never lower this in production.
    */
   rateLimitMax?: number;
+  /**
+   * Test-only: a writable stream pino writes log lines to, instead of the
+   * default destination. Lets a test capture emitted request logs (e.g. to
+   * assert the invite-accept token never appears in one) without touching
+   * stdout. Ignored when `logger` is `false`.
+   */
+  logStream?: NodeJS.WritableStream;
 }
 
 /**
@@ -27,6 +34,48 @@ export function parseTrustProxy(value: string): boolean | string {
   if (value === 'true') return true;
   if (value === 'false') return false;
   return value;
+}
+
+/**
+ * The invite-accept route is the first (and so far only) place in this repo
+ * that carries a bearer credential in the URL path rather than a header —
+ * ingest keys always travel in a header, which Fastify's default request
+ * log never includes. Fastify's default `req` serializer logs `req.url`
+ * verbatim (see `fastify/lib/logger-pino.js`), and it runs on *every*
+ * request, before the route handler — so even a 404/403/410 attempt against
+ * `/v1/invites/:token/accept` would otherwise write the live token to the
+ * request log. Match that path shape and blank out the token segment only;
+ * every other URL is logged unchanged.
+ */
+const ACCEPT_INVITE_URL = /^(\/v1\/invites\/)[^/?]+(\/accept(?:\?.*)?)$/;
+
+function redactAcceptInviteUrl(url: string): string {
+  return url.replace(ACCEPT_INVITE_URL, '$1[redacted]$2');
+}
+
+/**
+ * Mirrors Fastify's own default `req` serializer (fastify/lib/logger-pino.js)
+ * field-for-field, so every other route's request log is byte-identical to
+ * the framework default — the only change is routing `url` through
+ * `redactAcceptInviteUrl` first.
+ */
+function reqSerializer(req: {
+  method: string;
+  url: string;
+  headers?: Record<string, string | string[] | undefined>;
+  host?: string;
+  ip?: string;
+  socket?: { remotePort?: number };
+}) {
+  const version = req.headers?.['accept-version'];
+  return {
+    method: req.method,
+    url: redactAcceptInviteUrl(req.url),
+    version: typeof version === 'string' ? version : undefined,
+    host: req.host,
+    remoteAddress: req.ip,
+    remotePort: req.socket ? req.socket.remotePort : undefined,
+  };
 }
 
 /**
@@ -48,7 +97,14 @@ function toFastifyError(err: unknown): FastifyError {
 export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance> {
   const config = opts.config ?? loadConfig();
   const app = Fastify({
-    logger: opts.logger === false ? false : { level: config.LOG_LEVEL },
+    logger:
+      opts.logger === false
+        ? false
+        : {
+            level: config.LOG_LEVEL,
+            serializers: { req: reqSerializer },
+            ...(opts.logStream ? { stream: opts.logStream } : {}),
+          },
     trustProxy: parseTrustProxy(config.TRUST_PROXY),
   });
 

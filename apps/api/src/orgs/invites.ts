@@ -39,8 +39,11 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
     });
     // The token is a bearer credential for org membership — return it
     // exactly once, here, and never again (the list route below never
-    // selects tokenHash, and this response is not logged as a request log
-    // in any config used by this app).
+    // selects tokenHash). The accept route below carries this same token in
+    // its URL, which Fastify's default request-log serializer would
+    // otherwise log verbatim on every hit (including failed attempts); that
+    // is redacted centrally in `buildApp` (see `reqSerializer` in app.ts),
+    // not here.
     return reply.code(201).send({ ...row, token });
   });
 
@@ -57,14 +60,27 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
   // wrong email, 409 already a member) is checked before any write.
   app.post('/v1/invites/:token/accept', { preHandler: [app.authenticate] }, async (req, reply) => {
     const { token } = req.params as { token: string };
-    const inv = await app.prisma.invite.findUnique({ where: { tokenHash: hashToken(token) } });
+    const inv = await app.prisma.invite.findUnique({
+      where: { tokenHash: hashToken(token) },
+      include: { org: { select: { suspendedAt: true } } },
+    });
     if (!inv) return reply.code(404).send({ error: 'Not Found' });
     if (inv.acceptedAt || inv.expiresAt < new Date()) {
       return reply.code(410).send({ error: 'invite no longer valid' });
     }
+    // A suspended org must not gain members through acceptance any more
+    // than it can issue invites — `requireRole` already 403s issuance/list
+    // for a suspended org, but accept has no membership to route through
+    // `requireRole`, so it needs its own check of the same fact.
+    if (inv.org.suspendedAt) return reply.code(403).send({ error: 'organization suspended' });
 
     const me = await app.prisma.user.findUniqueOrThrow({ where: { id: req.user.id }, select: { email: true } });
-    if (me.email !== inv.email) return reply.code(403).send({ error: 'invite was issued to a different email' });
+    // `inv.email` is always lowercased at creation time, but don't rely on
+    // every possible source of `User.email` (an admin seed, an SSO import)
+    // having done the same normalization — normalize both sides here.
+    if (me.email.toLowerCase() !== inv.email) {
+      return reply.code(403).send({ error: 'invite was issued to a different email' });
+    }
 
     const already = await app.prisma.membership.findUnique({
       where: { userId_orgId: { userId: req.user.id, orgId: inv.orgId } },
