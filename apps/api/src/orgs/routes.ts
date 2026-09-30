@@ -103,7 +103,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
           // read the owner count — otherwise two concurrent demotions of
           // two different owners can both observe count === 2, both pass
           // the <= 1 guard, and both commit, leaving zero owners.
-          await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${orgId} AND role = 'OWNER'::"Role" FOR UPDATE`;
+          await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${orgId} AND role = 'OWNER'::"Role" ORDER BY id FOR UPDATE`;
           const ownerCount = await tx.membership.count({ where: { orgId, role: 'OWNER' } });
           if (ownerCount <= 1) throw new LastOwnerError();
         }
@@ -135,7 +135,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
         if (!target) return NOT_FOUND;
 
         if (target.role === 'OWNER') {
-          await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${orgId} AND role = 'OWNER'::"Role" FOR UPDATE`;
+          await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${orgId} AND role = 'OWNER'::"Role" ORDER BY id FOR UPDATE`;
           const ownerCount = await tx.membership.count({ where: { orgId, role: 'OWNER' } });
           if (ownerCount <= 1) throw new LastOwnerError();
         }
