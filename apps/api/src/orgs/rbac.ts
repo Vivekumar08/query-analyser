@@ -42,8 +42,42 @@ export function requireRole(min: Role) {
   };
 }
 
+/**
+ * Like requireRole, but the org is found through the app named by `:id`
+ * rather than an `:org` param directly. Same non-enumeration and
+ * suspended-org behaviour as requireRole.
+ */
+export function requireAppRole(min: Role) {
+  return async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const appId = (req.params as { id?: string }).id;
+    if (!appId) {
+      await reply.code(404).send({ error: 'Not Found' });
+      return;
+    }
+    const m = await req.server.prisma.membership.findFirst({
+      where: { userId: req.user.id, org: { apps: { some: { id: appId } } } },
+      select: { orgId: true, role: true, org: { select: { suspendedAt: true } } },
+    });
+    if (!m) {
+      await reply.code(404).send({ error: 'Not Found' });
+      return;
+    }
+    if (m.org.suspendedAt) {
+      await reply.code(403).send({ error: 'organization suspended' });
+      return;
+    }
+    if (!roleAtLeast(m.role, min)) {
+      await reply.code(403).send({ error: 'insufficient role' });
+      return;
+    }
+    req.membership = { orgId: m.orgId, role: m.role };
+    req.appId = appId;
+  };
+}
+
 declare module 'fastify' {
   interface FastifyRequest {
     membership: { orgId: string; role: Role };
+    appId: string;
   }
 }
