@@ -46,6 +46,37 @@ describe('apps', () => {
     const res = await app.inject({ method: 'GET', url: `/v1/apps/${a.id}`, headers: { authorization: `Bearer ${s.json().accessToken}` } });
     expect(res.statusCode).toBe(404);
   });
+
+  it('gives identical 404 bodies for a foreign app and a nonexistent app (no enumeration oracle)', async () => {
+    const o = await owner();
+    const a = (await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'web', env: 'production' } })).json();
+    const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'x2@x.io', password: 'correct horse battery', name: 'X2' } });
+    const h = { authorization: `Bearer ${s.json().accessToken}` };
+    const foreign = await app.inject({ method: 'GET', url: `/v1/apps/${a.id}`, headers: h });
+    const nonexistent = await app.inject({ method: 'GET', url: '/v1/apps/00000000-0000-0000-0000-000000000000', headers: h });
+    expect(foreign.statusCode).toBe(nonexistent.statusCode);
+    expect(foreign.json()).toEqual(nonexistent.json());
+  });
+
+  it('409s a duplicate (name, env) raced through concurrent creates', async () => {
+    const o = await owner();
+    const results = await Promise.all(
+      Array.from({ length: 2 }, () =>
+        app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'race', env: 'production' } }),
+      ),
+    );
+    const statuses = results.map((r) => r.statusCode).sort();
+    expect(statuses).toEqual([201, 409]);
+  });
+
+  it('403s a VIEWER attempting to create an app', async () => {
+    const o = await owner();
+    const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'v@x.io', password: 'correct horse battery', name: 'V' } });
+    await app.prisma.membership.create({ data: { userId: s.json().user.id, orgId: o.orgId, role: 'VIEWER' } });
+    const h = { authorization: `Bearer ${s.json().accessToken}` };
+    const res = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: h, payload: { name: 'web', env: 'production' } });
+    expect(res.statusCode).toBe(403);
+  });
 });
 
 describe('keys', () => {
@@ -80,10 +111,31 @@ describe('keys', () => {
   it('MEMBER cannot manage keys', async () => {
     const o = await owner();
     const a = (await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'web', env: 'production' } })).json();
+    const { id: keyId } = (await app.inject({ method: 'POST', url: `/v1/apps/${a.id}/keys`, headers: o.h })).json();
     const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'm@x.io', password: 'correct horse battery', name: 'M' } });
     await app.prisma.membership.create({ data: { userId: s.json().user.id, orgId: o.orgId, role: 'MEMBER' } });
     const h = { authorization: `Bearer ${s.json().accessToken}` };
     expect((await app.inject({ method: 'POST', url: `/v1/apps/${a.id}/keys`, headers: h })).statusCode).toBe(403);
     expect((await app.inject({ method: 'GET', url: `/v1/apps/${a.id}/keys`, headers: h })).statusCode).toBe(403);
+    expect((await app.inject({ method: 'DELETE', url: `/v1/apps/${a.id}/keys/${keyId}`, headers: h })).statusCode).toBe(403);
+  });
+
+  it('403s minting a key in a suspended org', async () => {
+    const o = await owner();
+    const a = (await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'web', env: 'production' } })).json();
+    await app.prisma.organization.update({ where: { id: o.orgId }, data: { suspendedAt: new Date() } });
+    const res = await app.inject({ method: 'POST', url: `/v1/apps/${a.id}/keys`, headers: o.h });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('404s re-revoking an already-revoked key and preserves the original revokedAt', async () => {
+    const o = await owner();
+    const a = (await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'web', env: 'production' } })).json();
+    const { id } = (await app.inject({ method: 'POST', url: `/v1/apps/${a.id}/keys`, headers: o.h })).json();
+    expect((await app.inject({ method: 'DELETE', url: `/v1/apps/${a.id}/keys/${id}`, headers: o.h })).statusCode).toBe(204);
+    const firstRevokedAt = (await app.prisma.ingestKey.findUniqueOrThrow({ where: { id } })).revokedAt;
+    expect((await app.inject({ method: 'DELETE', url: `/v1/apps/${a.id}/keys/${id}`, headers: o.h })).statusCode).toBe(404);
+    const secondRevokedAt = (await app.prisma.ingestKey.findUniqueOrThrow({ where: { id } })).revokedAt;
+    expect(secondRevokedAt).toEqual(firstRevokedAt);
   });
 });

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireRole, requireAppRole } from '../orgs/rbac.js';
 import { generateKey } from '../ingest/keys.js';
+import { Prisma } from '../generated/prisma/client.js';
 
 const createSchema = z.object({ name: z.string().min(1).max(100), env: z.string().min(1).max(40) });
 const appSelect = { id: true, name: true, env: true, createdAt: true } as const;
@@ -15,8 +16,21 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
     const exists = await app.prisma.app.findUnique({ where: { orgId_name_env: { orgId: req.membership.orgId, ...parsed.data } } });
     if (exists) return reply.code(409).send({ error: 'app already exists for this env' });
-    const created = await app.prisma.app.create({ data: { orgId: req.membership.orgId, ...parsed.data }, select: appSelect });
-    return reply.code(201).send(created);
+    // The findUnique-then-create above is itself a check-then-act: two
+    // concurrent requests for the same (orgId, name, env) can both pass the
+    // `exists` check and then both attempt to INSERT, so the second `create`
+    // fails its unique constraint. Prisma's P2002 carries no `statusCode`, so
+    // without this catch it would fall through to the generic error handler
+    // as a 500 instead of the spec'd 409.
+    try {
+      const created = await app.prisma.app.create({ data: { orgId: req.membership.orgId, ...parsed.data }, select: appSelect });
+      return reply.code(201).send(created);
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        return reply.code(409).send({ error: 'app already exists for this env' });
+      }
+      throw err;
+    }
   });
 
   app.get('/v1/apps/:id', { preHandler: [app.authenticate, requireAppRole('VIEWER')] }, async (req) => {
@@ -42,7 +56,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete('/v1/apps/:id/keys/:keyId', { preHandler: [app.authenticate, requireAppRole('ADMIN')] }, async (req, reply) => {
     const { keyId } = req.params as { keyId: string };
-    const row = await app.prisma.ingestKey.findFirst({ where: { id: keyId, appId: req.appId } });
+    const row = await app.prisma.ingestKey.findFirst({ where: { id: keyId, appId: req.appId, revokedAt: null } });
     if (!row) return reply.code(404).send({ error: 'Not Found' });
     await app.prisma.ingestKey.update({ where: { id: keyId }, data: { revokedAt: new Date() } });
     app.keys.invalidate(row.keyHash);
