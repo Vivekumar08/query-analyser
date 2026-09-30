@@ -4,6 +4,7 @@ import { ingestRoutes } from './ingest/routes.js';
 import { authRoutes } from './auth/routes.js';
 import { orgRoutes } from './orgs/routes.js';
 import { appRoutes } from './apps/routes.js';
+import { inviteRoutes } from './orgs/invites.js';
 
 export interface BuildOptions {
   logger?: boolean;
@@ -88,6 +89,7 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   await app.register(authRoutes);
   await app.register(orgRoutes);
   await app.register(appRoutes);
+  await app.register(inviteRoutes);
 
   // Prisma returns BigInt for QueryRollup/QueryDailyRollup's `totalMs`
   // column, and JSON.stringify throws on a bare BigInt. Every route that
