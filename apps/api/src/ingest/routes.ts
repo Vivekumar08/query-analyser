@@ -24,14 +24,20 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
       config: { rateLimit: { max: rateLimitMax, timeWindow: '1 minute' } },
     },
     async (req, reply) => {
+      app.ingestStats.batches += 1;
+
       const auth = req.headers.authorization ?? '';
       const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
       const resolved = key ? await app.keys.resolve(key) : null;
-      if (!resolved) return reply.code(401).send({ error: 'invalid ingest key' });
+      if (!resolved) {
+        app.ingestStats.rejected401 += 1;
+        return reply.code(401).send({ error: 'invalid ingest key' });
+      }
       if (resolved.suspended) return reply.code(403).send({ error: 'organization suspended' });
 
       const parsed = ingestPayloadSchema.safeParse(req.body);
       if (!parsed.success) {
+        app.ingestStats.rejected400 += 1;
         return reply.code(400).send({ error: 'invalid payload', issues: parsed.error.issues.slice(0, 20) });
       }
       // zod infers `sample: z.unknown().nullable()` as an *optional* key
@@ -51,6 +57,7 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
         if (newCount > 0) {
           const existing = await app.prisma.querySignature.count({ where: { appId: resolved.appId } });
           if (existing + newCount > SIGNATURE_QUOTA) {
+            app.ingestStats.rejected429 += 1;
             return reply.code(429).send({ error: 'signature quota exceeded', limit: SIGNATURE_QUOTA });
           }
         }
@@ -74,6 +81,7 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
         .update({ where: { id: resolved.keyId }, data: { lastUsedAt: new Date() } })
         .catch((err: unknown) => req.log.warn({ err }, 'lastUsedAt update failed'));
 
+      app.ingestStats.accepted += signatures;
       return reply.code(202).send({ accepted: signatures });
     },
   );
