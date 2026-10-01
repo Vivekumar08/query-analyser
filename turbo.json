@@ -3,7 +3,7 @@
   "tasks": {
     "db:generate": { "cache": false },
     "build": { "dependsOn": ["^build", "db:generate"], "outputs": ["dist/**"] },
-    "test": { "dependsOn": ["^build"] },
-    "typecheck": { "dependsOn": ["^build"] }
+    "test": { "dependsOn": ["^build", "db:generate"] },
+    "typecheck": { "dependsOn": ["^build", "db:generate"] }
   }
 }

@@ -120,6 +120,36 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   // compression, so we disable `globalCompression` and leave
   // `globalDecompression` at its default (true) — request decompression
   // still runs as an onRequest/preParsing hook on every route.
+  // These three must be registered BEFORE any `app.register(...)` calls for
+  // route plugins below. Fastify snapshots `kErrorHandler` and
+  // `kReplySerializerDefault` into each route's context as the enclosing
+  // `register()` call resolves (i.e. at the moment the child encapsulation
+  // context is created), not dynamically at request time. A `set*` call
+  // made *after* a plugin has been registered only affects routes declared
+  // directly on the root instance afterwards (e.g. `/healthz`) — every
+  // route inside `ingestRoutes`, `authRoutes`, etc. would silently keep
+  // Fastify's own default error handler / reply serializer instead of ours.
+  //
+  // Prisma returns BigInt for QueryRollup/QueryDailyRollup's `totalMs`
+  // column, and JSON.stringify throws on a bare BigInt. Every route that
+  // might ever return one already converts it to a plain number, but this
+  // is a safety net: if a stray BigInt reaches a reply anyway, serialize it
+  // as a string instead of crashing the response.
+  app.setReplySerializer((payload) =>
+    JSON.stringify(payload, (_key, value) => (typeof value === 'bigint' ? value.toString() : value)),
+  );
+
+  app.setNotFoundHandler((_req, reply) => {
+    void reply.code(404).send({ error: 'Not Found' });
+  });
+
+  app.setErrorHandler((rawErr: unknown, req, reply) => {
+    const err = toFastifyError(rawErr);
+    const status = err.statusCode ?? 500;
+    if (status >= 500) req.log.error({ err }, 'unhandled error');
+    void reply.code(status).send({ error: status >= 500 ? 'Internal Server Error' : err.message });
+  });
+
   await app.register(import('@fastify/compress'), {
     globalCompression: false,
     requestEncodings: ['gzip', 'deflate'],
@@ -149,27 +179,7 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   await app.register(inviteRoutes);
   await app.register(adminRoutes);
 
-  // Prisma returns BigInt for QueryRollup/QueryDailyRollup's `totalMs`
-  // column, and JSON.stringify throws on a bare BigInt. Every route that
-  // might ever return one already converts it to a plain number, but this
-  // is a safety net: if a stray BigInt reaches a reply anyway, serialize it
-  // as a string instead of crashing the response.
-  app.setReplySerializer((payload) =>
-    JSON.stringify(payload, (_key, value) => (typeof value === 'bigint' ? value.toString() : value)),
-  );
-
   app.get('/healthz', async () => ({ status: 'ok' }));
-
-  app.setNotFoundHandler((_req, reply) => {
-    void reply.code(404).send({ error: 'Not Found' });
-  });
-
-  app.setErrorHandler((rawErr: unknown, req, reply) => {
-    const err = toFastifyError(rawErr);
-    const status = err.statusCode ?? 500;
-    if (status >= 500) req.log.error({ err }, 'unhandled error');
-    void reply.code(status).send({ error: status >= 500 ? 'Internal Server Error' : err.message });
-  });
 
   return app;
 }

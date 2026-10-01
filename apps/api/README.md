@@ -21,18 +21,30 @@ the documented path for anyone without a local Postgres already running — poin
 
 ```bash
 docker compose up -d postgres
+pnpm --filter @query-analyser/api db:generate   # first time / fresh clone
 pnpm --filter @query-analyser/api test
 ```
+
+`apps/api/src/generated/` (the Prisma client) is gitignored, so a fresh clone
+has no client to import until `db:generate` has run at least once — every test
+file imports it. `pnpm --filter <pkg> test`/`typecheck` run the package's own
+script directly and do **not** go through turbo, so they do not benefit from
+`turbo.json`'s `db:generate` dependency below; run `db:generate` yourself
+first. Running via turbo instead (`pnpm test` / `pnpm typecheck` at the repo
+root, or `turbo run test --filter @query-analyser/api`) generates it for you.
 
 Tests run against the real database in `DATABASE_URL` and truncate all tables
 between tests. Point it at a throwaway database.
 
 ## Build
 
-`pnpm build` at the repo root runs `turbo run build`. For the API package,
-turbo runs `db:generate` (`prisma generate`) before `build` (`tsc`), so the
-generated Prisma client is always present before the TypeScript compiler needs
-its types. See `turbo.json`.
+`pnpm build` at the repo root runs `turbo run build`. `pnpm test` and
+`pnpm typecheck` at the repo root likewise run `turbo run test` /
+`turbo run typecheck`. For the API package, turbo runs `db:generate`
+(`prisma generate`) before `build`, `test`, and `typecheck`, so the generated
+Prisma client is always present before anything that needs its types — a
+clean checkout can run `pnpm test` or `pnpm typecheck` at the root with no
+manual `db:generate` step. See `turbo.json`.
 
 ## Environment variables
 
