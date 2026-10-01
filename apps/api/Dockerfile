@@ -14,7 +14,11 @@ RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /repo
 
 FROM base AS deps
-COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json ./
+# .npmrc must come along: it sets auto-install-peers=false, which is what
+# pnpm-lock.yaml records under `settings`. Without it pnpm falls back to its
+# own default (true), the lockfile's settings no longer match, and a frozen
+# install refuses to proceed with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
+COPY .npmrc pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json ./
 COPY packages/contract/package.json packages/contract/
 COPY packages/sdk/package.json packages/sdk/
 COPY apps/api/package.json apps/api/
