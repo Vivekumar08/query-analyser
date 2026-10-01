@@ -32,7 +32,14 @@ RUN pnpm install --frozen-lockfile --filter @query-analyser/api...
 FROM deps AS build
 COPY packages/contract packages/contract
 COPY apps/api apps/api
-RUN pnpm --filter @query-analyser/api db:generate && pnpm --filter @query-analyser/api build
+# prisma.config.ts resolves env('DATABASE_URL') eagerly, so `prisma generate`
+# refuses to start without it — even though generation only reads the schema
+# and never opens a connection. The real URL is injected at RUN time by the
+# platform and must NOT be baked into a layer, so generation gets a throwaway
+# value that exists only for the duration of this command.
+RUN DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build" \
+      pnpm --filter @query-analyser/api db:generate \
+  && pnpm --filter @query-analyser/api build
 
 FROM base AS runtime
 ENV NODE_ENV=production
