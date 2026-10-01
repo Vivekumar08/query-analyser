@@ -17,6 +17,18 @@ export interface IngestRoutesOptions {
 
 export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptions = {}): Promise<void> {
   const rateLimitMax = opts.rateLimitMax ?? DEFAULT_RATE_LIMIT_MAX;
+
+  // Count every 429 this route emits, not just the signature-quota one
+  // below. @fastify/rate-limit's own preHandler can reject a request with
+  // 429 before the handler below ever runs, so counting only inside the
+  // quota branch would under-report during a rate-limit storm — exactly
+  // when an operator most needs `rejected429` to be accurate. This hook is
+  // scoped to this plugin's encapsulation context, so it only observes
+  // responses from the /v1/ingest route declared below.
+  app.addHook('onResponse', async (_req, reply) => {
+    if (reply.statusCode === 429) app.ingestStats.rejected429 += 1;
+  });
+
   app.post(
     '/v1/ingest',
     {
@@ -57,7 +69,8 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
         if (newCount > 0) {
           const existing = await app.prisma.querySignature.count({ where: { appId: resolved.appId } });
           if (existing + newCount > SIGNATURE_QUOTA) {
-            app.ingestStats.rejected429 += 1;
+            // Counted by the onResponse hook above, not here, to avoid
+            // double-counting against a plugin-level rate-limit 429.
             return reply.code(429).send({ error: 'signature quota exceeded', limit: SIGNATURE_QUOTA });
           }
         }

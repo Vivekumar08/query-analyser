@@ -26,7 +26,10 @@ export default fp(async function authPlugin(app: FastifyInstance) {
     }
     req.user = { id: userId };
     const u = await app.prisma.user.findUnique({ where: { id: userId }, select: { isPlatformAdmin: true } });
-    if (!u?.isPlatformAdmin) await reply.code(404).send({ error: 'Not Found' });
+    if (!u?.isPlatformAdmin) {
+      await reply.code(404).send({ error: 'Not Found' });
+      return;
+    }
   });
 });
 
