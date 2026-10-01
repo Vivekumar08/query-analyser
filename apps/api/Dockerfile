@@ -37,9 +37,13 @@ COPY apps/api apps/api
 # and never opens a connection. The real URL is injected at RUN time by the
 # platform and must NOT be baked into a layer, so generation gets a throwaway
 # value that exists only for the duration of this command.
+# `...` builds @query-analyser/api AND its workspace dependencies. The api is
+# compiled with plain tsc, so its emitted JS keeps the bare
+# '@query-analyser/contract' specifier — that package has to exist as real
+# JavaScript at runtime, not as the TypeScript source it used to export.
 RUN DATABASE_URL="postgresql://build:build@127.0.0.1:5432/build" \
       pnpm --filter @query-analyser/api db:generate \
-  && pnpm --filter @query-analyser/api build
+  && pnpm --filter "@query-analyser/api..." build
 
 FROM base AS runtime
 ENV NODE_ENV=production
