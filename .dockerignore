@@ -1,0 +1,10 @@
+# Build context is the repo root (see apps/api/README.md's Deploy section),
+# so a .dockerignore nested at apps/api/.dockerignore is never read by
+# `docker build` — only this root file takes effect. Keep it in sync with
+# apps/api/.dockerignore's intent for every workspace package/app.
+**/node_modules
+**/dist
+**/.turbo
+apps/*/.env
+packages/*/.env
+.git
