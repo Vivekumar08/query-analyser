@@ -104,13 +104,20 @@ The container's `CMD` runs `pnpm db:deploy` (i.e. `prisma migrate deploy`)
 and then starts the server. Put it behind TLS and point
 `ingest.query-analyser.dev` (the SDK's default endpoint) at it.
 
-**Status of this deploy path:** the Dockerfile and `docker-compose.yml` are
-written and reviewed, and `turbo run build` is proven (via
-`turbo run build --dry=json`) to generate the Prisma client before compiling
-the API. The actual `docker build` / container boot / `/healthz` round trip
-has **not** been exercised in this environment (Docker was unavailable), so
-treat the container image as unverified until someone runs it end to end
-somewhere Docker is available.
+**Status of this deploy path:** verified end to end on 1 Oct 2026 against
+EasyPanel (`prod/query-analyser-api`, Postgres 17). The image builds, the
+container boots, `prisma migrate deploy` applies all three migrations, and
+`GET /healthz` answers `{"status":"ok"}`. A full smoke test — signup, create
+org, create app, mint an ingest key, `POST /v1/ingest` -> 202 — landed a row in
+`QueryRollup` with its `totalMs` and `hist` intact.
+
+Getting there took five fixes that only a real build surfaces, all now in the
+Dockerfile and in `packages/contract`: `.npmrc` must be copied or the frozen
+install rejects the lockfile's `autoInstallPeers`; `mongodb-memory-server`'s
+postinstall must be disabled; `openssl`/`ca-certificates` must be installed on
+`slim`; `prisma generate` needs a throwaway `DATABASE_URL` that must not be
+baked into a layer; and `@query-analyser/contract` has to emit real JavaScript,
+because the API compiles with plain `tsc` and keeps the bare specifier.
 
 ## Routes
 
