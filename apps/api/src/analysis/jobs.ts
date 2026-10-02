@@ -1,9 +1,22 @@
 import type { PrismaClient } from '../db.js';
+import { Prisma } from '../generated/prisma/client.js';
 import { compactDay, pruneHourly, pruneDaily } from './compaction.js';
 import { detectRegression, type HourPoint } from './regression.js';
 import { percentileFromHist } from './percentile.js';
-import { adviceFor } from './advice.js';
+import { adviceFor, type SuggestionField } from './advice.js';
 import type { FilterShapeItem, SortKey } from '@query-analyser/contract/runtime';
+
+/**
+ * `SuggestionField[]` is structurally an `InputJsonArray` (every field is a
+ * plain string/number), but TypeScript can't see that through the named
+ * interface — it checks `InputJsonObject`'s index signature against the
+ * array type first and stops there. This asserts through the one type that
+ * is true of every `AdviceSuggestion` this module ever produces, instead of
+ * reaching for `any`.
+ */
+function asJsonArray(suggestion: SuggestionField[]): Prisma.InputJsonArray {
+  return suggestion as unknown as Prisma.InputJsonArray;
+}
 
 const HOURLY_RETENTION_DAYS = 7;
 const DAILY_RETENTION_DAYS = 90;
@@ -199,11 +212,14 @@ const ADVICE_APP_PAGE = 100;
 const ADVICE_SIGNATURE_PAGE = 500;
 
 /**
- * Key order in an `AdviceSuggestion` is semantically meaningful (it is an
- * index key), but Postgres `jsonb` does not preserve it, so the stored row
- * comes back with its keys in jsonb's own order. Comparing a freshly computed
- * suggestion against a stored one therefore has to be order-insensitive or it
- * would never match and the skip below would never skip.
+ * `suggestion` is an ordered array of `{ field, dir }` pairs — array order is
+ * semantically meaningful (it is the index key) and, unlike object key
+ * order, Postgres `jsonb` *does* preserve array order, so a stored row's
+ * array always comes back in the order it was written. This still needs a
+ * structural comparison rather than `===`: it has to ignore the (meaningless)
+ * internal key order jsonb may apply within each `{ field, dir }` object, and
+ * Prisma returns a fresh object graph that would never be `===` to one this
+ * process computed even with identical contents.
  */
 function canonical(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
@@ -296,8 +312,12 @@ async function refreshAdviceForApp(prisma: PrismaClient, appId: string): Promise
 
       await prisma.advice.upsert({
         where: { signatureId: s.id },
-        create: { signatureId: s.id, suggestion: result.suggestion, rationale: result.rationale },
-        update: { suggestion: result.suggestion, rationale: result.rationale },
+        create: {
+          signatureId: s.id,
+          suggestion: asJsonArray(result.suggestion),
+          rationale: result.rationale,
+        },
+        update: { suggestion: asJsonArray(result.suggestion), rationale: result.rationale },
       });
       written += 1;
     }

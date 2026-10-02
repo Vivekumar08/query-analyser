@@ -1,8 +1,20 @@
 import type { FilterShapeItem, SortKey, OpClass } from '@query-analyser/contract/runtime';
 
+export interface SuggestionField {
+  field: string;
+  dir: 1 | -1;
+}
+
 export interface AdviceSuggestion {
-  /** Field order matters — this is the index key, not a set. */
-  suggestion: Record<string, 1 | -1>;
+  /**
+   * Array order matters — this IS the index key, not a set. A `jsonb` column
+   * canonicalises object key order (by key length, then bytewise), so an
+   * ordered index recommendation can never be stored as a plain object. An
+   * array of `{ field, dir }` pairs makes the ordering explicit and
+   * unloseable at every layer, including a future consumer that does not
+   * preserve object key order itself.
+   */
+  suggestion: SuggestionField[];
   rationale: string;
 }
 
@@ -33,12 +45,12 @@ export function adviceFor(
   const meaningful = indexable.filter((f) => f.key !== '_id');
   if (meaningful.length === 0 && sortKeys.length === 0) return null;
 
-  const suggestion: Record<string, 1 | -1> = {};
-  for (const f of equality) if (f.key !== '_id') suggestion[f.key] = 1;
-  for (const s of sortKeys) suggestion[s.key] = s.dir;
-  for (const f of range) if (f.key !== '_id') suggestion[f.key] = 1;
+  const suggestion: SuggestionField[] = [];
+  for (const f of equality) if (f.key !== '_id') suggestion.push({ field: f.key, dir: 1 });
+  for (const s of sortKeys) suggestion.push({ field: s.key, dir: s.dir });
+  for (const f of range) if (f.key !== '_id') suggestion.push({ field: f.key, dir: 1 });
 
-  if (Object.keys(suggestion).length === 0) return null;
+  if (suggestion.length === 0) return null;
 
   const parts = [
     'Equality fields first, then the sort keys in their sort order, then range fields (Equality–Sort–Range).',

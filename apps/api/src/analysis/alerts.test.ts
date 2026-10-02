@@ -44,7 +44,7 @@ async function seed() {
     data: { signatureId: sig.id, kind: 'regression', details: { latestP95: 300, baselineP95: 100 } },
   });
   const advice = await app.prisma.advice.create({
-    data: { signatureId: sig.id, suggestion: { status: 1 }, rationale: 'because' },
+    data: { signatureId: sig.id, suggestion: [{ field: 'status', dir: 1 }], rationale: 'because' },
   });
   return { owner, orgId: org.id, appId: appRow.id, alertId: alert.id, adviceId: advice.id };
 }

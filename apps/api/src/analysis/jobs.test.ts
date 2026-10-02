@@ -167,7 +167,7 @@ describe('refreshAdvice (via runNightlyJobs)', () => {
       data: {
         signatureId: dismissedId,
         status: 'DISMISSED',
-        suggestion: { untouched: 1 },
+        suggestion: [{ field: 'untouched', dir: 1 }],
         rationale: 'manually dismissed — should never be overwritten',
       },
     });
@@ -194,14 +194,17 @@ describe('refreshAdvice (via runNightlyJobs)', () => {
       where: { signatureId: dismissedId },
     });
     expect(dismissedAfter.status).toBe('DISMISSED');
-    expect(dismissedAfter.suggestion).toEqual({ untouched: 1 });
+    expect(dismissedAfter.suggestion).toEqual([{ field: 'untouched', dir: 1 }]);
     expect(dismissedAfter.rationale).toBe(dismissedAdvice.rationale);
     expect(dismissedAfter.updatedAt.getTime()).toBe(dismissedAdvice.updatedAt.getTime());
 
     const freshAfter = await app.prisma.advice.findUnique({ where: { signatureId: freshId } });
     expect(freshAfter).not.toBeNull();
     expect(freshAfter?.status).toBe('OPEN');
-    expect(freshAfter?.suggestion).toEqual({ status: 1, createdAt: -1 });
+    expect(freshAfter?.suggestion).toEqual([
+      { field: 'status', dir: 1 },
+      { field: 'createdAt', dir: -1 },
+    ]);
 
     const nullAfter = await app.prisma.advice.findUnique({ where: { signatureId: nullId } });
     expect(nullAfter).toBeNull();
