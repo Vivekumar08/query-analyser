@@ -49,6 +49,9 @@ const windowQuerySchema = z.object({
   to: isoDate.optional(),
 });
 
+/** Only `APPLIED`/`DISMISSED` are settable through the API — `OPEN` is the default, never a target. */
+const adviceStatusSchema = z.object({ status: z.enum(['APPLIED', 'DISMISSED']) });
+
 /**
  * The caller does not choose the grain. Retention means the choice is not
  * free: 30 days of hourly rollups do not exist, they were compacted and
@@ -355,10 +358,9 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
 
   app.patch('/v1/apps/:id/advice/:adviceId', write, async (req, reply) => {
     const { adviceId } = req.params as { adviceId: string };
-    const { status } = (req.body ?? {}) as { status?: string };
-    if (status !== 'APPLIED' && status !== 'DISMISSED') {
-      return reply.code(400).send({ error: 'status must be APPLIED or DISMISSED' });
-    }
+    const parsed = adviceStatusSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
+    const { status } = parsed.data;
 
     const found = await app.prisma.advice.findFirst({
       where: { id: adviceId, signature: { appId: req.appId } },

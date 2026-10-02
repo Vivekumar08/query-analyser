@@ -116,6 +116,30 @@ describe('alerts and advice', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('404s setting advice status for advice belonging to another app', async () => {
+    const mine = await seed();
+    const theirs = await seed();
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/apps/${mine.appId}/advice/${theirs.adviceId}`,
+      headers: as(mine.owner.token),
+      payload: { status: 'APPLIED' },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('400s an unknown advice status for a cross-app id before the ownership lookup', async () => {
+    const mine = await seed();
+    const theirs = await seed();
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/apps/${mine.appId}/advice/${theirs.adviceId}`,
+      headers: as(mine.owner.token),
+      payload: { status: 'NONSENSE' },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
   it('refuses a VIEWER on both PATCH routes', async () => {
     const { owner, orgId, appId, alertId, adviceId } = await seed();
     const viewer = await user(`view-${Date.now()}@x.io`);
