@@ -1,4 +1,6 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import type { PrismaClient } from '../db.js';
 import { requireAppRole } from '../orgs/rbac.js';
 import { percentileFromHist, avgMs } from './percentile.js';
 
@@ -9,18 +11,50 @@ const HIST_LENGTH = 8;
 
 type Grain = 'hourly' | 'daily';
 
-interface Window {
+interface ResolvedWindow {
   from: Date;
   to: Date;
   grain: Grain;
 }
+
+const SORT_KEYS = ['wasted', 'count', 'p95', 'maxMs'] as const;
+type SortKey = (typeof SORT_KEYS)[number];
+
+function isParsableDate(v: string): boolean {
+  return !Number.isNaN(Date.parse(v));
+}
+
+const isoDate = z.string().refine(isParsableDate, { message: 'invalid date' });
+
+/**
+ * Covers all five documented query params on the ranked-list route. Every
+ * field is a bare `z.string()` (or narrower), which is itself what rejects
+ * a repeated param: Fastify's querystring parser turns `?model=a&model=b`
+ * into `model: ['a', 'b']`, and `z.string()` fails on an array, so the
+ * request 400s instead of reaching `$queryRaw` with an array bound where a
+ * scalar is expected.
+ */
+const listQuerySchema = z.object({
+  from: isoDate.optional(),
+  to: isoDate.optional(),
+  model: z.string().min(1).max(200).optional(),
+  op: z.string().min(1).max(200).optional(),
+  sort: z.enum(SORT_KEYS).optional(),
+  limit: z.string().regex(/^\d+$/, { message: 'limit must be a positive integer' }).optional(),
+});
+
+/** `from`/`to` only — the detail and series routes take no other filter. */
+const windowQuerySchema = z.object({
+  from: isoDate.optional(),
+  to: isoDate.optional(),
+});
 
 /**
  * The caller does not choose the grain. Retention means the choice is not
  * free: 30 days of hourly rollups do not exist, they were compacted and
  * pruned. Every response states which grain answered it.
  */
-function resolveWindow(q: { from?: string; to?: string }): Window {
+function resolveWindow(q: { from?: string; to?: string }): ResolvedWindow {
   const to = q.to ? new Date(q.to) : new Date();
   const from = q.from ? new Date(q.from) : new Date(to.getTime() - 86_400_000);
   const grain: Grain = to.getTime() - from.getTime() > SEVEN_DAYS_MS ? 'daily' : 'hourly';
@@ -33,7 +67,7 @@ function clampLimit(raw: string | undefined): number {
   return Math.min(Math.floor(n), MAX_LIMIT);
 }
 
-interface RankRow {
+export interface RankRow {
   hash: string;
   signature: string;
   model: string;
@@ -42,6 +76,96 @@ interface RankRow {
   totalMs: bigint;
   maxMs: number;
   hist: number[];
+}
+
+export interface RankParams {
+  appId: string;
+  from: Date;
+  to: Date;
+  model: string | null;
+  op: string | null;
+  limit: number;
+}
+
+/**
+ * Ranks signatures by total wasted time within the window and returns only
+ * the top `limit` (≤200) rows — the `LIMIT` lives inside the `agg` CTE, so
+ * the join against `QueryRollup` is the only part of this query that scans
+ * more than `limit` rows; the per-row histogram sum below only runs for
+ * signatures that already made the cut.
+ *
+ * `SUM(r."totalMs")` over a `BigInt` column comes back from Postgres as
+ * `numeric` (Prisma/decimal.js `Decimal`), not `bigint` — the explicit
+ * `::bigint` cast is load-bearing: without it, `RankRow.totalMs: bigint` is
+ * a type-level lie `tsc` cannot catch (the generic on `$queryRaw` is
+ * unchecked), and the `'1000'` in a JSON response would come from
+ * decimal.js's own `toJSON`, not from `app.ts`'s BigInt-safe reply
+ * serializer — a different, uninspected mechanism that happens to produce
+ * the same string for any magnitude this service has seen so far.
+ */
+export async function queryHourlyRanking(prisma: PrismaClient, p: RankParams): Promise<RankRow[]> {
+  return prisma.$queryRaw<RankRow[]>`
+    WITH agg AS (
+      SELECT s.id AS sig_id, s.hash, s.signature, s.model, s.operation,
+             SUM(r."count")::int    AS count,
+             SUM(r."totalMs")::bigint AS "totalMs",
+             MAX(r."maxMs")::int    AS "maxMs"
+      FROM "QuerySignature" s
+      JOIN "QueryRollup" r ON r."signatureId" = s.id
+      WHERE s."appId" = ${p.appId}
+        AND r."bucketHour" BETWEEN ${p.from} AND ${p.to}
+        AND (${p.model}::text IS NULL OR s.model = ${p.model})
+        AND (${p.op}::text IS NULL OR s.operation = ${p.op})
+      GROUP BY s.id, s.hash, s.signature, s.model, s.operation
+      ORDER BY SUM(r."totalMs") DESC
+      LIMIT ${p.limit}
+    )
+    SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
+           (
+             SELECT ARRAY(
+               SELECT SUM(h)::int
+               FROM "QueryRollup" r2, unnest(r2.hist) WITH ORDINALITY AS u(h, idx)
+               WHERE r2."signatureId" = a.sig_id
+                 AND r2."bucketHour" BETWEEN ${p.from} AND ${p.to}
+               GROUP BY idx ORDER BY idx
+             )
+           ) AS hist
+    FROM agg a
+    ORDER BY a."totalMs" DESC
+  `;
+}
+
+/** Same shape and same `::bigint` cast as {@link queryHourlyRanking}, reading the daily rollup table instead. */
+export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Promise<RankRow[]> {
+  return prisma.$queryRaw<RankRow[]>`
+    WITH agg AS (
+      SELECT s.id AS sig_id, s.hash, s.signature, s.model, s.operation,
+             SUM(d."count")::int    AS count,
+             SUM(d."totalMs")::bigint AS "totalMs",
+             MAX(d."maxMs")::int    AS "maxMs"
+      FROM "QuerySignature" s
+      JOIN "QueryDailyRollup" d ON d."signatureId" = s.id
+      WHERE s."appId" = ${p.appId}
+        AND d.day BETWEEN ${p.from} AND ${p.to}
+        AND (${p.model}::text IS NULL OR s.model = ${p.model})
+        AND (${p.op}::text IS NULL OR s.operation = ${p.op})
+      GROUP BY s.id, s.hash, s.signature, s.model, s.operation
+      ORDER BY SUM(d."totalMs") DESC
+      LIMIT ${p.limit}
+    )
+    SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
+           (
+             SELECT ARRAY(
+               SELECT SUM(h)::int
+               FROM "QueryDailyRollup" d2, unnest(d2.hist) WITH ORDINALITY AS u(h, idx)
+               WHERE d2."signatureId" = a.sig_id
+                 AND d2.day BETWEEN ${p.from} AND ${p.to}
+               GROUP BY idx ORDER BY idx
+             )
+           ) AS hist
+    FROM agg a
+    ORDER BY a."totalMs" DESC
+  `;
 }
 
 function toItem(r: RankRow) {
@@ -58,6 +182,32 @@ function toItem(r: RankRow) {
   };
 }
 
+/**
+ * Re-orders the already wasted-time-ranked, `limit`-capped page returned by
+ * {@link queryHourlyRanking}/{@link queryDailyRanking} — it never changes
+ * *which* signatures made the cut, only the order they're returned in.
+ * `p95` is computed here in TypeScript (`percentileFromHist`), not in SQL,
+ * so sorting by it in the database isn't straightforward; re-sorting a page
+ * capped at `MAX_LIMIT` (200) rows in memory is cheap and keeps every sort
+ * key's comparison logic in one place instead of splitting it between SQL
+ * and TypeScript.
+ */
+function sortItems(items: ReturnType<typeof toItem>[], sort: SortKey): ReturnType<typeof toItem>[] {
+  const keyOf = (it: ReturnType<typeof toItem>): number => {
+    switch (sort) {
+      case 'count':
+        return it.count;
+      case 'p95':
+        return it.p95.value;
+      case 'maxMs':
+        return it.maxMs;
+      case 'wasted':
+        return Number(it.totalMs);
+    }
+  };
+  return [...items].sort((a, b) => keyOf(b) - keyOf(a));
+}
+
 function pointOf(r: { count: number; totalMs: bigint; maxMs: number; hist: number[] }) {
   return {
     count: r.count,
@@ -71,80 +221,31 @@ function pointOf(r: { count: number; totalMs: bigint; maxMs: number; hist: numbe
 export default async function analysisRoutes(app: FastifyInstance): Promise<void> {
   const read = { preHandler: [app.authenticate, requireAppRole('VIEWER')] };
 
-  app.get('/v1/apps/:id/queries', read, async (req) => {
-    const q = req.query as { from?: string; to?: string; model?: string; op?: string; limit?: string };
+  app.get('/v1/apps/:id/queries', read, async (req, reply) => {
+    const parsed = listQuerySchema.safeParse(req.query);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid query' });
+    const q = parsed.data;
+
     const { from, to, grain } = resolveWindow(q);
     const limit = clampLimit(q.limit);
     const model = q.model ?? null;
     const op = q.op ?? null;
+    const sort: SortKey = q.sort ?? 'wasted';
 
-    const rows =
-      grain === 'hourly'
-        ? await app.prisma.$queryRaw<RankRow[]>`
-            WITH agg AS (
-              SELECT s.id AS sig_id, s.hash, s.signature, s.model, s.operation,
-                     SUM(r."count")::int AS count,
-                     SUM(r."totalMs")    AS "totalMs",
-                     MAX(r."maxMs")::int AS "maxMs"
-              FROM "QuerySignature" s
-              JOIN "QueryRollup" r ON r."signatureId" = s.id
-              WHERE s."appId" = ${req.appId}
-                AND r."bucketHour" BETWEEN ${from} AND ${to}
-                AND (${model}::text IS NULL OR s.model = ${model})
-                AND (${op}::text IS NULL OR s.operation = ${op})
-              GROUP BY s.id, s.hash, s.signature, s.model, s.operation
-              ORDER BY SUM(r."totalMs") DESC
-              LIMIT ${limit}
-            )
-            SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
-                   (
-                     SELECT ARRAY(
-                       SELECT SUM(h)::int
-                       FROM "QueryRollup" r2, unnest(r2.hist) WITH ORDINALITY AS u(h, idx)
-                       WHERE r2."signatureId" = a.sig_id
-                         AND r2."bucketHour" BETWEEN ${from} AND ${to}
-                       GROUP BY idx ORDER BY idx
-                     )
-                   ) AS hist
-            FROM agg a
-            ORDER BY a."totalMs" DESC
-          `
-        : await app.prisma.$queryRaw<RankRow[]>`
-            WITH agg AS (
-              SELECT s.id AS sig_id, s.hash, s.signature, s.model, s.operation,
-                     SUM(d."count")::int AS count,
-                     SUM(d."totalMs")    AS "totalMs",
-                     MAX(d."maxMs")::int AS "maxMs"
-              FROM "QuerySignature" s
-              JOIN "QueryDailyRollup" d ON d."signatureId" = s.id
-              WHERE s."appId" = ${req.appId}
-                AND d.day BETWEEN ${from} AND ${to}
-                AND (${model}::text IS NULL OR s.model = ${model})
-                AND (${op}::text IS NULL OR s.operation = ${op})
-              GROUP BY s.id, s.hash, s.signature, s.model, s.operation
-              ORDER BY SUM(d."totalMs") DESC
-              LIMIT ${limit}
-            )
-            SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
-                   (
-                     SELECT ARRAY(
-                       SELECT SUM(h)::int
-                       FROM "QueryDailyRollup" d2, unnest(d2.hist) WITH ORDINALITY AS u(h, idx)
-                       WHERE d2."signatureId" = a.sig_id
-                         AND d2.day BETWEEN ${from} AND ${to}
-                       GROUP BY idx ORDER BY idx
-                     )
-                   ) AS hist
-            FROM agg a
-            ORDER BY a."totalMs" DESC
-          `;
+    const params: RankParams = { appId: req.appId, from, to, model, op, limit };
+    const rows = grain === 'hourly' ? await queryHourlyRanking(app.prisma, params) : await queryDailyRanking(app.prisma, params);
+
+    const items = sortItems(
+      rows.map((r) => toItem({ ...r, hist: r.hist ?? new Array(HIST_LENGTH).fill(0) })),
+      sort,
+    );
 
     return {
       grain,
       limit,
       from: from.toISOString(),
       to: to.toISOString(),
-      items: rows.map((r) => toItem({ ...r, hist: r.hist ?? new Array(HIST_LENGTH).fill(0) })),
+      items,
     };
   });
 
@@ -185,8 +286,11 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
   });
 
   app.get('/v1/apps/:id/queries/:sig/series', read, async (req, reply) => {
+    const parsedQuery = windowQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) return reply.code(400).send({ error: 'invalid query' });
+
     const { sig } = req.params as { sig: string };
-    const { from, to, grain } = resolveWindow(req.query as { from?: string; to?: string });
+    const { from, to, grain } = resolveWindow(parsedQuery.data);
 
     const signature = await app.prisma.querySignature.findFirst({
       where: { appId: req.appId, hash: sig },
