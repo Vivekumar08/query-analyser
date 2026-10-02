@@ -206,6 +206,52 @@ describe('refreshAdvice (via runNightlyJobs)', () => {
     const nullAfter = await app.prisma.advice.findUnique({ where: { signatureId: nullId } });
     expect(nullAfter).toBeNull();
   });
+
+  /**
+   * `refreshAdvice` now pages apps and signatures by id cursor instead of one
+   * unbounded `findMany`, and skips signatures whose shape already matches
+   * the stored advice. `filterShape`/`sortKeys` are written once at insert
+   * and never updated (ingest/writer.ts's ON CONFLICT touches only `lastSeen`
+   * and `redactedSample`), so in a steady state the second night must write
+   * nothing at all — the job stops rewriting the whole table, `updatedAt`
+   * stops churning, and `GET /advice`'s ordering stops reshuffling nightly.
+   *
+   * This also covers the app-paging loop with more than one app, since each
+   * `seedSignature` creates its own org and app.
+   */
+  it('writes once and then skips unchanged shapes on later nights', async () => {
+    const a = await seedSignature([{ key: 'email', op: 'eq' }], []);
+    const b = await seedSignature([{ key: 'status', op: 'eq' }], [{ key: 'createdAt', dir: -1 }]);
+
+    const first = await runNightlyJobs({
+      prisma: app.prisma,
+      now: new Date('2026-09-20T02:00:00.000Z'),
+    });
+    expect(first.adviceWritten).toBe(2);
+
+    const writtenAt = await app.prisma.advice.findMany({
+      where: { signatureId: { in: [a, b] } },
+      select: { signatureId: true, updatedAt: true },
+      orderBy: { signatureId: 'asc' },
+    });
+    expect(writtenAt).toHaveLength(2);
+
+    const second = await runNightlyJobs({
+      prisma: app.prisma,
+      now: new Date('2026-09-21T02:00:00.000Z'),
+    });
+    expect(second.adviceWritten).toBe(0);
+
+    // Nothing was touched, not even to rewrite the identical value.
+    const after = await app.prisma.advice.findMany({
+      where: { signatureId: { in: [a, b] } },
+      select: { signatureId: true, updatedAt: true },
+      orderBy: { signatureId: 'asc' },
+    });
+    expect(after.map((r) => r.updatedAt.getTime())).toEqual(
+      writtenAt.map((r) => r.updatedAt.getTime()),
+    );
+  });
 });
 
 describe('runHourlyJobs', () => {
