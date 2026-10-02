@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { buildApp } from '../app.js';
 import { compactDay, pruneHourly, pruneDaily } from './compaction.js';
+import { runNightlyJobs } from './jobs.js';
+import { resetDb } from '../test/db.js';
 import type { FastifyInstance } from 'fastify';
 
 let app: FastifyInstance;
@@ -174,5 +176,88 @@ describe('pruning', () => {
 
     const deleted = await pruneDaily(app.prisma, new Date('2026-06-01T00:00:00.000Z'));
     expect(deleted).toBe(1);
+  });
+});
+
+/**
+ * This file deliberately does NOT mock `./compaction.js` (jobs.test.ts does),
+ * so `runNightlyJobs` here drives the real compaction and the real pruning —
+ * which is the only way to see the interaction between the two.
+ */
+describe('nightly retention does not destroy a compacted day', () => {
+  const DAY = '2026-09-10';
+  const midnight = new Date(`${DAY}T00:00:00.000Z`);
+
+  /** 24 hourly rows for `DAY`, 10 queries an hour at 100ms each. */
+  async function seedFullDay(sigId: string) {
+    await app.prisma.queryRollup.createMany({
+      data: Array.from({ length: 24 }, (_, h) => ({
+        signatureId: sigId,
+        bucketHour: new Date(Date.UTC(2026, 8, 10, h)),
+        count: 10,
+        totalMs: 1000n,
+        maxMs: 400,
+        hist: [0, 0, 10, 0, 0, 0, 0, 0],
+      })),
+    });
+  }
+
+  const dailyRow = (sigId: string) =>
+    app.prisma.queryDailyRollup.findUniqueOrThrow({
+      where: { signatureId_day: { signatureId: sigId, day: midnight } },
+    });
+
+  /**
+   * `pruneHourly` must only ever delete WHOLE UTC days. Given an instant
+   * (`now - 7 days`) instead of a day boundary, the oldest retained day is
+   * half-deleted: the hours before the tick's time-of-day go, the rest stay.
+   * The next night the compaction loop picks the oldest *surviving* hourly
+   * row, rounds it down to UTC midnight — still inside that same, now
+   * fragmentary day — and compacts it again; `compactDay` replaces rather
+   * than accumulates, so it overwrites a correct daily row with a
+   * recomputation from the fragment. The night after, the rest of the day is
+   * pruned, so the day is never revisited and the undercount is permanent for
+   * the full 90-day daily retention — which is exactly what every dashboard
+   * window longer than 7 days reads.
+   *
+   * The existing idempotency test runs `compactDay` twice over *identical*
+   * data, so it structurally cannot see this: the second run has to see less
+   * data than the first for the damage to appear.
+   */
+  it('keeps the daily row intact across the nights that prune its hourly rows', async () => {
+    await resetDb(app.prisma);
+    const { signatureId: sigId } = await seedSignature();
+    await seedFullDay(sigId);
+
+    // A tick mid-morning, not at midnight — the time of day is the bug.
+    const night = (n: number) => new Date(Date.UTC(2026, 8, 10 + n, 9, 10));
+
+    await runNightlyJobs({ prisma: app.prisma, now: night(7) });
+
+    const afterFirst = await dailyRow(sigId);
+    expect(afterFirst.count).toBe(240);
+    expect(Number(afterFirst.totalMs)).toBe(24_000);
+    expect(afterFirst.maxMs).toBe(400);
+    expect(afterFirst.hist).toEqual([0, 0, 240, 0, 0, 0, 0, 0]);
+
+    // Nothing of the day may be gone yet: its 7-day cutoff is its own midnight.
+    expect(
+      await app.prisma.queryRollup.count({ where: { signatureId: sigId } }),
+    ).toBe(24);
+
+    // Night 8 prunes the day — in one piece — after recompacting it whole.
+    await runNightlyJobs({ prisma: app.prisma, now: night(8) });
+    expect(
+      await app.prisma.queryRollup.count({ where: { signatureId: sigId } }),
+    ).toBe(0);
+
+    // Night 9 has no hourly rows left for the day, so it must not revisit it.
+    await runNightlyJobs({ prisma: app.prisma, now: night(9) });
+
+    const afterLast = await dailyRow(sigId);
+    expect(afterLast.count).toBe(240);
+    expect(Number(afterLast.totalMs)).toBe(24_000);
+    expect(afterLast.maxMs).toBe(400);
+    expect(afterLast.hist).toEqual([0, 0, 240, 0, 0, 0, 0, 0]);
   });
 });

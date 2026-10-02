@@ -118,7 +118,11 @@ describe('runNightlyJobs', () => {
     const now = new Date('2026-09-20T02:00:00.000Z');
     await runNightlyJobs({ prisma: app.prisma, now });
 
-    expect(seen[0]?.toISOString()).toBe('2026-09-13T02:00:00.000Z');
+    // Truncated to UTC midnight, NOT `now - 7 days`: hourly rows may only ever
+    // be deleted in whole days, or the oldest retained day is left as a
+    // fragment that the next night's compaction writes over its own correct
+    // daily row. Retention is therefore 7-8 days rather than exactly 7.
+    expect(seen[0]?.toISOString()).toBe('2026-09-13T00:00:00.000Z');
     expect(seen[1]?.toISOString()).toBe('2026-06-22T02:00:00.000Z');
   });
 });
