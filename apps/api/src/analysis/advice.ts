@@ -45,10 +45,46 @@ export function adviceFor(
   const meaningful = indexable.filter((f) => f.key !== '_id');
   if (meaningful.length === 0 && sortKeys.length === 0) return null;
 
+  // A field can appear in more than one of {equality, sort, range} — most
+  // commonly "filter on a date range and sort by that same date", but also
+  // "equality-match a field and (redundantly) sort by it". Each field may
+  // occupy exactly one slot in the index key, so every push below first
+  // checks whether the field is already present rather than appending again.
+  //
+  // Direction precedence is deliberate, not an accident of loop order:
+  //   - An equality match constrains the field to a fixed value (or a small
+  //     `in` set), so the direction recorded for it is arbitrary — ascending
+  //     vs. descending makes no difference to how the index serves an
+  //     equality predicate. Equality fields are pushed first, which is also
+  //     where Equality–Sort–Range puts them.
+  //   - A sort key's direction is exactly what lets the index serve the
+  //     `ORDER BY` without a separate in-memory sort, so when a field is
+  //     *also* a sort key, the sort's direction wins and overwrites whatever
+  //     direction an earlier equality push recorded. The field keeps its
+  //     earlier (equality) position — the position is already correct for
+  //     ESR, only the direction needs to come from the sort.
+  //   - A range predicate on a field that is also the sort key is the
+  //     mainline case this fix targets: scanning the index in the sort's
+  //     direction over the range bounds serves both the filter and the
+  //     `ORDER BY` in one pass, so the field is recorded once, in the Sort
+  //     position, with the sort's direction — the range loop is a no-op for
+  //     a field it has already seen.
   const suggestion: SuggestionField[] = [];
-  for (const f of equality) if (f.key !== '_id') suggestion.push({ field: f.key, dir: 1 });
-  for (const s of sortKeys) suggestion.push({ field: s.key, dir: s.dir });
-  for (const f of range) if (f.key !== '_id') suggestion.push({ field: f.key, dir: 1 });
+  const position = new Map<string, number>();
+
+  const upsert = (field: string, dir: 1 | -1, dirWins: boolean): void => {
+    const idx = position.get(field);
+    if (idx === undefined) {
+      position.set(field, suggestion.length);
+      suggestion.push({ field, dir });
+    } else if (dirWins) {
+      suggestion[idx]!.dir = dir;
+    }
+  };
+
+  for (const f of equality) if (f.key !== '_id') upsert(f.key, 1, false);
+  for (const s of sortKeys) upsert(s.key, s.dir, true);
+  for (const f of range) if (f.key !== '_id') upsert(f.key, 1, false);
 
   if (suggestion.length === 0) return null;
 

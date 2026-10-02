@@ -48,8 +48,20 @@ export async function withJobLock(
   connectionString: string,
   key: number,
   fn: () => Promise<void>,
+  log: { error: (obj: unknown, msg: string) => void } = console,
 ): Promise<boolean> {
   const client = new pg.Client({ connectionString });
+  // `pg.Client` is an EventEmitter and emits 'error' on connection-level
+  // failures (server restart, idle_session_timeout, a pooler eviction, a
+  // network blip) — failures that are not the rejection of any in-flight
+  // query. An EventEmitter 'error' with no listener is a Node uncaught
+  // exception, which kills the process. This client sits idle for the
+  // entire nightly compaction batch — the longest-running operation the
+  // service has, in the unattended path — so it must have a listener
+  // attached before `connect()` can possibly race an error in.
+  client.on('error', (err) => {
+    log.error({ err }, 'analysis job lock connection error');
+  });
   await client.connect();
   try {
     const { rows } = await client.query<{ locked: boolean }>(
@@ -87,19 +99,31 @@ export default fp(async function schedulerPlugin(
   app.decorate('analysisTimers', timers);
 
   let closed = false;
+  // Tracks the startup catch-up run (set near the bottom of this plugin) so
+  // `onClose` can await it. Without this, `app.close()` races a full nightly
+  // job — compaction, pruning, alerts, advice upserts — which, left running,
+  // outlives the test (or process) that triggered the close and can touch a
+  // shared database other tests still expect to be clean.
+  let catchUpPromise: Promise<unknown> | undefined;
   app.addHook('onClose', async () => {
     closed = true;
     for (const t of timers) clearTimeout(t);
     timers.length = 0;
+    await catchUpPromise;
   });
 
   if (!opts.startScheduler) return;
 
   const tick = (name: string, key: number, fn: () => Promise<unknown>) => async () => {
     try {
-      const held = await withJobLock(app.config.DATABASE_URL, key, async () => {
-        await fn();
-      });
+      const held = await withJobLock(
+        app.config.DATABASE_URL,
+        key,
+        async () => {
+          await fn();
+        },
+        app.log,
+      );
       if (!held) app.log.info({ job: name }, 'analysis job skipped, lock held elsewhere');
     } catch (err) {
       // A failing job must never take the service down.
@@ -145,7 +169,21 @@ export default fp(async function schedulerPlugin(
   // replaces rather than accumulates, `detectNewExpensive` is one alert per
   // signature per kind, `refreshAdvice` upserts and now skips unchanged rows —
   // so running it an extra time costs a batch of queries and changes nothing.
-  void nightly();
+  //
+  // The advisory lock guards against a *concurrent* stampede — two replicas
+  // booting at once — not against repetition. The lock is released when its
+  // session ends, which includes the session dying with the process, by
+  // design: a crash-looping replica must not hold the lock forever. That
+  // means every boot of a crash-looping replica restarts the full nightly
+  // batch, which is load amplification at exactly the moment the service is
+  // already unhealthy — the lock does not make an extra run cheap, it only
+  // makes concurrent extra runs impossible.
+  //
+  // The promise is held (not `void`-ed) so `onClose` can await it below —
+  // otherwise `app.close()` races a full nightly job that can outlive the
+  // call and keep writing to a database another test or process already
+  // assumes is quiescent.
+  catchUpPromise = nightly();
 });
 
 declare module 'fastify' {

@@ -82,6 +82,50 @@ describe('adviceFor', () => {
     const r = adviceFor([{ key: '_id', op: 'range' }, { key: 'status', op: 'eq' }], []);
     expect(r!.suggestion.map((s) => s.field)).toEqual(['status']);
   });
+
+  describe('a field appearing in more than one of {equality, sort, range}', () => {
+    it('range-and-sort on the same key: one entry, in the Sort position, with the sort direction', () => {
+      // "Filter on a date range and sort by that same date" — the mainline
+      // case the regression missed, because every other existing test uses
+      // disjoint filter and sort keys.
+      const r = adviceFor(
+        [
+          { key: 'tenantId', op: 'eq' },
+          { key: 'createdAt', op: 'range' },
+        ],
+        [{ key: 'createdAt', dir: -1 }],
+      );
+      expect(r!.suggestion).toEqual([
+        { field: 'tenantId', dir: 1 },
+        { field: 'createdAt', dir: -1 },
+      ]);
+    });
+
+    it('equality-and-sort on the same key: one entry, direction taken from the sort', () => {
+      const r = adviceFor([{ key: 'status', op: 'eq' }], [{ key: 'status', dir: -1 }]);
+      // Equality alone would say dir: 1 (arbitrary — an equality match does
+      // not care about direction). The sort key is what makes the index
+      // serve the ORDER BY, so its direction wins.
+      expect(r!.suggestion).toEqual([{ field: 'status', dir: -1 }]);
+    });
+
+    it('equality, sort and range together, with one field shared between sort and range', () => {
+      const r = adviceFor(
+        [
+          { key: 'tenantId', op: 'eq' },
+          { key: 'score', op: 'range' },
+        ],
+        [{ key: 'score', dir: 1 }],
+      );
+      expect(r!.suggestion).toEqual([
+        { field: 'tenantId', dir: 1 },
+        { field: 'score', dir: 1 },
+      ]);
+      // No field appears twice.
+      const fields = r!.suggestion.map((s) => s.field);
+      expect(new Set(fields).size).toBe(fields.length);
+    });
+  });
 });
 
 /**

@@ -1,4 +1,22 @@
-import { describe, it, expect, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, afterAll, beforeEach, vi } from 'vitest';
+
+// The `startScheduler: true` case below triggers the startup catch-up nightly
+// run, which `onClose` now awaits. Against the shared test database that is a
+// full real compaction/prune/alert pass over every other test file's rows —
+// slow enough to dominate the suite, and it mutates state those files assert
+// on. The scheduler's contract here is "did it arm the timers", not "does the
+// job work"; the jobs have their own tests. So stub them.
+vi.mock('./jobs.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./jobs.js')>()),
+  runHourlyJobs: vi.fn(async () => ({ alertsCreated: 0 })),
+  runNightlyJobs: vi.fn(async () => ({
+    daysCompacted: 0,
+    hourlyPruned: 0,
+    dailyPruned: 0,
+    adviceWritten: 0,
+    newExpensive: 0,
+  })),
+}));
 import { buildApp } from '../app.js';
 import { withJobLock, msUntilNextHourAt, msUntilNextUtcMidnight } from './scheduler.js';
 import type { FastifyInstance } from 'fastify';
