@@ -23,6 +23,12 @@ export interface BuildOptions {
    * stdout. Ignored when `logger` is `false`.
    */
   logStream?: NodeJS.WritableStream;
+  /**
+   * Starts the in-process analysis scheduler's timers. Defaults to `false`
+   * so the dozens of apps the test suite builds never spawn background
+   * work; `server.ts` passes `true`.
+   */
+  startScheduler?: boolean;
 }
 
 /**
@@ -171,6 +177,9 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
     keyGenerator: (req) => req.ip,
   });
   await app.register(import('./plugins/prisma.js'));
+  await app.register(import('./analysis/scheduler.js'), {
+    startScheduler: opts.startScheduler ?? false,
+  });
   await app.register(import('./plugins/auth.js'));
   await app.register(ingestRoutes, { rateLimitMax: opts.rateLimitMax });
   await app.register(authRoutes);
