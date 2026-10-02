@@ -40,7 +40,9 @@ const listQuerySchema = z.object({
   model: z.string().min(1).max(200).optional(),
   op: z.string().min(1).max(200).optional(),
   sort: z.enum(SORT_KEYS).optional(),
-  limit: z.string().regex(/^\d+$/, { message: 'limit must be a positive integer' }).optional(),
+  // `^\d+$` admitted '0' (and '00'), which `clampLimit` then silently turned
+  // into the default 50 — a caller asking for nothing got a full page.
+  limit: z.string().regex(/^[1-9]\d*$/, { message: 'limit must be a positive integer' }).optional(),
 });
 
 /** `from`/`to` only — the detail and series routes take no other filter. */
@@ -52,15 +54,30 @@ const windowQuerySchema = z.object({
 /** Only `APPLIED`/`DISMISSED` are settable through the API — `OPEN` is the default, never a target. */
 const adviceStatusSchema = z.object({ status: z.enum(['APPLIED', 'DISMISSED']) });
 
+const startOfUtcDay = (d: Date) =>
+  new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+
 /**
  * The caller does not choose the grain. Retention means the choice is not
  * free: 30 days of hourly rollups do not exist, they were compacted and
  * pruned. Every response states which grain answered it.
+ *
+ * Returns `null` for an inverted window (`from` after `to`), which the routes
+ * turn into a 400. It previously sailed through to a `BETWEEN` that cannot
+ * match, so a transposed pair of dates — the easiest mistake to make with two
+ * params of the same shape — answered a cheerful empty 200 that is
+ * indistinguishable from "no traffic in that window".
+ *
+ * `from` is truncated to UTC midnight for the daily grain, because
+ * `QueryDailyRollup.day` *is* UTC midnight: comparing it against an instant
+ * excluded the oldest day of every window, so "last 30 days" returned 29.
  */
-function resolveWindow(q: { from?: string; to?: string }): ResolvedWindow {
+function resolveWindow(q: { from?: string; to?: string }): ResolvedWindow | null {
   const to = q.to ? new Date(q.to) : new Date();
-  const from = q.from ? new Date(q.from) : new Date(to.getTime() - 86_400_000);
-  const grain: Grain = to.getTime() - from.getTime() > SEVEN_DAYS_MS ? 'daily' : 'hourly';
+  const requestedFrom = q.from ? new Date(q.from) : new Date(to.getTime() - 86_400_000);
+  if (requestedFrom.getTime() > to.getTime()) return null;
+  const grain: Grain = to.getTime() - requestedFrom.getTime() > SEVEN_DAYS_MS ? 'daily' : 'hourly';
+  const from = grain === 'daily' ? startOfUtcDay(requestedFrom) : requestedFrom;
   return { from, to, grain };
 }
 
@@ -88,7 +105,19 @@ export interface RankParams {
   model: string | null;
   op: string | null;
   limit: number;
+  /**
+   * Which ranking the `LIMIT` is applied to. Only the three keys SQL can
+   * compute are accepted here — `p95` is computed in TypeScript after the
+   * limit, so the route handles it separately and says so in the response.
+   */
+  sort: SqlSortKey;
 }
+
+/** The sort keys the database can rank by, so `limit` selects the right rows. */
+export const SQL_SORT_KEYS = ['wasted', 'count', 'maxMs'] as const;
+export type SqlSortKey = (typeof SQL_SORT_KEYS)[number];
+export const isSqlSortKey = (k: SortKey): k is SqlSortKey =>
+  (SQL_SORT_KEYS as readonly string[]).includes(k);
 
 /**
  * Ranks signatures by total wasted time within the window and returns only
@@ -112,7 +141,12 @@ export async function queryHourlyRanking(prisma: PrismaClient, p: RankParams): P
       SELECT s.id AS sig_id, s.hash, s.signature, s.model, s.operation,
              SUM(r."count")::int    AS count,
              SUM(r."totalMs")::bigint AS "totalMs",
-             MAX(r."maxMs")::int    AS "maxMs"
+             MAX(r."maxMs")::int    AS "maxMs",
+             CASE ${p.sort}::text
+               WHEN 'count' THEN SUM(r."count")::numeric
+               WHEN 'maxMs' THEN MAX(r."maxMs")::numeric
+               ELSE SUM(r."totalMs")::numeric
+             END AS rank_key
       FROM "QuerySignature" s
       JOIN "QueryRollup" r ON r."signatureId" = s.id
       WHERE s."appId" = ${p.appId}
@@ -120,7 +154,7 @@ export async function queryHourlyRanking(prisma: PrismaClient, p: RankParams): P
         AND (${p.model}::text IS NULL OR s.model = ${p.model})
         AND (${p.op}::text IS NULL OR s.operation = ${p.op})
       GROUP BY s.id, s.hash, s.signature, s.model, s.operation
-      ORDER BY SUM(r."totalMs") DESC
+      ORDER BY rank_key DESC
       LIMIT ${p.limit}
     )
     SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
@@ -134,7 +168,7 @@ export async function queryHourlyRanking(prisma: PrismaClient, p: RankParams): P
              )
            ) AS hist
     FROM agg a
-    ORDER BY a."totalMs" DESC
+    ORDER BY a.rank_key DESC
   `;
 }
 
@@ -145,7 +179,12 @@ export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Pr
       SELECT s.id AS sig_id, s.hash, s.signature, s.model, s.operation,
              SUM(d."count")::int    AS count,
              SUM(d."totalMs")::bigint AS "totalMs",
-             MAX(d."maxMs")::int    AS "maxMs"
+             MAX(d."maxMs")::int    AS "maxMs",
+             CASE ${p.sort}::text
+               WHEN 'count' THEN SUM(d."count")::numeric
+               WHEN 'maxMs' THEN MAX(d."maxMs")::numeric
+               ELSE SUM(d."totalMs")::numeric
+             END AS rank_key
       FROM "QuerySignature" s
       JOIN "QueryDailyRollup" d ON d."signatureId" = s.id
       WHERE s."appId" = ${p.appId}
@@ -153,7 +192,7 @@ export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Pr
         AND (${p.model}::text IS NULL OR s.model = ${p.model})
         AND (${p.op}::text IS NULL OR s.operation = ${p.op})
       GROUP BY s.id, s.hash, s.signature, s.model, s.operation
-      ORDER BY SUM(d."totalMs") DESC
+      ORDER BY rank_key DESC
       LIMIT ${p.limit}
     )
     SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
@@ -167,7 +206,7 @@ export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Pr
              )
            ) AS hist
     FROM agg a
-    ORDER BY a."totalMs" DESC
+    ORDER BY a.rank_key DESC
   `;
 }
 
@@ -186,14 +225,20 @@ function toItem(r: RankRow) {
 }
 
 /**
- * Re-orders the already wasted-time-ranked, `limit`-capped page returned by
- * {@link queryHourlyRanking}/{@link queryDailyRanking} — it never changes
- * *which* signatures made the cut, only the order they're returned in.
- * `p95` is computed here in TypeScript (`percentileFromHist`), not in SQL,
- * so sorting by it in the database isn't straightforward; re-sorting a page
- * capped at `MAX_LIMIT` (200) rows in memory is cheap and keeps every sort
- * key's comparison logic in one place instead of splitting it between SQL
- * and TypeScript.
+ * Re-orders an already-ranked, `limit`-capped page — it never changes *which*
+ * signatures made the cut, only the order they're returned in.
+ *
+ * This is now reached for `sort=p95` ONLY. `wasted`, `count` and `maxMs` rank
+ * inside the `agg` CTE, so their `LIMIT` selects the top `limit` rows *by the
+ * requested key*. Re-ordering a page here instead meant `?sort=count&limit=50`
+ * returned the 50 worst by wasted time re-ordered by count — a set that can
+ * share nothing with the 50 worst by count.
+ *
+ * `p95` genuinely cannot move into SQL: it comes from `percentileFromHist`
+ * over a summed histogram, in TypeScript, after the rows are fetched. So for
+ * `p95` the page re-order is still the only cheap option — and the response
+ * says so (`sortExact: false`) rather than hiding an approximation behind the
+ * same parameter name as the three exact ones.
  */
 function sortItems(items: ReturnType<typeof toItem>[], sort: SortKey): ReturnType<typeof toItem>[] {
   const keyOf = (it: ReturnType<typeof toItem>): number => {
@@ -229,23 +274,44 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
     if (!parsed.success) return reply.code(400).send({ error: 'invalid query' });
     const q = parsed.data;
 
-    const { from, to, grain } = resolveWindow(q);
+    const window = resolveWindow(q);
+    if (!window) return reply.code(400).send({ error: 'from must not be after to' });
+    const { from, to, grain } = window;
     const limit = clampLimit(q.limit);
     const model = q.model ?? null;
     const op = q.op ?? null;
     const sort: SortKey = q.sort ?? 'wasted';
 
-    const params: RankParams = { appId: req.appId, from, to, model, op, limit };
+    // `sort` chooses the RANKING the `LIMIT` is applied to, not the order of a
+    // page already chosen by something else. `p95` is the one key SQL cannot
+    // rank by, so it falls back to ranking by wasted time and re-ordering the
+    // page — and the response marks that as inexact.
+    const exact = isSqlSortKey(sort);
+    const params: RankParams = {
+      appId: req.appId,
+      from,
+      to,
+      model,
+      op,
+      limit,
+      sort: exact ? sort : 'wasted',
+    };
     const rows = grain === 'hourly' ? await queryHourlyRanking(app.prisma, params) : await queryDailyRanking(app.prisma, params);
 
-    const items = sortItems(
-      rows.map((r) => toItem({ ...r, hist: r.hist ?? new Array(HIST_LENGTH).fill(0) })),
-      sort,
-    );
+    const page = rows.map((r) => toItem({ ...r, hist: r.hist ?? new Array(HIST_LENGTH).fill(0) }));
+    const items = exact ? page : sortItems(page, sort);
 
     return {
       grain,
       limit,
+      sort,
+      sortExact: exact,
+      ...(exact
+        ? {}
+        : {
+            sortNote:
+              'p95 is computed after the limit is applied, so these are the top `limit` signatures by wasted time, re-ordered by p95 — not the top `limit` by p95.',
+          }),
       from: from.toISOString(),
       to: to.toISOString(),
       items,
@@ -293,7 +359,9 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
     if (!parsedQuery.success) return reply.code(400).send({ error: 'invalid query' });
 
     const { sig } = req.params as { sig: string };
-    const { from, to, grain } = resolveWindow(parsedQuery.data);
+    const window = resolveWindow(parsedQuery.data);
+    if (!window) return reply.code(400).send({ error: 'from must not be after to' });
+    const { from, to, grain } = window;
 
     const signature = await app.prisma.querySignature.findFirst({
       where: { appId: req.appId, hash: sig },
@@ -334,22 +402,31 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
   app.patch('/v1/apps/:id/alerts/:alertId', write, async (req, reply) => {
     const { alertId } = req.params as { alertId: string };
     // The id comes from the URL, so it is gated against this app before any
-    // write — the standing rule in this repo.
-    const found = await app.prisma.alert.findFirst({
-      where: { id: alertId, signature: { appId: req.appId } },
-      select: { id: true },
-    });
-    if (!found) return reply.code(404).send({ error: 'Not Found' });
-
-    return app.prisma.alert.update({
-      where: { id: alertId },
-      data: { acknowledgedAt: new Date() },
-    });
+    // write — the standing rule in this repo. The gate is part of the UPDATE's
+    // own filter rather than a `findFirst` before it: proving ownership and
+    // then acting on it in two statements is a TOCTOU window, and while
+    // `QuerySignature.appId` is never updated anywhere (so there is nothing to
+    // exploit today), `update({ where: { id } })` throws P2025 if the row is
+    // deleted in that window — an app or org cascade-delete is enough — and
+    // the global error handler turns that into a 500 for what is a 404.
+    try {
+      return await app.prisma.alert.update({
+        where: { id: alertId, signature: { appId: req.appId } },
+        data: { acknowledgedAt: new Date() },
+      });
+    } catch (err) {
+      if (isRecordNotFound(err)) return reply.code(404).send({ error: 'Not Found' });
+      throw err;
+    }
   });
 
   app.get('/v1/apps/:id/advice', read, async (req) => {
     const items = await app.prisma.advice.findMany({
       where: { signature: { appId: req.appId } },
+      // Without an `orderBy`, which 200 rows a `take` returns is up to the
+      // planner, so the same request could answer differently run to run.
+      // `alerts` above already orders; this is the same fix.
+      orderBy: { updatedAt: 'desc' },
       take: MAX_LIMIT,
       include: { signature: { select: { hash: true, signature: true, model: true } } },
     });
@@ -362,14 +439,27 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
     const { status } = parsed.data;
 
-    const found = await app.prisma.advice.findFirst({
-      where: { id: adviceId, signature: { appId: req.appId } },
-      select: { id: true },
-    });
-    if (!found) return reply.code(404).send({ error: 'Not Found' });
-
-    return app.prisma.advice.update({ where: { id: adviceId }, data: { status } });
+    // Atomic, for the reasons on the alerts route above.
+    try {
+      return await app.prisma.advice.update({
+        where: { id: adviceId, signature: { appId: req.appId } },
+        data: { status },
+      });
+    } catch (err) {
+      if (isRecordNotFound(err)) return reply.code(404).send({ error: 'Not Found' });
+      throw err;
+    }
   });
+}
+
+/**
+ * Prisma's "an operation failed because it depends on one or more records that
+ * were required but not found". Narrowed to that one code on purpose: a bare
+ * `catch` around an `update` would turn a connection failure or a constraint
+ * violation into a 404 too.
+ */
+function isRecordNotFound(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'P2025';
 }
 
 function sumHists(hists: number[][]): number[] {
