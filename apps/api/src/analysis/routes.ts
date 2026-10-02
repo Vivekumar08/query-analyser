@@ -315,6 +315,59 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
 
     return { grain, from: from.toISOString(), to: to.toISOString(), points };
   });
+
+  const write = { preHandler: [app.authenticate, requireAppRole('MEMBER')] };
+
+  app.get('/v1/apps/:id/alerts', read, async (req) => {
+    const items = await app.prisma.alert.findMany({
+      where: { signature: { appId: req.appId } },
+      orderBy: { detectedAt: 'desc' },
+      take: MAX_LIMIT,
+      include: { signature: { select: { hash: true, signature: true } } },
+    });
+    return { items };
+  });
+
+  app.patch('/v1/apps/:id/alerts/:alertId', write, async (req, reply) => {
+    const { alertId } = req.params as { alertId: string };
+    // The id comes from the URL, so it is gated against this app before any
+    // write — the standing rule in this repo.
+    const found = await app.prisma.alert.findFirst({
+      where: { id: alertId, signature: { appId: req.appId } },
+      select: { id: true },
+    });
+    if (!found) return reply.code(404).send({ error: 'Not Found' });
+
+    return app.prisma.alert.update({
+      where: { id: alertId },
+      data: { acknowledgedAt: new Date() },
+    });
+  });
+
+  app.get('/v1/apps/:id/advice', read, async (req) => {
+    const items = await app.prisma.advice.findMany({
+      where: { signature: { appId: req.appId } },
+      take: MAX_LIMIT,
+      include: { signature: { select: { hash: true, signature: true, model: true } } },
+    });
+    return { items };
+  });
+
+  app.patch('/v1/apps/:id/advice/:adviceId', write, async (req, reply) => {
+    const { adviceId } = req.params as { adviceId: string };
+    const { status } = (req.body ?? {}) as { status?: string };
+    if (status !== 'APPLIED' && status !== 'DISMISSED') {
+      return reply.code(400).send({ error: 'status must be APPLIED or DISMISSED' });
+    }
+
+    const found = await app.prisma.advice.findFirst({
+      where: { id: adviceId, signature: { appId: req.appId } },
+      select: { id: true },
+    });
+    if (!found) return reply.code(404).send({ error: 'Not Found' });
+
+    return app.prisma.advice.update({ where: { id: adviceId }, data: { status } });
+  });
 }
 
 function sumHists(hists: number[][]): number[] {
