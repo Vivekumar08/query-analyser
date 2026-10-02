@@ -187,6 +187,7 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   await app.register(appRoutes);
   await app.register(inviteRoutes);
   await app.register(adminRoutes);
+  await app.register(import('./analysis/routes.js'));
 
   app.get('/healthz', async () => ({ status: 'ok' }));
 
