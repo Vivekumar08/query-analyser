@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { buildApp } from './app.js';
 import { createShutdownHandler } from './shutdown.js';
 
-const app = await buildApp();
+const app = await buildApp({ startScheduler: true });
 const { PORT } = app.config;
 
 const shutdown = createShutdownHandler({
