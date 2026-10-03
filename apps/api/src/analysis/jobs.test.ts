@@ -118,7 +118,11 @@ describe('runNightlyJobs', () => {
     const now = new Date('2026-09-20T02:00:00.000Z');
     await runNightlyJobs({ prisma: app.prisma, now });
 
-    expect(seen[0]?.toISOString()).toBe('2026-09-13T02:00:00.000Z');
+    // Truncated to UTC midnight, NOT `now - 7 days`: hourly rows may only ever
+    // be deleted in whole days, or the oldest retained day is left as a
+    // fragment that the next night's compaction writes over its own correct
+    // daily row. Retention is therefore 7-8 days rather than exactly 7.
+    expect(seen[0]?.toISOString()).toBe('2026-09-13T00:00:00.000Z');
     expect(seen[1]?.toISOString()).toBe('2026-06-22T02:00:00.000Z');
   });
 });
@@ -163,7 +167,7 @@ describe('refreshAdvice (via runNightlyJobs)', () => {
       data: {
         signatureId: dismissedId,
         status: 'DISMISSED',
-        suggestion: { untouched: 1 },
+        suggestion: [{ field: 'untouched', dir: 1 }],
         rationale: 'manually dismissed — should never be overwritten',
       },
     });
@@ -190,17 +194,66 @@ describe('refreshAdvice (via runNightlyJobs)', () => {
       where: { signatureId: dismissedId },
     });
     expect(dismissedAfter.status).toBe('DISMISSED');
-    expect(dismissedAfter.suggestion).toEqual({ untouched: 1 });
+    expect(dismissedAfter.suggestion).toEqual([{ field: 'untouched', dir: 1 }]);
     expect(dismissedAfter.rationale).toBe(dismissedAdvice.rationale);
     expect(dismissedAfter.updatedAt.getTime()).toBe(dismissedAdvice.updatedAt.getTime());
 
     const freshAfter = await app.prisma.advice.findUnique({ where: { signatureId: freshId } });
     expect(freshAfter).not.toBeNull();
     expect(freshAfter?.status).toBe('OPEN');
-    expect(freshAfter?.suggestion).toEqual({ status: 1, createdAt: -1 });
+    expect(freshAfter?.suggestion).toEqual([
+      { field: 'status', dir: 1 },
+      { field: 'createdAt', dir: -1 },
+    ]);
 
     const nullAfter = await app.prisma.advice.findUnique({ where: { signatureId: nullId } });
     expect(nullAfter).toBeNull();
+  });
+
+  /**
+   * `refreshAdvice` now pages apps and signatures by id cursor instead of one
+   * unbounded `findMany`, and skips signatures whose shape already matches
+   * the stored advice. `filterShape`/`sortKeys` are written once at insert
+   * and never updated (ingest/writer.ts's ON CONFLICT touches only `lastSeen`
+   * and `redactedSample`), so in a steady state the second night must write
+   * nothing at all — the job stops rewriting the whole table, `updatedAt`
+   * stops churning, and `GET /advice`'s ordering stops reshuffling nightly.
+   *
+   * This also covers the app-paging loop with more than one app, since each
+   * `seedSignature` creates its own org and app.
+   */
+  it('writes once and then skips unchanged shapes on later nights', async () => {
+    const a = await seedSignature([{ key: 'email', op: 'eq' }], []);
+    const b = await seedSignature([{ key: 'status', op: 'eq' }], [{ key: 'createdAt', dir: -1 }]);
+
+    const first = await runNightlyJobs({
+      prisma: app.prisma,
+      now: new Date('2026-09-20T02:00:00.000Z'),
+    });
+    expect(first.adviceWritten).toBe(2);
+
+    const writtenAt = await app.prisma.advice.findMany({
+      where: { signatureId: { in: [a, b] } },
+      select: { signatureId: true, updatedAt: true },
+      orderBy: { signatureId: 'asc' },
+    });
+    expect(writtenAt).toHaveLength(2);
+
+    const second = await runNightlyJobs({
+      prisma: app.prisma,
+      now: new Date('2026-09-21T02:00:00.000Z'),
+    });
+    expect(second.adviceWritten).toBe(0);
+
+    // Nothing was touched, not even to rewrite the identical value.
+    const after = await app.prisma.advice.findMany({
+      where: { signatureId: { in: [a, b] } },
+      select: { signatureId: true, updatedAt: true },
+      orderBy: { signatureId: 'asc' },
+    });
+    expect(after.map((r) => r.updatedAt.getTime())).toEqual(
+      writtenAt.map((r) => r.updatedAt.getTime()),
+    );
   });
 });
 

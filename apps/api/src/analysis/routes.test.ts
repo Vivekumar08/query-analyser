@@ -116,6 +116,7 @@ describe('read APIs', () => {
       model: null,
       op: null,
       limit: 50,
+      sort: 'wasted',
     });
     expect(rows.length).toBeGreaterThan(0);
     // The whole point: assert the raw query-result type, not the
@@ -225,36 +226,131 @@ describe('read APIs', () => {
     expect(res.json().items[0].hash).toBe(sigHash);
   });
 
-  it('supports sort=count, which orders differently from the wasted-time default', async () => {
+  /**
+   * `sort` must choose the RANKING the `LIMIT` is applied to, not re-order a
+   * page already chosen by wasted time. The old test seeded two signatures
+   * and never passed a `limit`, so the page always contained everything and
+   * a page re-order was indistinguishable from a real ranking. This seeds
+   * five signatures and asks for two: under a page re-order, the `sort=count`
+   * and `sort=maxMs` pages can only ever contain the two worst by wasted
+   * time, which share nothing with the two worst by count or by maxMs.
+   */
+  it('applies the limit to the requested ranking, not to wasted time', async () => {
+    const { token, appId } = await seed(); // count 10, totalMs 1000, maxMs 300
+    await addSignature(
+      appId,
+      { hash: 'worst-waste-1' },
+      { count: 1, totalMs: 100_000n, maxMs: 50, hist: [1, 0, 0, 0, 0, 0, 0, 0] },
+    );
+    await addSignature(
+      appId,
+      { hash: 'worst-waste-2' },
+      { count: 2, totalMs: 90_000n, maxMs: 60, hist: [2, 0, 0, 0, 0, 0, 0, 0] },
+    );
+    await addSignature(
+      appId,
+      { hash: 'worst-count' },
+      { count: 500, totalMs: 100n, maxMs: 10, hist: [500, 0, 0, 0, 0, 0, 0, 0] },
+    );
+    await addSignature(
+      appId,
+      { hash: 'worst-max' },
+      { count: 3, totalMs: 200n, maxMs: 950, hist: [0, 0, 0, 0, 0, 0, 3, 0] },
+    );
+
+    const page = async (sort?: string) => {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/v1/apps/${appId}/queries?limit=2${sort ? `&sort=${sort}` : ''}`,
+        headers: as(token),
+      });
+      expect(res.statusCode).toBe(200);
+      return res.json();
+    };
+
+    const wasted = await page();
+    expect(wasted.items.map((i: { hash: string }) => i.hash)).toEqual([
+      'worst-waste-1',
+      'worst-waste-2',
+    ]);
+    expect(wasted.sortExact).toBe(true);
+
+    const byCount = await page('count');
+    expect(byCount.items).toHaveLength(2);
+    expect(byCount.items[0].hash).toBe('worst-count');
+    expect(byCount.items[0].count).toBe(500);
+    expect(byCount.sortExact).toBe(true);
+
+    const byMax = await page('maxMs');
+    expect(byMax.items).toHaveLength(2);
+    expect(byMax.items[0].hash).toBe('worst-max');
+    expect(byMax.items[0].maxMs).toBe(950);
+    expect(byMax.sortExact).toBe(true);
+  });
+
+  /**
+   * `p95` is computed from a summed histogram in TypeScript, after the rows
+   * are fetched, so it cannot rank in SQL. The page re-order is still the
+   * only cheap option — but the response must say so rather than hiding an
+   * approximation behind the same parameter name as the exact keys.
+   */
+  it('marks sort=p95 as inexact and still re-orders the page by it', async () => {
     const { token, appId } = await seed();
-    const highCountLowWaste = await addSignature(
+    await addSignature(
       appId,
-      { hash: 'high-count' },
-      { count: 100, totalMs: 1000n, maxMs: 50, hist: [100, 0, 0, 0, 0, 0, 0, 0] },
-    );
-    const lowCountHighWaste = await addSignature(
-      appId,
-      { hash: 'high-waste' },
-      { count: 5, totalMs: 5000n, maxMs: 900, hist: [0, 0, 0, 0, 0, 5, 0, 0] },
+      { hash: 'slow-tail' },
+      { count: 4, totalMs: 4000n, maxMs: 900, hist: [0, 0, 0, 0, 0, 4, 0, 0] },
     );
 
-    const byWaste = await app.inject({
+    const res = await app.inject({
       method: 'GET',
-      url: `/v1/apps/${appId}/queries`,
+      url: `/v1/apps/${appId}/queries?sort=p95`,
       headers: as(token),
     });
-    const byCount = await app.inject({
+    const body = res.json();
+    expect(body.sort).toBe('p95');
+    expect(body.sortExact).toBe(false);
+    expect(body.sortNote).toContain('top `limit` signatures by wasted time');
+
+    const p95s: number[] = body.items.map((i: { p95: { value: number } }) => i.p95.value);
+    expect(p95s).toEqual([...p95s].sort((a, b) => b - a));
+  });
+
+  it('400s a window whose from is after its to', async () => {
+    const { token, appId } = await seed();
+    const res = await app.inject({
       method: 'GET',
-      url: `/v1/apps/${appId}/queries?sort=count`,
+      url: `/v1/apps/${appId}/queries?from=2026-09-20T00:00:00.000Z&to=2026-09-10T00:00:00.000Z`,
       headers: as(token),
     });
+    // Previously a cheerful empty 200, indistinguishable from "no traffic".
+    expect(res.statusCode).toBe(400);
+  });
 
-    const rankOf = (hashes: string[], hash: string) => hashes.indexOf(hash);
-    const wasteHashes = byWaste.json().items.map((i: { hash: string }) => i.hash);
-    const countHashes = byCount.json().items.map((i: { hash: string }) => i.hash);
+  it('400s limit=0 instead of silently serving the default page', async () => {
+    const { token, appId } = await seed();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/apps/${appId}/queries?limit=0`,
+      headers: as(token),
+    });
+    expect(res.statusCode).toBe(400);
+  });
 
-    expect(rankOf(wasteHashes, lowCountHighWaste.hash)).toBeLessThan(rankOf(wasteHashes, highCountLowWaste.hash));
-    expect(rankOf(countHashes, highCountLowWaste.hash)).toBeLessThan(rankOf(countHashes, lowCountHighWaste.hash));
+  /**
+   * `QueryDailyRollup.day` is UTC midnight, so comparing it against an
+   * instant dropped the oldest day of every daily window — "last 30 days"
+   * answered with 29.
+   */
+  it('truncates from to the UTC day on the daily grain', async () => {
+    const { token, appId } = await seed();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/apps/${appId}/queries?from=2026-08-15T13:45:00.000Z&to=2026-09-20T00:00:00.000Z`,
+      headers: as(token),
+    });
+    expect(res.json().grain).toBe('daily');
+    expect(res.json().from).toBe('2026-08-15T00:00:00.000Z');
   });
 
   it('returns a series of points', async () => {

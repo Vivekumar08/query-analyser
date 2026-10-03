@@ -137,10 +137,12 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   // Fastify's own default error handler / reply serializer instead of ours.
   //
   // Prisma returns BigInt for QueryRollup/QueryDailyRollup's `totalMs`
-  // column, and JSON.stringify throws on a bare BigInt. Every route that
-  // might ever return one already converts it to a plain number, but this
-  // is a safety net: if a stray BigInt reaches a reply anyway, serialize it
-  // as a string instead of crashing the response.
+  // column, and JSON.stringify throws on a bare BigInt. This serializer is
+  // the MECHANISM that turns those into JSON, not a safety net: the analysis
+  // read routes return raw BigInt `totalMs` on four responses (the ranked
+  // list's items, the signature detail, and both grains of the series), and
+  // the spec requires this serializer to be how they are rendered. Deleting
+  // it does not degrade gracefully — it 500s every one of those routes.
   app.setReplySerializer((payload) =>
     JSON.stringify(payload, (_key, value) => (typeof value === 'bigint' ? value.toString() : value)),
   );
