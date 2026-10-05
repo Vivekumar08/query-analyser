@@ -11,6 +11,15 @@ const schema = z.object({
   // (only when a trusted proxy terminates TLS in front of this service); or a
   // comma-separated list of trusted proxy IPs/CIDRs, which Fastify parses itself.
   TRUST_PROXY: z.string().default('false'),
+  SMTP_HOST: z.string().min(1),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_SECURE: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  SMTP_USER: z.string().min(1),
+  SMTP_PASS: z.string().min(1),
+  SMTP_FROM_NAME: z.string().min(1).default('Vigor Tempo'),
+  // Origin of the web app the emailed links point at. The API never serves
+  // these paths; it only ever receives the token back in a POST body.
+  WEB_ORIGIN: z.string().url().default('http://localhost:3000'),
 });
 
 export type Config = z.infer<typeof schema>;
