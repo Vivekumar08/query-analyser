@@ -28,4 +28,4 @@ export function getPrisma(connectionString: string): PrismaClient {
 }
 
 export type { PrismaClient };
-export { Role, AdviceStatus } from './generated/prisma/enums.js';
+export { Role, AdviceStatus, TokenPurpose } from './generated/prisma/enums.js';
