@@ -163,15 +163,28 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       // oracle the identical body is written to avoid.
       void reply.code(202).send({ status: 'sent' });
 
-      const user = await app.prisma.user.findUnique({ where: { email }, select: { id: true, email: true } });
-      if (!user) return;
+      // Everything below runs after the reply has already been flushed, so a
+      // thrown error here can no longer change what the client saw — it can
+      // only be logged. Both Prisma calls can throw (a transient DB failure),
+      // so this is wrapped the same way the signup resend is, to make sure a
+      // failure here is visible in the logs rather than silently swallowed.
+      try {
+        // Unreachable from the client's perspective: the reply above has
+        // already gone out, so this branch only ever short-circuits the rest
+        // of *this* function's work (skipping the issue+send for an unknown
+        // email) — it can never surface as a different response.
+        const user = await app.prisma.user.findUnique({ where: { email }, select: { id: true, email: true } });
+        if (!user) return;
 
-      const { token } = await issueVerificationToken(app.prisma, user.id, 'RESET');
-      await app.mailer.send({
-        to: user.email,
-        subject: 'Reset your password',
-        text: `Reset your password:\n\n${resetLink(token)}\n\nThis link expires in 1 hour. If you did not ask for this, ignore it.`,
-      });
+        const { token } = await issueVerificationToken(app.prisma, user.id, 'RESET');
+        await app.mailer.send({
+          to: user.email,
+          subject: 'Reset your password',
+          text: `Reset your password:\n\n${resetLink(token)}\n\nThis link expires in 1 hour. If you did not ask for this, ignore it.`,
+        });
+      } catch (err) {
+        req.log.error({ err: err instanceof Error ? err.name : 'unknown' }, 'password reset mail failed');
+      }
     },
   );
 

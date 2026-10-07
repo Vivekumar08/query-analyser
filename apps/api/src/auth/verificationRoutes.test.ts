@@ -126,6 +126,15 @@ describe('password reset', () => {
 });
 
 describe('account enumeration', () => {
+  // This test documents the intended property rather than independently
+  // gating it: the handler sends a single unconditional `reply.code(202).send(...)`
+  // literal before `email` is ever looked up, so there is no realistic
+  // single-edit mutation that flips the status/body here without also
+  // failing "does not wait for the mail to send" below — that latency test is
+  // the actual gate. Kept anyway because it still catches a *reordering* of
+  // the handler (lookup moved before the reply) — in that case both tests
+  // fail together, which is useful signal — but a future reader must not
+  // mistake this test for a second, independent line of defence.
   it('answers identically for a known and an unknown email', async () => {
     const known = `e1-${Date.now()}@x.io`;
     await signup(known);
