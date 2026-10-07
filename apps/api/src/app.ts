@@ -6,6 +6,7 @@ import { orgRoutes } from './orgs/routes.js';
 import { appRoutes } from './apps/routes.js';
 import { inviteRoutes } from './orgs/invites.js';
 import { adminRoutes } from './admin/routes.js';
+import { createMailer, type Mailer, type MailMessage } from './mail/mailer.js';
 
 export interface BuildOptions {
   logger?: boolean;
@@ -117,6 +118,21 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
 
   app.decorate('config', config);
 
+  const sentMail: MailMessage[] = [];
+  app.decorate('sentMail', sentMail);
+  app.decorate('mailDelayMs', 0);
+
+  const mailer: Mailer =
+    config.NODE_ENV === 'test'
+      ? {
+          async send(msg) {
+            if (app.mailDelayMs > 0) await new Promise((r) => setTimeout(r, app.mailDelayMs));
+            sentMail.push(msg);
+          },
+        }
+      : createMailer(config, app.log);
+  app.decorate('mailer', mailer);
+
   // Installed @fastify/compress (8.x) splits `global` into two independent
   // flags — `globalCompression` and `globalDecompression` — each defaulting
   // to `true` when `global` is unset. A bare `global: false` (as an older
@@ -197,5 +213,12 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
 }
 
 declare module 'fastify' {
-  interface FastifyInstance { config: Config; }
+  interface FastifyInstance {
+    config: Config;
+    mailer: Mailer;
+    /** Test seam: every message the fake transport accepted, in order. */
+    sentMail: MailMessage[];
+    /** Test seam: artificial send latency, used to prove the reply is not awaited. */
+    mailDelayMs: number;
+  }
 }

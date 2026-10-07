@@ -2,11 +2,18 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { hashPassword, verifyPassword } from './password.js';
 import { issueRefreshToken, rotateRefreshToken, consumeRefreshToken, REFRESH_TTL_MS } from './tokens.js';
+import { issueVerificationToken, consumeVerificationToken } from './verification.js';
 
 const COOKIE = 'qa_refresh';
 
 const signupSchema = z.object({ email: z.string().email().max(200), password: z.string().min(12).max(200), name: z.string().min(1).max(100) });
 const loginSchema = z.object({ email: z.string().email(), password: z.string() });
+const confirmSchema = z.object({ token: z.string().min(1).max(200) });
+const emailSchema = z.object({ email: z.string().email().max(200) });
+const resetSchema = z.object({
+  token: z.string().min(1).max(200),
+  password: z.string().min(12).max(200),
+});
 
 // Memoised dummy hash used to equalise login timing between "unknown email"
 // and "wrong password" — both must pay the same argon2id cost, or repeated
@@ -30,6 +37,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return accessToken;
   };
 
+  const verifyLink = (token: string) => `${app.config.WEB_ORIGIN}/verify?token=${token}`;
+  const resetLink = (token: string) => `${app.config.WEB_ORIGIN}/reset-password?token=${token}`;
+
   // The limiter keys on IP only, so a shared egress address (an office, a
   // university, CGNAT) must not get locked out by a normal team signing up
   // together — 10/minute was tight enough to do that. 30/minute still
@@ -47,6 +57,21 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       select: { id: true, email: true, name: true, isPlatformAdmin: true },
     });
     const accessToken = await issue(reply, user.id);
+
+    // A mail failure must never fail signup, and the user can always resend
+    // via /v1/auth/verify/request. `mailer.send` itself never throws, but the
+    // token issuance is a DB write and is wrapped defensively all the same.
+    try {
+      const { token } = await issueVerificationToken(app.prisma, user.id, 'VERIFY');
+      await app.mailer.send({
+        to: email.toLowerCase(),
+        subject: 'Confirm your email',
+        text: `Confirm your email to finish setting up your account:\n\n${verifyLink(token)}\n\nThis link expires in 24 hours.`,
+      });
+    } catch (err) {
+      req.log.error({ err: err instanceof Error ? err.name : 'unknown' }, 'verification mail failed');
+    }
+
     return reply.code(201).send({ accessToken, user });
   });
 
@@ -91,5 +116,85 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     });
     if (!user) return reply.code(401).send({ error: 'unauthorized' });
     return user;
+  });
+
+  app.post(
+    '/v1/auth/verify/request',
+    { preHandler: [app.authenticate], config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const user = await app.prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { id: true, email: true, emailVerifiedAt: true },
+      });
+      if (!user) return reply.code(404).send({ error: 'Not Found' });
+      if (user.emailVerifiedAt) return reply.code(202).send({ status: 'already verified' });
+
+      const { token } = await issueVerificationToken(app.prisma, user.id, 'VERIFY');
+      await app.mailer.send({
+        to: user.email,
+        subject: 'Confirm your email',
+        text: `Confirm your email to finish setting up your account:\n\n${verifyLink(token)}\n\nThis link expires in 24 hours.`,
+      });
+      return reply.code(202).send({ status: 'sent' });
+    },
+  );
+
+  app.post('/v1/auth/verify/confirm', async (req, reply) => {
+    const parsed = confirmSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
+
+    const userId = await consumeVerificationToken(app.prisma, parsed.data.token, 'VERIFY');
+    if (!userId) return reply.code(400).send({ error: 'invalid or expired token' });
+
+    await app.prisma.user.update({ where: { id: userId }, data: { emailVerifiedAt: new Date() } });
+    return reply.send({ status: 'verified' });
+  });
+
+  app.post(
+    '/v1/auth/password/request',
+    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const parsed = emailSchema.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
+      const email = parsed.data.email.toLowerCase();
+
+      // Reply FIRST, then do the work. An awaited lookup-and-send would make
+      // response latency reveal whether the account exists, which is the same
+      // oracle the identical body is written to avoid.
+      void reply.code(202).send({ status: 'sent' });
+
+      const user = await app.prisma.user.findUnique({ where: { email }, select: { id: true, email: true } });
+      if (!user) return;
+
+      const { token } = await issueVerificationToken(app.prisma, user.id, 'RESET');
+      await app.mailer.send({
+        to: user.email,
+        subject: 'Reset your password',
+        text: `Reset your password:\n\n${resetLink(token)}\n\nThis link expires in 1 hour. If you did not ask for this, ignore it.`,
+      });
+    },
+  );
+
+  app.post('/v1/auth/password/confirm', async (req, reply) => {
+    const parsed = resetSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
+
+    const userId = await consumeVerificationToken(app.prisma, parsed.data.token, 'RESET');
+    if (!userId) return reply.code(400).send({ error: 'invalid or expired token' });
+
+    await app.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash: await hashPassword(parsed.data.password) },
+    });
+
+    // A password change invalidates every session. The API already revokes a
+    // refresh family on replay; resetting after a compromise should do at least
+    // as much.
+    await app.prisma.refreshToken.updateMany({
+      where: { userId, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
+
+    return reply.send({ status: 'reset' });
   });
 }
