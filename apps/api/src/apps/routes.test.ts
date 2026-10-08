@@ -11,6 +11,7 @@ afterAll(async () => { await app.close(); });
 
 async function owner() {
   const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'o@x.io', password: 'correct horse battery', name: 'O' } });
+  await app.prisma.user.update({ where: { email: 'o@x.io' }, data: { emailVerifiedAt: new Date() } });
   const token = s.json().accessToken as string;
   const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: { authorization: `Bearer ${token}` }, payload: { name: 'Acme' } })).json();
   return { token, orgId: org.id as string, h: { authorization: `Bearer ${token}` } };
@@ -43,6 +44,7 @@ describe('apps', () => {
     const o = await owner();
     const a = (await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'web', env: 'production' } })).json();
     const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'x@x.io', password: 'correct horse battery', name: 'X' } });
+    await app.prisma.user.update({ where: { email: 'x@x.io' }, data: { emailVerifiedAt: new Date() } });
     const res = await app.inject({ method: 'GET', url: `/v1/apps/${a.id}`, headers: { authorization: `Bearer ${s.json().accessToken}` } });
     expect(res.statusCode).toBe(404);
   });
@@ -51,6 +53,7 @@ describe('apps', () => {
     const o = await owner();
     const a = (await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'web', env: 'production' } })).json();
     const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'x2@x.io', password: 'correct horse battery', name: 'X2' } });
+    await app.prisma.user.update({ where: { email: 'x2@x.io' }, data: { emailVerifiedAt: new Date() } });
     const h = { authorization: `Bearer ${s.json().accessToken}` };
     const foreign = await app.inject({ method: 'GET', url: `/v1/apps/${a.id}`, headers: h });
     const nonexistent = await app.inject({ method: 'GET', url: '/v1/apps/00000000-0000-0000-0000-000000000000', headers: h });
@@ -72,6 +75,7 @@ describe('apps', () => {
   it('403s a VIEWER attempting to create an app', async () => {
     const o = await owner();
     const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'v@x.io', password: 'correct horse battery', name: 'V' } });
+    await app.prisma.user.update({ where: { email: 'v@x.io' }, data: { emailVerifiedAt: new Date() } });
     await app.prisma.membership.create({ data: { userId: s.json().user.id, orgId: o.orgId, role: 'VIEWER' } });
     const h = { authorization: `Bearer ${s.json().accessToken}` };
     const res = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: h, payload: { name: 'web', env: 'production' } });
@@ -113,6 +117,7 @@ describe('keys', () => {
     const a = (await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'web', env: 'production' } })).json();
     const { id: keyId } = (await app.inject({ method: 'POST', url: `/v1/apps/${a.id}/keys`, headers: o.h })).json();
     const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'm@x.io', password: 'correct horse battery', name: 'M' } });
+    await app.prisma.user.update({ where: { email: 'm@x.io' }, data: { emailVerifiedAt: new Date() } });
     await app.prisma.membership.create({ data: { userId: s.json().user.id, orgId: o.orgId, role: 'MEMBER' } });
     const h = { authorization: `Bearer ${s.json().accessToken}` };
     expect((await app.inject({ method: 'POST', url: `/v1/apps/${a.id}/keys`, headers: h })).statusCode).toBe(403);

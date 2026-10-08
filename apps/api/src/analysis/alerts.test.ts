@@ -11,6 +11,7 @@ async function user(email: string) {
     url: '/v1/auth/signup',
     payload: { email, password: 'correct-horse-battery-staple-9', name: 'A' },
   });
+  await app.prisma.user.update({ where: { email }, data: { emailVerifiedAt: new Date() } });
   return { token: res.json().accessToken as string, id: res.json().user.id as string };
 }
 const as = (t: string) => ({ authorization: `Bearer ${t}` });

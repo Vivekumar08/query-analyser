@@ -22,6 +22,7 @@ async function user(email: string) {
     remoteAddress: `10.0.0.${nextIp++}`,
     payload: { email, password: 'correct horse battery', name: email },
   });
+  await app.prisma.user.update({ where: { email }, data: { emailVerifiedAt: new Date() } });
   return { token: res.json().accessToken as string, id: res.json().user.id as string };
 }
 const as = (token: string) => ({ authorization: `Bearer ${token}` });

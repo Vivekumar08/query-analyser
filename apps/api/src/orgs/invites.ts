@@ -16,7 +16,7 @@ const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
 class InviteGoneError extends Error {}
 
 export async function inviteRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/v1/orgs/:org/invites', { preHandler: [app.authenticate, requireRole('ADMIN')] }, async (req, reply) => {
+  app.post('/v1/orgs/:org/invites', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req, reply) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
     // Privilege-escalation gate: an ADMIN who could mint an OWNER invite
@@ -47,7 +47,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send({ ...row, token });
   });
 
-  app.get('/v1/orgs/:org/invites', { preHandler: [app.authenticate, requireRole('ADMIN')] }, async (req) =>
+  app.get('/v1/orgs/:org/invites', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req) =>
     app.prisma.invite.findMany({
       where: { orgId: req.membership.orgId, acceptedAt: null, expiresAt: { gt: new Date() } },
       select: { id: true, email: true, role: true, expiresAt: true, createdAt: true },
@@ -58,7 +58,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
   // gated first: we look the invite up by its hash before doing anything
   // else, and every failure mode below (404 unknown, 410 expired/used, 403
   // wrong email, 409 already a member) is checked before any write.
-  app.post('/v1/invites/:token/accept', { preHandler: [app.authenticate] }, async (req, reply) => {
+  app.post('/v1/invites/:token/accept', { preHandler: [app.authenticate, app.requireVerified] }, async (req, reply) => {
     const { token } = req.params as { token: string };
     const inv = await app.prisma.invite.findUnique({
       where: { tokenHash: hashToken(token) },

@@ -267,7 +267,7 @@ function pointOf(r: { count: number; totalMs: bigint; maxMs: number; hist: numbe
 }
 
 export default async function analysisRoutes(app: FastifyInstance): Promise<void> {
-  const read = { preHandler: [app.authenticate, requireAppRole('VIEWER')] };
+  const read = { preHandler: [app.authenticate, app.requireVerified, requireAppRole('VIEWER')] };
 
   app.get('/v1/apps/:id/queries', read, async (req, reply) => {
     const parsed = listQuerySchema.safeParse(req.query);
@@ -387,7 +387,7 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
     return { grain, from: from.toISOString(), to: to.toISOString(), points };
   });
 
-  const write = { preHandler: [app.authenticate, requireAppRole('MEMBER')] };
+  const write = { preHandler: [app.authenticate, app.requireVerified, requireAppRole('MEMBER')] };
 
   app.get('/v1/apps/:id/alerts', read, async (req) => {
     const items = await app.prisma.alert.findMany({

@@ -11,6 +11,7 @@ afterAll(async () => { await app.close(); });
 
 async function user(email: string) {
   const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email, password: 'correct horse battery', name: email } });
+  await app.prisma.user.update({ where: { email }, data: { emailVerifiedAt: new Date() } });
   return { id: s.json().user.id as string, h: { authorization: `Bearer ${s.json().accessToken}` } };
 }
 

@@ -13,7 +13,7 @@ export function slugify(name: string): string {
 }
 
 export async function orgRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/v1/orgs', { preHandler: [app.authenticate] }, async (req) => {
+  app.get('/v1/orgs', { preHandler: [app.authenticate, app.requireVerified] }, async (req) => {
     const rows = await app.prisma.membership.findMany({
       where: { userId: req.user.id },
       select: { role: true, org: { select: { id: true, name: true, slug: true, plan: true, createdAt: true } } },
@@ -22,7 +22,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     return rows.map((r) => ({ ...r.org, role: r.role }));
   });
 
-  app.post('/v1/orgs', { preHandler: [app.authenticate] }, async (req, reply) => {
+  app.post('/v1/orgs', { preHandler: [app.authenticate, app.requireVerified] }, async (req, reply) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
 
@@ -57,7 +57,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.get('/v1/orgs/:org', { preHandler: [app.authenticate, requireRole('VIEWER')] }, async (req) => {
+  app.get('/v1/orgs/:org', { preHandler: [app.authenticate, app.requireVerified, requireRole('VIEWER')] }, async (req) => {
     const org = await app.prisma.organization.findUniqueOrThrow({
       where: { id: req.membership.orgId },
       select: { id: true, name: true, slug: true, plan: true, createdAt: true },
@@ -65,7 +65,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     return { ...org, role: req.membership.role };
   });
 
-  app.get('/v1/orgs/:org/members', { preHandler: [app.authenticate, requireRole('ADMIN')] }, async (req) => {
+  app.get('/v1/orgs/:org/members', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req) => {
     return app.prisma.membership.findMany({
       where: { orgId: req.membership.orgId },
       select: { id: true, role: true, createdAt: true, user: { select: { id: true, email: true, name: true } } },
@@ -81,7 +81,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
   class LastOwnerError extends Error {}
   const NOT_FOUND = Symbol('not-found');
 
-  app.patch('/v1/orgs/:org/members/:id', { preHandler: [app.authenticate, requireRole('OWNER')] }, async (req, reply) => {
+  app.patch('/v1/orgs/:org/members/:id', { preHandler: [app.authenticate, app.requireVerified, requireRole('OWNER')] }, async (req, reply) => {
     const parsed = roleSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
 
@@ -125,7 +125,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.delete('/v1/orgs/:org/members/:id', { preHandler: [app.authenticate, requireRole('OWNER')] }, async (req, reply) => {
+  app.delete('/v1/orgs/:org/members/:id', { preHandler: [app.authenticate, app.requireVerified, requireRole('OWNER')] }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const orgId = req.membership.orgId;
 
