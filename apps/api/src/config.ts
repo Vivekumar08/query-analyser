@@ -19,7 +19,11 @@ const schema = z.object({
   SMTP_FROM_NAME: z.string().min(1).default('Vigor Tempo'),
   // Origin of the web app the emailed links point at. The API never serves
   // these paths; it only ever receives the token back in a POST body.
-  WEB_ORIGIN: z.string().url().default('http://localhost:3000'),
+  //
+  // No default: there is no web app in this repo yet, so a default here would
+  // silently ship production emails containing a localhost link. A deploy
+  // must choose this explicitly or fail loudly at boot.
+  WEB_ORIGIN: z.string().url(),
 });
 
 export type Config = z.infer<typeof schema>;

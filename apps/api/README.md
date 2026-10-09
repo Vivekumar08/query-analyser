@@ -104,6 +104,27 @@ The container's `CMD` runs `pnpm db:deploy` (i.e. `prisma migrate deploy`)
 and then starts the server. Put it behind TLS and point
 `ingest.query-analyser.dev` (the SDK's default endpoint) at it.
 
+### Email: required vars, operator-assisted verification until `apps/web` exists
+
+Four variables must be set for a deploy's outgoing mail to work: `SMTP_HOST`,
+`SMTP_USER`, `SMTP_PASS`, and `WEB_ORIGIN`. None of the four default to
+anything — a deploy missing any of them fails at container boot, in
+`loadConfig`, naming the missing variable(s) by path, rather than failing
+silently later (a swallowed send, or an emailed link pointing at
+`localhost`).
+
+There is no web app in this repo yet (`apps/` contains only `api`). Until
+`apps/web` exists and serves `/verify` and `/reset-password`, a **new**
+signup's email verification is operator-assisted: the token arrives in the
+emailed link's query string (`?token=...`), and an operator completes it by
+calling `POST /v1/auth/verify/confirm` with `{ "token": "..." }` as the
+request body. The same applies to `POST /v1/auth/password/confirm` for a
+password reset.
+
+Accounts that existed before this gate shipped were grandfathered by the
+backfill migration (`20261011120000_backfill_email_verified_at`) — they do
+not need an operator to do anything.
+
 **Status of this deploy path:** verified end to end on 1 Oct 2026 against
 EasyPanel (`prod/query-analyser-api`, Postgres 17). The image builds, the
 container boots, `prisma migrate deploy` applies all three migrations, and
