@@ -21,16 +21,25 @@ export async function issueVerificationToken(
   userId: string,
   purpose: TokenPurpose,
 ): Promise<{ token: string; expiresAt: Date }> {
-  await prisma.verificationToken.updateMany({
-    where: { userId, purpose, consumedAt: null },
-    data: { consumedAt: new Date() },
-  });
-
   const token = randomBytes(32).toString('base64url');
   const expiresAt = new Date(Date.now() + ttlFor(purpose));
-  await prisma.verificationToken.create({
-    data: { userId, purpose, tokenHash: hashToken(token), expiresAt },
+
+  // The burn-the-old-token updateMany and the insert of the new one must
+  // commit together or not at all. Two separate statements leave a torn state
+  // reachable by nothing more exotic than a transient DB error between them:
+  // the old token is consumed, the new one never lands, and the caller (which
+  // logs and swallows this on the request path) has no live token to show
+  // for it.
+  await prisma.$transaction(async (tx) => {
+    await tx.verificationToken.updateMany({
+      where: { userId, purpose, consumedAt: null },
+      data: { consumedAt: new Date() },
+    });
+    await tx.verificationToken.create({
+      data: { userId, purpose, tokenHash: hashToken(token), expiresAt },
+    });
   });
+
   return { token, expiresAt };
 }
 
