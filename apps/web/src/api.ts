@@ -40,10 +40,19 @@ export async function apiFetch<T>(
       cache: 'no-store',
     });
   } catch (err) {
-    return { ok: false, status: 0, error: err instanceof Error ? err.name : 'network error' };
+    return { ok: false, status: 0, error: err instanceof Error ? err.message : 'network error' };
   }
 
-  const raw = await res.text();
+  let raw: string;
+  try {
+    raw = await res.text();
+  } catch (err) {
+    // A body read can fail independently of the request succeeding: aborted
+    // stream, decompression error. Returning rather than throwing is the
+    // invariant every caller relies on.
+    return { ok: false, status: res.status, error: err instanceof Error ? err.message : 'body read failed' };
+  }
+
   let parsed: unknown = undefined;
   if (raw) {
     try {
@@ -62,4 +71,19 @@ export async function apiFetch<T>(
     code: body.code,
     error: body.error ?? `request failed with ${res.status}`,
   };
+}
+
+/**
+ * An API call that REQUIRES a token.
+ *
+ * Separate from `apiFetch` so a protected read that forgets its token fails
+ * to compile rather than silently making an unauthenticated call. The optional
+ * third parameter on `apiFetch` made that mistake invisible until runtime.
+ */
+export function authedFetch<T>(
+  path: string,
+  accessToken: string,
+  init?: RequestInit,
+): Promise<ApiResult<T>> {
+  return apiFetch<T>(path, init, accessToken);
 }

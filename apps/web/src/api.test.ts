@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { apiFetch, apiOrigin } from './api.js';
+import { apiFetch, apiOrigin, authedFetch } from './api.js';
 
 const ORIGIN = 'https://api.example.com';
 let originalFetch: typeof globalThis.fetch;
@@ -86,5 +86,44 @@ describe('apiFetch', () => {
     const res = await apiFetch('/v1/me');
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.status).toBe(502);
+  });
+
+  it('returns a failure result when the body cannot be read', async () => {
+    // A response whose body rejects mid-read. apiFetch must not throw —
+    // every caller branches on the result and none of them has a catch.
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      text: () => Promise.reject(new Error('aborted')),
+    })) as unknown as typeof globalThis.fetch;
+    const res = await apiFetch('/v1/me');
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.status).toBe(200);
+  });
+
+  it('returns ok with no data on a 204/empty body', async () => {
+    globalThis.fetch = vi.fn(async () => new Response(null, { status: 204 })) as unknown as typeof globalThis.fetch;
+    const res = await apiFetch('/v1/me');
+    expect(res).toEqual({ ok: true, data: undefined });
+  });
+
+  it('survives an error body that is valid JSON but not an object', async () => {
+    mockFetch(500, 'just a string');
+    const res = await apiFetch('/v1/me');
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.status).toBe(500);
+      expect(res.code).toBeUndefined();
+      expect(res.error).toBe('request failed with 500');
+    }
+  });
+});
+
+describe('authedFetch', () => {
+  it('always attaches the bearer token', async () => {
+    const fn = mockFetch(200, {});
+    await authedFetch('/v1/me', 'tok456');
+    const headers = new Headers((fn.mock.calls[0]![1] as RequestInit).headers);
+    expect(headers.get('authorization')).toBe('Bearer tok456');
   });
 });
