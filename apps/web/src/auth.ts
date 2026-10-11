@@ -28,7 +28,18 @@ export async function getSession(): Promise<Session | null> {
   if (!accessToken) return null;
 
   const res = await authedFetch<Session['user']>('/v1/me', accessToken);
-  if (!res.ok) return null;
+  if (!res.ok) {
+    // Only a 401 means "this token is no good" — the refreshable case, where
+    // null correctly sends the caller to the refresh route. A 500, a network
+    // error, or anything else means the API is unreachable or broken, which
+    // is not fixed by a refresh: treating it as "no session" would send the
+    // visitor straight back into the refresh loop on every retry, rotating a
+    // real refresh token each time for no reason. Throwing instead lets it
+    // surface as a real error rather than being silently reinterpreted as
+    // "logged out".
+    if (res.status === 401) return null;
+    throw new Error(`session check failed with status ${res.status}: ${res.error}`);
+  }
 
   return { accessToken, user: res.data };
 }

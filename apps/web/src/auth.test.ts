@@ -61,6 +61,21 @@ describe('getSession', () => {
     )) as unknown as typeof globalThis.fetch;
     expect(await getSession()).toBeNull();
   });
+
+  it('throws rather than returning null when the API fails with something other than 401', async () => {
+    // A 500 or a network error means the API is unreachable or broken — not
+    // that the token is bad. Treating it like a 401 would send the caller
+    // straight into requireSession's refresh redirect on every retry,
+    // rotating a real refresh token each time for no reason. This must
+    // surface as a real failure instead of being silently reinterpreted as
+    // "no session".
+    cookieStore.set('qa_session', 'tok');
+    globalThis.fetch = vi.fn(async (_input?: RequestInfo | URL, _init?: RequestInit) => new Response(
+      JSON.stringify({ error: 'boom' }),
+      { status: 500, headers: { 'content-type': 'application/json' } },
+    )) as unknown as typeof globalThis.fetch;
+    await expect(getSession()).rejects.toThrow('session check failed with status 500');
+  });
 });
 
 describe('requireSession', () => {
