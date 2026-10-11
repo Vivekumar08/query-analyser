@@ -102,6 +102,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@query-analyser/contract':
+        specifier: workspace:*
+        version: link:../../packages/contract
       next:
         specifier: ^16.4.0
         version: 16.4.0(@types/node@22.20.4)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
