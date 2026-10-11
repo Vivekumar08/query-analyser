@@ -48,6 +48,14 @@ export interface RankedQueryRow {
  * (JSON.stringify calls toJSON), and everything else recurses. This is how the
  * equality test states "the wire shape is the serialisation of the internal
  * shape" as a type rather than as a comment.
+ *
+ * KNOWN LIMITATION: the final `T extends object` branch treats any class
+ * instance as a plain object to recurse field-by-field into. That is wrong
+ * for a `Prisma.Decimal`: it serialises to a string (its own `toJSON`), not to
+ * its internal `{d, e, s}` shape. There is no `Decimal` field in the schema
+ * today, so this is not a live bug — but whoever types a detail payload that
+ * returns a Prisma model with a `Decimal` column should add a dedicated branch
+ * here first, the same way `bigint` and `Date` already get one.
  */
 export type Serialized<T> = T extends bigint
   ? NumericString

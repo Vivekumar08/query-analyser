@@ -1,5 +1,29 @@
 import { describe, it, expect } from 'vitest';
 import { isPercentileBasis, parseNumericString } from './wire.js';
+import type { NumericString, Serialized } from './wire.js';
+
+// Mutually-assignable (structural equality). `Equal<A, B>` is `true` only when
+// A and B accept exactly the same set of values. Same idiom as
+// `sdk-types-equality.test.ts` and `apps/api/src/analysis/wire-equality.test.ts`.
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+  ? true
+  : false;
+type AssertTrue<T extends true> = T;
+
+/**
+ * Pins `Serialized<T>`'s distributive behaviour, which nothing else in this
+ * package exercises: every field of `RankRow` (the only type
+ * `api-wire-equality.test.ts`/`wire-equality.test.ts` checks `Serialized`
+ * against) is a plain, non-union type. So a `Serialized<T>` rewritten into
+ * the non-distributive form `[T] extends [bigint] ? ... : ...` still
+ * satisfies that equality check and still compiles — `tsc` would not catch
+ * the regression. These three assertions require the distributive form,
+ * because `bigint | null` and `bigint | undefined` only serialise correctly
+ * when the conditional distributes over the union.
+ */
+type _Nullable = AssertTrue<Equal<Serialized<{ a: bigint | null }>, { a: NumericString | null }>>;
+type _Optional = AssertTrue<Equal<Serialized<{ a?: bigint }>, { a?: NumericString }>>;
+type _NullableDate = AssertTrue<Equal<Serialized<{ a: Date | null }>, { a: string | null }>>;
 
 describe('isPercentileBasis', () => {
   it('accepts the two documented bases', () => {

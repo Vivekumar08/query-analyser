@@ -3,10 +3,14 @@
  * package — see `packages/sdk/src/types.ts` for why. Instead it carries its
  * own structural copy of the four wire shapes it needs. This file is the
  * guard against that copy silently drifting from the contract's definitions:
- * it is a compile-time-only check (via `tsc --noEmit`, run by this package's
- * `build`/`typecheck` scripts) that the two sets of types are structurally
- * identical. If someone changes one without the other, `pnpm --filter
- * @query-analyser/contract build` fails here.
+ * it is a compile-time-only check that the two sets of types are structurally
+ * identical. It runs via this package's `typecheck` script (`tsc --noEmit`)
+ * and via `vitest run`, which type-checks test files as a side effect of
+ * running them. It does NOT run via `build`: `tsconfig.build.json` excludes
+ * `src/**\/*.test.ts`, so `pnpm --filter @query-analyser/contract build`
+ * never sees this file and cannot fail here. CI must run `typecheck` (or
+ * `test`) for this check to mean anything — a drifted type would otherwise
+ * compile and ship with neither gate firing.
  */
 import type { OpClass, FilterShapeItem, SortKey, IngestItem, IngestPayload } from './runtime.js';
 import type {
