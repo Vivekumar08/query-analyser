@@ -126,15 +126,15 @@ describe('password reset', () => {
 });
 
 describe('account enumeration', () => {
-  // This test documents the intended property rather than independently
-  // gating it: the handler sends a single unconditional `reply.code(202).send(...)`
-  // literal before `email` is ever looked up, so there is no realistic
-  // single-edit mutation that flips the status/body here without also
-  // failing "does not wait for the mail to send" below — that latency test is
-  // the actual gate. Kept anyway because it still catches a *reordering* of
-  // the handler (lookup moved before the reply) — in that case both tests
-  // fail together, which is useful signal — but a future reader must not
-  // mistake this test for a second, independent line of defence.
+  // Identical status/body is necessary but not sufficient: an edit that looks
+  // up the user and issues a RESET token for a known email only, still ahead
+  // of the reply, keeps this test and the latency test below green — the
+  // extra DB round-trips for a *known* email sit far under the latency
+  // test's 300ms bound, while an unknown email pays nothing. Neither test
+  // here independently gates "no existence-dependent work precedes the
+  // reply"; the gate is the "replies before doing any work" assertion in
+  // the next test, which checks state at the instant `inject` resolves,
+  // before anything is awaited afterwards.
   it('answers identically for a known and an unknown email', async () => {
     const known = `e1-${Date.now()}@x.io`;
     await signup(known);
@@ -148,6 +148,34 @@ describe('account enumeration', () => {
 
     expect(a.statusCode).toBe(b.statusCode);
     expect(a.json()).toEqual(b.json());
+  });
+
+  it('replies before doing any existence-dependent work, for a known email', async () => {
+    // This is the actual gate: at the instant `inject` resolves, nothing that
+    // depends on whether the account exists may have happened yet — no mail
+    // sent, no RESET token issued. An edit that moves the lookup, the token
+    // issuance, or the send ahead of the reply fails here even though it can
+    // keep the identical-body and latency tests above green.
+    const known = `e3-${Date.now()}@x.io`;
+    await signup(known);
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { email: known } });
+
+    const sentBefore = app.sentMail.length;
+
+    await app.inject({ method: 'POST', url: '/v1/auth/password/request', payload: { email: known } });
+
+    expect(app.sentMail.length).toBe(sentBefore);
+    const tokenRightAfterReply = await app.prisma.verificationToken.findFirst({
+      where: { userId: user.id, purpose: 'RESET', consumedAt: null },
+    });
+    expect(tokenRightAfterReply).toBeNull();
+
+    await waitForMail(app, sentBefore + 1);
+    expect(app.sentMail.length).toBe(sentBefore + 1);
+    const tokenAfterSend = await app.prisma.verificationToken.findFirst({
+      where: { userId: user.id, purpose: 'RESET', consumedAt: null },
+    });
+    expect(tokenAfterSend).not.toBeNull();
   });
 
   it('does not wait for the mail to send, so latency carries no signal', async () => {

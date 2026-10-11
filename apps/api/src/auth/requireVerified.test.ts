@@ -36,7 +36,7 @@ describe('requireVerified', () => {
       payload: { name: 'Nope' },
     });
     expect(res.statusCode).toBe(403);
-    expect(res.json()).toEqual({ error: 'email not verified' });
+    expect(res.json()).toEqual({ error: 'email not verified', code: 'email_not_verified' });
   });
 
   it('lets the same user through once verified', async () => {

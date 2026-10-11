@@ -30,7 +30,7 @@ export default fp(async function authPlugin(app: FastifyInstance) {
       select: { emailVerifiedAt: true },
     });
     if (!user?.emailVerifiedAt) {
-      await reply.code(403).send({ error: 'email not verified' });
+      await reply.code(403).send({ error: 'email not verified', code: 'email_not_verified' });
     }
   });
 

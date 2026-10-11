@@ -112,7 +112,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/v1/me', { preHandler: [app.authenticate] }, async (req, reply) => {
     const user = await app.prisma.user.findUnique({
-      where: { id: req.user.id }, select: { id: true, email: true, name: true, isPlatformAdmin: true },
+      where: { id: req.user.id },
+      select: { id: true, email: true, name: true, isPlatformAdmin: true, emailVerifiedAt: true },
     });
     if (!user) return reply.code(401).send({ error: 'unauthorized' });
     return user;
