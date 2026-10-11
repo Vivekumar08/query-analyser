@@ -42,10 +42,12 @@ COPY . .
 #   COPY --from=deps /app/packages/contract/node_modules ./packages/contract/node_modules
 #   RUN pnpm --filter @query-analyser/contract build
 # because the contract is consumed through its `dist`, which is not committed.
-# Next needs API_ORIGIN present at build time because env.ts validates it.
-# This value is NOT baked into the image for runtime use — the server reads the
-# real one from the container environment. It is a placeholder that only has to
-# parse as a URL.
+# This placeholder is pre-emptive: nothing imports env.ts's loadWebEnv yet, so
+# next build would succeed without it today. It exists so the build does not
+# start failing the moment a later plan wires loadWebEnv into a Server
+# Component. When that happens, that component must read API_ORIGIN
+# per-request, not at module scope, or this placeholder value gets baked into
+# any statically prerendered RSC payload.
 ENV API_ORIGIN=https://placeholder.invalid
 RUN pnpm --filter @query-analyser/web build
 
