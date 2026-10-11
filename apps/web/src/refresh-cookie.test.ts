@@ -36,6 +36,14 @@ describe('rescopeRefreshCookie', () => {
     const out = rescopeRefreshCookie(input);
     expect(out).toContain(`Path=${REFRESH_COOKIE_PATH}`);
   });
+
+  it('returns the input unchanged when it is empty or has no name/value pair', () => {
+    // Unreachable via forwardRefreshCookie (which name-matches first), but
+    // the function is exported standalone, so a malformed "; Path=..."
+    // string must not be produced here.
+    expect(rescopeRefreshCookie('')).toBe('');
+    expect(rescopeRefreshCookie('HttpOnly; Secure')).toBe('HttpOnly; Secure');
+  });
 });
 
 describe('readRefreshFromSetCookie', () => {
@@ -55,6 +63,12 @@ describe('readRefreshFromSetCookie', () => {
 });
 
 describe('forwardRefreshCookie', () => {
+  it('does nothing when the API set no cookie', () => {
+    const to = new Response(null);
+    forwardRefreshCookie(new Response(null), to);
+    expect(to.headers.get('set-cookie')).toBeNull();
+  });
+
   it('leaves a non-qa_refresh cookie untouched', () => {
     const from = new Response(null, {
       headers: { 'set-cookie': 'some_other=val; Path=/; HttpOnly' },

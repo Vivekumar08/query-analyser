@@ -16,6 +16,11 @@ export const REFRESH_COOKIE_PATH = '/api/auth';
  * Secure, SameSite and Max-Age are the API's decisions, not ours.
  */
 export function rescopeRefreshCookie(setCookieValue: string): string {
+  const first = setCookieValue.split(';')[0]?.trim() ?? '';
+  // No name=value pair (e.g. empty input) — nothing to rescope; forging a
+  // standalone "; Path=..." attribute string would be a malformed cookie.
+  if (first.indexOf('=') === -1) return setCookieValue;
+
   const parts = setCookieValue.split(';').map((p) => p.trim());
   let found = false;
   const rewritten = parts.map((part) => {
