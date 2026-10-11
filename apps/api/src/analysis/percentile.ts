@@ -1,19 +1,7 @@
 import { HIST_BOUNDS, HIST_SIZE } from '@query-analyser/contract/runtime';
+import type { PercentileBasis, PercentileResult } from '@query-analyser/contract';
 
-export type PercentileBasis = 'interpolated' | 'floor';
-
-export interface PercentileResult {
-  /** Milliseconds. */
-  value: number;
-  /**
-   * `interpolated` — the rank fell in a bounded bucket and the value is a
-   * linear estimate inside it.
-   * `floor` — the rank fell in the unbounded top bucket (or there is no data),
-   * so the value is the largest observation actually recorded. The real
-   * percentile is at least this.
-   */
-  basis: PercentileBasis;
-}
+export type { PercentileBasis, PercentileResult };
 
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
