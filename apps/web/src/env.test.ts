@@ -29,4 +29,13 @@ describe('loadWebEnv', () => {
       'https://api.example.com',
     );
   });
+
+  it('throws on a parseable URL whose protocol is not http(s)', () => {
+    // `ftp://x` parses cleanly, so it never reaches the catch block — only the
+    // explicit protocol check stops it. Without this test that check is
+    // unpinned and a future simplification could delete it silently.
+    expect(() => loadWebEnv({ API_ORIGIN: 'ftp://files.example.com' })).toThrow(
+      /must be http\(s\)/,
+    );
+  });
 });
