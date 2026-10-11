@@ -4,6 +4,7 @@
 # apps/api/.dockerignore's intent for every workspace package/app.
 **/node_modules
 **/dist
+**/.next
 **/.turbo
 apps/*/.env
 packages/*/.env

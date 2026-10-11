@@ -1,7 +1,10 @@
 # Build context is the REPO ROOT, not apps/web:
 #   docker build -f apps/web/Dockerfile .
+# Ignore rules live in the repo-root .dockerignore — a .dockerignore nested
+# beside this file would never be read by `docker build` and would only
+# mislead whoever next edits it into thinking they changed the build.
 FROM node:22-alpine AS base
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
 WORKDIR /app
 
 FROM base AS deps
