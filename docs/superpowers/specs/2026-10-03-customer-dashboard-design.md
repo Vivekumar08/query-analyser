@@ -178,3 +178,79 @@ later step rests on; it is cheap to disprove now and expensive to discover late.
   a later scope
 - `GET /v1/admin/offenders`, still unimplemented from the original spec
 - Playwright and any browser-driven end-to-end suite
+
+---
+
+## Amendment — 2026-10-11
+
+Written after the email phase shipped and deployed. Four facts changed, and the
+animation stack is now decided.
+
+### What the email phase changed
+
+**Onboarding reads verification state directly.** `GET /v1/me` now returns
+`emailVerifiedAt`. The original §Onboarding assumed the dashboard would learn it
+by provoking a gated request; it no longer has to, and should not.
+
+**Route guards key off a code, not prose.** An unverified request to a gated
+route returns `403 {"error":"email not verified","code":"email_not_verified"}`.
+Guards branch on `code === 'email_not_verified'` and route to "check your
+inbox". Never match on the `error` string — it is a human-readable message and
+may be reworded.
+
+**`WEB_ORIGIN` flips to the web host on first deploy.** The API builds the
+emailed verification and reset links from it, and it is now **required with no
+default** — the container fails at boot naming it if absent. Today it points at
+a placeholder. Build step 1 must set it to the web app's origin, and the verify
+and reset screens have to exist before that link is worth sending. Until they
+do, verification is operator-assisted and `apps/api/README.md` says so; that
+runbook line comes out as part of step 5.
+
+**Signup costs about 3.25 seconds**, measured live, because the verification
+mail is awaited inside the handler. The signup screen needs a pending state
+that tolerates it; a form that looks frozen for three seconds reads as broken.
+If this becomes the worst thing about onboarding, the fix belongs in the API —
+detach the send — not in the UI.
+
+### Animation stack
+
+**One animation runtime: Motion (`framer-motion`, MIT, v14).** It is already
+required for the dashboard, and every candidate below is built on it. A second
+runtime on the same page is bundle weight for nothing.
+
+| Library | Verdict |
+|---|---|
+| **Vengeance UI** — MIT, `Ashutoshx7/VengeanceUI`, 1.2k stars, pushed within the week, Motion-only, 74 landing components | **Primary for the landing.** Copy-paste, so it becomes our code. Adds no runtime dependency beyond Motion. |
+| **Skiper UI** — shadcn registry, Motion + GSAP, ~24 free of 106+, $129 premium | **Free tier only, and only components that do not require GSAP.** One or two set pieces at most. |
+| **Animaster Lib** — WebGL, 3D shaders, GSAP, paid, launched July 2026 | **Rejected.** See below. |
+| **Motion** — MIT, v14.1.0 | The runtime. Dashboard animation is plain Motion, no component library. |
+
+**Why Animaster is rejected.** Three reasons, in order of weight: the landing's
+hero is a one-line install snippet and the product's whole claim is that it
+takes one line — a GPU-heavy shader hero argues against the copy next to it; it
+is a third animation runtime on the one page that must load fast, because it is
+the public shareable link and a developer audience judges a dev tool on it; and
+it is three months old, paid, and its own material describes the learning curve
+as "no joke". Spectacular animation does not imply conversion.
+
+**Licence constraint, binding.** This repo is public. **No paid or premium
+component source may be committed** — not Skiper's premium set, not Animaster's
+PRO tier. Copy-pasting paid components into a public repo republishes a paid
+product as readable source. Free and MIT tiers only. Every vendored component
+keeps a header comment naming its source and licence.
+
+This makes the repo's own missing LICENSE sharper rather than softer: vendoring
+MIT code into an all-rights-reserved repo is incoherent. **The LICENSE lands in
+build step 1**, not "before the dashboard attracts attention".
+
+### Landing performance budget
+
+The landing is the public link, so it carries a budget the dashboard does not:
+no WebGL, no animation library beyond Motion, and animation that respects
+`prefers-reduced-motion`. Motion components are client components — keep them
+leaves of otherwise-server-rendered sections, so an animated testimonial does
+not turn the whole page into a client bundle.
+
+### Build order change
+
+Step 1 gains the LICENSE file and setting `WEB_ORIGIN`. Everything else stands.
