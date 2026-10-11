@@ -18,7 +18,16 @@ COPY apps/web/package.json       apps/web/package.json
 COPY apps/api/package.json       apps/api/package.json
 COPY packages/contract/package.json packages/contract/package.json
 COPY packages/sdk/package.json      packages/sdk/package.json
-RUN pnpm install --frozen-lockfile
+# apps/api's `mongodb-memory-server` devDependency downloads a MongoDB binary in
+# its postinstall. That download has no business in the web image: it is slow,
+# needs network, and fails the whole install if the fetch fails. apps/api's own
+# Dockerfile guards it the same way, for the same reason.
+ENV MONGOMS_DISABLE_POSTINSTALL=1
+# Filtered to the web app and its workspace dependencies, so the other members'
+# devDependencies are never installed at all. `--frozen-lockfile` still
+# validates against the whole workspace, which is why every member's
+# package.json must be copied above — that is trap 2 and it still applies.
+RUN pnpm install --frozen-lockfile --filter @query-analyser/web...
 
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
