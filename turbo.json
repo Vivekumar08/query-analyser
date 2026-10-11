@@ -2,7 +2,10 @@
   "$schema": "https://turbo.build/schema.json",
   "tasks": {
     "db:generate": { "cache": false },
-    "build": { "dependsOn": ["^build", "db:generate"], "outputs": ["dist/**"] },
+    "build": {
+      "dependsOn": ["^build", "db:generate"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+    },
     "test": { "dependsOn": ["^build", "db:generate"] },
     "typecheck": { "dependsOn": ["^build", "db:generate"] }
   }
