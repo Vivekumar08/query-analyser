@@ -1,12 +1,24 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 
 export function ResetClient({ token }: { token: string }) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const pathname = usePathname();
+
+  useEffect(() => {
+    // Scrub the token out of the address bar once this screen holds it in
+    // component state, so it doesn't linger in history or ride along in a
+    // Referer header while the form is sitting unsubmitted. A plain History
+    // API call, not router.replace: that would re-run the Server Component
+    // with no token and swap this screen out for the "missing its token"
+    // message.
+    window.history.replaceState(null, '', pathname);
+  }, [pathname]);
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();

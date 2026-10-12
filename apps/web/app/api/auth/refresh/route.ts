@@ -4,6 +4,7 @@ import { SESSION_COOKIE, sessionCookieOptions } from '@/src/session';
 import { apiOrigin } from '@/src/api';
 import { REFRESH_COOKIE, forwardRefreshCookie } from '@/src/refresh-cookie';
 import { singleFlight } from '@/src/single-flight';
+import { safeNext } from '@/src/safe-next';
 
 /**
  * Module-scope so concurrent requests share it. This is a route handler, not
@@ -11,28 +12,6 @@ import { singleFlight } from '@/src/single-flight';
  * globals, which is exactly why the refresh lives here.
  */
 const run = singleFlight<Response>();
-
-/**
- * Only same-origin paths, resolved and compared by origin rather than by
- * string prefix.
- *
- * A prefix check (`startsWith('/') && !startsWith('//')`) looks sufficient
- * but is not: `/\evil.com` passes it, yet WHATWG URL parsing normalises the
- * leading backslash to a slash for special schemes, so
- * `new URL('/\\evil.com', 'https://site')` resolves to `https://evil.com/`.
- * Resolving against the real origin and comparing origins closes that off.
- */
-function safeNext(raw: string | null, origin: string): string {
-  if (!raw) return '/';
-  let resolved: URL;
-  try {
-    resolved = new URL(raw, origin);
-  } catch {
-    return '/';
-  }
-  if (resolved.origin !== origin) return '/';
-  return resolved.pathname + resolved.search;
-}
 
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
