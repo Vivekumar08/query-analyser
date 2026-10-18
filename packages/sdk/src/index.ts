@@ -3,7 +3,6 @@ import { createRequire } from 'node:module';
 import { bucketOf, encryptSample, importSamplePublicKey } from '@query-analyser/contract/runtime';
 import type { EncryptedSample, IngestItem, IngestPayload } from './types.js';
 import { Aggregator, type AggregatedItem } from './aggregator.js';
-import { serializeSample } from './ejson.js';
 import { installHooks, INSTALLED, type MongooseSchemaLike, type HookContext, type GetHookContext } from './hooks.js';
 import { createTransport } from './transport.js';
 
@@ -111,6 +110,32 @@ export interface InitOptions {
 // Distinct encryption-failure causes reported per analyser; past this, new
 // causes are dropped so a pathological stream of errors can't grow memory.
 const MAX_REPORTED_SAMPLE_ERRORS = 16;
+// Total `ct` characters of all envelopes in one flush (C5-2): ~1 MiB of
+// incompressible base64 keeps the body well under the ingest API's 2 MiB limit.
+const MAX_ENVELOPE_CT_CHARS_PER_FLUSH = 1_048_576;
+
+/**
+ * The wire form of a buffered item: exactly the IngestItem keys, in the
+ * order the payload has always used (so no-key payloads stay byte-identical).
+ */
+function toWireItem(item: AggregatedItem): IngestItem {
+  return {
+    signature: item.signature,
+    hash: item.hash,
+    model: item.model,
+    operation: item.operation,
+    filterShape: item.filterShape,
+    sortKeys: item.sortKeys,
+    stages: item.stages,
+    count: item.count,
+    totalMs: item.totalMs,
+    maxMs: item.maxMs,
+    lastMs: item.lastMs,
+    lastTs: item.lastTs,
+    hist: item.hist,
+    sample: item.sample,
+  };
+}
 
 export interface Analyser {
   flush(): Promise<void>;
@@ -284,8 +309,8 @@ export function init(options: InitOptions): Analyser {
   // Sample encryption. The key is validated asynchronously (Web Crypto has no
   // sync import), so it starts 'pending': the hook already captures raw
   // samples, and the first flush waits for the check before deciding. An
-  // invalid key is reported once and turns encryption off for good — raw
-  // samples captured meanwhile are simply discarded, never sent.
+  // invalid key is reported once and turns encryption off for good — samples
+  // serialised meanwhile are simply discarded, never sent.
   const sampleKey = typeof options.sampleKey === 'string' && options.sampleKey !== '' ? options.sampleKey : undefined;
   let sampleEncryption: 'off' | 'pending' | 'on' = sampleKey ? 'pending' : 'off';
   const sampleKeyCheck: Promise<void> | null = sampleKey
@@ -309,11 +334,7 @@ export function init(options: InitOptions): Analyser {
     reportSafely(new Error(`query-analyser: could not encrypt a sample (${cause}); sending the item without it`));
   };
 
-  const encryptRawSample = async (key: string, rawSample: unknown): Promise<EncryptedSample | null> => {
-    if (rawSample === undefined) return null;
-    // Over 16 KiB (or unserialisable): skipped by design, not an error.
-    const text = serializeSample(rawSample);
-    if (text === null) return null;
+  const encryptSampleText = async (key: string, text: string): Promise<EncryptedSample | null> => {
     try {
       return await encryptSample(key, text);
     } catch (err) {
@@ -322,22 +343,39 @@ export function init(options: InitOptions): Analyser {
     }
   };
 
-  // Buffered items -> wire items. `rawSample` never goes on the wire.
+  // Buffered items -> wire items. `sampleText` never goes on the wire.
   // Without encryption the wire items are exactly what they were before this
   // feature (same keys, same order — no `encryptedSample` key at all).
-  const withoutRawSamples = (items: AggregatedItem[]): IngestItem[] =>
-    items.map(({ rawSample: _raw, ...item }) => item);
+  // Built from an explicit allowlist of wire keys — never a rest spread of
+  // the buffered item — so in-memory-only fields (the plaintext `sampleText`)
+  // can never reach the wire, whatever is added to AggregatedItem later.
+  const withoutSampleText = (items: AggregatedItem[]): IngestItem[] => items.map(toWireItem);
 
-  // Items are encrypted one at a time so serialisation never monopolises the
-  // event loop for the whole batch at once.
+  // Ciphertext does not compress, and the ingest API rejects bodies over
+  // 2 MiB — which would drop the whole batch, timing data included. So the
+  // envelopes in one flush share a fixed budget; the slowest items get
+  // theirs first, and items past the budget send `encryptedSample: null`.
+  // Items are encrypted one at a time so the batch never monopolises the
+  // event loop.
   const toEncryptedWireItems = async (items: AggregatedItem[]): Promise<IngestItem[]> => {
     if (sampleKeyCheck) await sampleKeyCheck;
-    if (sampleEncryption !== 'on' || sampleKey === undefined) return withoutRawSamples(items);
-    const wire: IngestItem[] = [];
-    for (const { rawSample, ...item } of items) {
-      wire.push({ ...item, encryptedSample: await encryptRawSample(sampleKey, rawSample) });
+    if (sampleEncryption !== 'on' || sampleKey === undefined) return withoutSampleText(items);
+    const envelopes = new Array<EncryptedSample | null>(items.length).fill(null);
+    const slowestFirst = items.map((_, i) => i).sort((a, b) => items[b]!.maxMs - items[a]!.maxMs);
+    let budget = MAX_ENVELOPE_CT_CHARS_PER_FLUSH;
+    for (const i of slowestFirst) {
+      const text = items[i]!.sampleText;
+      if (text === undefined) continue;
+      // base64(plaintext bytes + 16-byte GCM tag): known before encrypting.
+      const ctChars = Math.ceil((Buffer.byteLength(text, 'utf8') + 16) / 3) * 4;
+      if (ctChars > budget) continue;
+      const envelope = await encryptSampleText(sampleKey, text);
+      if (envelope) {
+        envelopes[i] = envelope;
+        budget -= envelope.ct.length;
+      }
     }
-    return wire;
+    return items.map((item, i) => ({ ...toWireItem(item), encryptedSample: envelopes[i] ?? null }));
   };
 
   let disabled = false;
@@ -462,7 +500,7 @@ export function init(options: InitOptions): Analyser {
         dropped,
         // No sampleKey: stay fully synchronous up to transport.send(), as
         // before this feature.
-        items: sampleKey === undefined ? withoutRawSamples(items) : await toEncryptedWireItems(items),
+        items: sampleKey === undefined ? withoutSampleText(items) : await toEncryptedWireItems(items),
       };
 
       const result = await transport.send(payload);

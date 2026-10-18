@@ -16,8 +16,9 @@ export interface HookContext {
   isDisabled: () => boolean;
   /**
    * True while sample encryption is on. The hook then also hands the raw
-   * sample input to the aggregator (a reference, no copying or serialising
-   * here); the flush serialises and encrypts it off the query path.
+   * sample input to the aggregator, which serialises it (bounded, 16 KiB)
+   * only if this occurrence is the new slowest, and never keeps the object.
+   * Encryption happens later, in the flush.
    */
   captureRawSample?: () => boolean;
 }
