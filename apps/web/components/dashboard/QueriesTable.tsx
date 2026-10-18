@@ -24,7 +24,7 @@ export function QueriesTable({ base, search, rows }: { base: string; search: str
           {rows.map((r) => (
             <TableRow key={r.hash} className="group">
               <TableCell className="max-w-0">
-                <Link href={`${base}/queries/${encodeURIComponent(r.hash)}${q}`} className="block font-medium group-hover:text-primary">
+                <Link href={`${base}/queries/${encodeURIComponent(r.hash)}${q}`} className="block font-medium group-hover:text-accent-text">
                   {r.title}
                 </Link>
                 <Tooltip>
@@ -39,7 +39,7 @@ export function QueriesTable({ base, search, rows }: { base: string; search: str
                 <div className="flex items-center gap-2">
                   <span className="w-14 tabular-nums">{r.wasted}</span>
                   <span className="h-1.5 w-24 overflow-hidden rounded-full bg-muted">
-                    <span className="block h-full rounded-full bg-primary" style={{ width: `${Math.round(r.wastedShare * 100)}%` }} />
+                    <span className="block h-full rounded-full bg-chart-1" style={{ width: `${Math.round(r.wastedShare * 100)}%` }} />
                   </span>
                 </div>
               </TableCell>
