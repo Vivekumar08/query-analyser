@@ -26,6 +26,8 @@ describe('emptyKind', () => {
 });
 
 describe('clearFiltersHref', () => {
+  it('drops page', () =>
+    expect(clearFiltersHref('/b', parseFilters(new URLSearchParams('range=7d&page=4')))).toBe('/b/queries?range=7d'));
   it('keeps the range, drops model/sort', () =>
     expect(clearFiltersHref('/b', parseFilters(new URLSearchParams('range=7d&model=A&sort=count')))).toBe('/b/queries?range=7d'));
   it('default range → bare path', () =>

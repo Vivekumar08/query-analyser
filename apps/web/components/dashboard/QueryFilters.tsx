@@ -64,7 +64,7 @@ export function QueryFiltersBar({ models, ops, value }: { models: string[]; ops:
   // Replaces model/op/sort (null clears), keeps range/from/to, resets paging.
   const apply = (next: { model?: string | null; op?: string | null; sort?: SortKey | null }) => {
     const s = new URLSearchParams(params.toString());
-    s.delete('limit');
+    s.delete('page');
     if (next.model !== undefined) { s.delete('model'); if (next.model) s.set('model', next.model); }
     if (next.op !== undefined) { s.delete('op'); if (next.op) s.set('op', next.op); }
     if (next.sort !== undefined) {

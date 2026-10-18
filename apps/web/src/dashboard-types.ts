@@ -63,6 +63,8 @@ export type QueryRow = Omit<Serialized<RankedQueryRow>, 'hist'> & { avgMs: numbe
 export interface QueryListResponse {
   grain: 'hourly' | 'daily';
   limit: number;
+  offset: number;
+  hasMore: boolean;
   sort: 'wasted' | 'count' | 'p95' | 'maxMs';
   sortExact: boolean;
   sortNote?: string;

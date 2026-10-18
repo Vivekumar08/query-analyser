@@ -33,7 +33,7 @@ export function RangeControl({ value }: { value: RangeState }) {
       if (v === null) s.delete(k);
       else s.set(k, v);
     }
-    s.delete('limit');
+    s.delete('page');
     const qs = s.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   };
