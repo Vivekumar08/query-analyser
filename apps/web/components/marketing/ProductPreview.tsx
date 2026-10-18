@@ -33,7 +33,7 @@ export function ProductPreview() {
             </li>
           ))}
         </ul>
-        <svg viewBox="0 0 300 60" className="mt-4 h-14 w-full" aria-hidden>
+        <svg viewBox="0 0 300 60" preserveAspectRatio="none" className="mt-4 h-14 w-full" aria-hidden>
           <path d="M0,48 C40,46 60,22 100,28 C140,34 160,12 200,16 C240,20 270,36 300,26 L300,60 L0,60Z" fill="var(--chart-1)" opacity="0.12" />
           <path d="M0,48 C40,46 60,22 100,28 C140,34 160,12 200,16 C240,20 270,36 300,26" fill="none" stroke="var(--chart-1)" strokeWidth="2" />
         </svg>

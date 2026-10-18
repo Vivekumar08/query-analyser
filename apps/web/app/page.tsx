@@ -49,7 +49,7 @@ export default function Page() {
 
       <main className="mx-auto max-w-6xl px-5 sm:px-8">
         {/* Hero */}
-        <section className="grid items-center gap-12 pt-10 pb-6 md:grid-cols-[1.15fr_1fr] md:pt-16">
+        <section className="grid grid-cols-1 items-center gap-12 pt-10 pb-6 md:grid-cols-[1.15fr_1fr] md:pt-16 [&>*]:min-w-0">
           <div>
             <Eyebrow>For MongoDB · mongoose 8</Eyebrow>
             <h1 className="mt-4 text-[44px] leading-[1.03] font-semibold tracking-[-0.025em] sm:text-[56px]">
