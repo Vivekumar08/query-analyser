@@ -25,6 +25,8 @@ vi.mock('next/navigation', () => ({
 
 import { requireSession } from './auth.js';
 import { GET } from '../app/api/auth/refresh/route.js';
+import { NextRequest } from 'next/server';
+import { proxy } from '../proxy.js';
 
 const WEB = 'https://web.example.com';
 
@@ -121,5 +123,17 @@ describe('refresh round trip', () => {
     const res = await hitRefresh(loc);
     expect(res.headers.get('location')).toBe(`${WEB}/dashboard?r=1`);
     expect(refreshCalls).toBe(1);
+  });
+
+  it('from the proxy: an expired qa_session with a live refresh token comes back to the same page, not /login', async () => {
+    // B14: the proxy runs before requireSession, so it too must defer to the
+    // refresh handler rather than deciding "logged out" on its own.
+    jar.set('qa_refresh', 'orig');
+    const p = proxy(new NextRequest(`${WEB}/dashboard?tab=queries`));
+    const loc = new URL(p.headers.get('location')!);
+    const res = await hitRefresh(loc.pathname + loc.search);
+    expect(res.headers.get('location')).toBe(`${WEB}/dashboard?tab=queries`);
+    expect(refreshCalls).toBe(1);
+    expect(jar.get('qa_session')).toBe('access-1');
   });
 });
