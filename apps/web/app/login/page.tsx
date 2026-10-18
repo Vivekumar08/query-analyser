@@ -1,3 +1,4 @@
+import { AuthShell } from '@/components/marketing/AuthShell';
 import Link from 'next/link';
 import { AuthForm } from '../_components/AuthForm';
 import { safeNext } from '@/src/safe-next';
@@ -17,15 +18,16 @@ export default async function LoginPage({
   const target = safeNext(next, 'https://x.invalid', '/dashboard');
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center gap-6 px-4">
-      <h1 className="text-2xl font-semibold">Sign in</h1>
+    <AuthShell
+      title="Sign in"
+      footer={
+        <>
+          <Link href="/forgot-password" className="font-medium text-accent-text underline underline-offset-4">Forgot password?</Link>
+          <p>No account? <Link href="/signup" className="font-medium text-accent-text underline underline-offset-4">Create one</Link></p>
+        </>
+      }
+    >
       <AuthForm mode="login" next={target} />
-      <p className="text-sm text-slate-600">
-        <Link href="/forgot-password" className="underline">Forgot password?</Link>
-      </p>
-      <p className="text-sm text-slate-600">
-        No account? <Link href="/signup" className="underline">Create one</Link>
-      </p>
-    </main>
+    </AuthShell>
   );
 }

@@ -31,8 +31,8 @@ export function OnboardingFlow({ start, email }: { start: OnboardingStart; email
         {STEPS.map((s, i) => (
           <li key={s.id} aria-current={s.id === step ? 'step' : undefined} className="flex items-center gap-3">
             <span className={cn('flex size-6 items-center justify-center rounded-full border text-xs',
-              i < index && 'border-primary bg-primary text-primary-foreground',
-              i === index && 'border-primary text-primary',
+              i < index && 'border-accent-text bg-accent-text text-white',
+              i === index && 'border-accent-text text-accent-text',
               i > index && 'text-muted-foreground')}>
               {i < index ? <Check className="size-3.5" aria-hidden /> : i + 1}
             </span>

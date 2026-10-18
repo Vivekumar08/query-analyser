@@ -32,7 +32,7 @@ export function LogoutButton() {
   return (
     <div className="flex flex-col items-start gap-2">
       <button type="button" onClick={onClick} disabled={pending}
-        className="rounded-md border border-slate-300 px-4 py-2 disabled:opacity-60">
+        className="rounded-full border border-input bg-white/70 px-4 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-white disabled:opacity-60">
         {pending ? 'Signing out…' : 'Sign out'}
       </button>
       {failed && <p role="alert" className="text-sm text-red-600">Couldn&apos;t sign you out. Try again.</p>}

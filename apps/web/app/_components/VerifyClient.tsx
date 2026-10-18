@@ -32,27 +32,27 @@ export function VerifyClient({ token }: { token: string }) {
     return () => { cancelled = true; };
   }, [token, pathname]);
 
-  if (state === 'pending') return <p className="text-slate-600">Confirming…</p>;
+  if (state === 'pending') return <p className="text-muted-foreground">Confirming…</p>;
   if (state === 'done') {
     return (
       <>
-        <p className="text-slate-800">Your email is confirmed.</p>
-        <Link href="/dashboard" className="underline">Go to your dashboard</Link>
+        <p className="text-foreground">Your email is confirmed.</p>
+        <Link href="/dashboard" className="font-medium text-accent-text underline underline-offset-4">Go to your dashboard</Link>
       </>
     );
   }
   if (state === 'offline') {
     return (
       <>
-        <p className="text-slate-800">We couldn&apos;t reach the server. Check your connection and try the link again.</p>
-        <Link href="/login" className="underline">Back to sign in</Link>
+        <p className="text-foreground">We couldn&apos;t reach the server. Check your connection and try the link again.</p>
+        <Link href="/login" className="font-medium text-accent-text underline underline-offset-4">Back to sign in</Link>
       </>
     );
   }
   return (
     <>
-      <p className="text-slate-800">That link didn&apos;t work — it may have expired or already been used.</p>
-      <Link href="/login" className="underline">Sign in to request a new one</Link>
+      <p className="text-foreground">That link didn&apos;t work — it may have expired or already been used.</p>
+      <Link href="/login" className="font-medium text-accent-text underline underline-offset-4">Sign in to request a new one</Link>
     </>
   );
 }
