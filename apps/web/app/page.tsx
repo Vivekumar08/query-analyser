@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { FadeIn } from './_components/landing/FadeIn';
-import { CopyButton } from './_components/landing/CopyButton';
+import { CopyButton } from '@/components/dashboard/CopyButton';
 
 const INSTALL = 'npm i @vivekumar08/query-analyser';
 
