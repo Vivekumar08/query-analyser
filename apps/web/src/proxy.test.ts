@@ -48,4 +48,18 @@ describe('proxy redirect', () => {
     expect(location.search).toBe('?next=%2Fdashboard%2Fq%3Ftab%3Dslow%26page%3D2');
     expect(location.searchParams.get('next')).toBe('/dashboard/q?tab=slow&page=2');
   });
+
+  it('builds Location on the request\'s own host, so Next relativises it (B18)', () => {
+    // Next's proxy adapter turns a same-host absolute Location into a bare
+    // path before it reaches the browser, and crashes on a relative one. So
+    // the invariant to hold here is "same host as request.url": in the
+    // standalone server that host is the bind address (0.0.0.0:PORT), and a
+    // different host would be sent to the browser verbatim.
+    const res = proxy(new NextRequest('http://0.0.0.0:3918/dashboard?tab=slow', {
+      headers: { host: 'qa.example.com', 'x-forwarded-proto': 'https' },
+    }));
+    const location = new URL(res.headers.get('location')!);
+    expect(location.host).toBe('0.0.0.0:3918');
+    expect(location.pathname + location.search).toBe('/api/auth/refresh?next=%2Fdashboard%3Ftab%3Dslow');
+  });
 });

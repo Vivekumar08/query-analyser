@@ -1,4 +1,3 @@
-import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { SESSION_COOKIE, sessionCookieOptions } from '@/src/session';
 import { apiOrigin } from '@/src/api';
@@ -10,6 +9,15 @@ import {
 } from '@/src/refresh-cookie';
 import { singleFlight } from '@/src/single-flight';
 import { safeNext } from '@/src/safe-next';
+import { loginPath, relativeRedirect } from '@/src/relative-redirect';
+
+/**
+ * A fixed base for validating `next`. NOT the request's origin: in the
+ * standalone server `request.url` carries the container's bind address, not
+ * the public host (Ruling B18). safeNext only ever returns a bare path, so the
+ * base never reaches a Location header — every redirect below is relative.
+ */
+const VALIDATION_BASE = 'https://x.invalid';
 
 /**
  * Module-scope so concurrent requests share it. This is a route handler, not
@@ -24,16 +32,14 @@ export async function GET(request: Request): Promise<Response> {
   // Validated once, up front: every exit — back to the page or on to /login —
   // carries the same safe target. safeNext returns a single-slash same-origin
   // path or '/', never anything that re-parses off-origin (Ruling B12).
-  const next = safeNext(url.searchParams.get('next'), url.origin);
+  // Only the query string is read from request.url; its origin is the bind
+  // address and must never reach a Location header.
+  const next = safeNext(url.searchParams.get('next'), VALIDATION_BASE);
 
   // Every /login exit carries `next` (Ruling B15) so that after signing in
-  // the visitor lands on the page they asked for, not on the default. Built
-  // as a URL object; omitted when it validated to the default '/'.
-  const toLogin = () => {
-    const login = new URL('/login', url.origin);
-    if (next !== '/') login.searchParams.set('next', next);
-    return NextResponse.redirect(login);
-  };
+  // the visitor lands on the page they asked for, not on the default.
+  // Relative Location (Ruling B18); `next` omitted when it is the default '/'.
+  const toLogin = () => relativeRedirect(loginPath(next));
 
   const jar = await cookies();
 
@@ -82,14 +88,9 @@ export async function GET(request: Request): Promise<Response> {
     return toLogin();
   }
 
-  // safeNext guarantees a single-slash, same-origin path (no leading `//`, no backslash),
-  // so this URL object resolves on our origin. Redirect with the URL object
-  // itself; never hand the path to anything that re-parses it as a string.
-  // The origin re-check is belt and braces: if it ever fails, safeNext broke.
-  const target = new URL(next, url.origin);
-  if (target.origin !== url.origin) return toLogin();
-
-  const res = NextResponse.redirect(target);
+  // safeNext guarantees a single-slash path (no leading `//`, no backslash),
+  // so as a relative Location it resolves on whatever host the browser used.
+  const res = relativeRedirect(next);
   res.cookies.set(SESSION_COOKIE, accessToken, sessionCookieOptions(isProd));
   res.cookies.set(REFRESH_ATTEMPT_COOKIE, '1', refreshAttemptCookieOptions(isProd));
   // Forwards the API's rotated qa_refresh cookie (re-scoped to /api/auth) so

@@ -25,6 +25,15 @@ import { SESSION_COOKIE } from './src/session';
 export function proxy(request: NextRequest): NextResponse {
   if (request.cookies.has(SESSION_COOKIE)) return NextResponse.next();
 
+  // Absolute on purpose, and from request.url on purpose (Ruling B18 audit).
+  // Proxy is the one place a relative Location cannot be used: Next's proxy
+  // adapter re-parses Location with `new URL(value)` and a bare path throws
+  // (probed on the standalone build: HTTP 500, `TypeError: Invalid URL`). The
+  // same adapter then RELATIVISES any Location whose host equals the
+  // request's host, so the browser receives `/api/auth/refresh?next=…` and
+  // the bind address never leaves the server. That only holds while this URL
+  // is built on request.url's own host — a different base would be emitted
+  // verbatim. src/proxy.test.ts pins the same-host invariant.
   const refresh = new URL('/api/auth/refresh', request.url);
   refresh.searchParams.set('next', request.nextUrl.pathname + request.nextUrl.search);
   return NextResponse.redirect(refresh);

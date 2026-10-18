@@ -49,7 +49,7 @@ describe('GET /api/auth/refresh', () => {
 
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
       expect(res.status).toBe(307);
-      expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
+      expect(res.headers.get('location')).toBe('/login?next=%2Fdashboard');
       expect(fn).not.toHaveBeenCalled();
       const marker = res.headers.getSetCookie().find((c) => c.startsWith('qa_refresh_attempt='));
       expect(marker).toBeDefined();
@@ -63,7 +63,7 @@ describe('GET /api/auth/refresh', () => {
       globalThis.fetch = successFetchMock() as unknown as typeof globalThis.fetch;
 
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard');
+      expect(res.headers.get('location')).toBe('/dashboard');
       const marker = res.headers.getSetCookie().find((c) => c.startsWith('qa_refresh_attempt='));
       expect(marker).toBeDefined();
       expect(marker).toMatch(/^qa_refresh_attempt=1;/);
@@ -78,9 +78,9 @@ describe('GET /api/auth/refresh', () => {
       globalThis.fetch = successFetchMock() as unknown as typeof globalThis.fetch;
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard%3Fr%3D1'));
       // A stale `r=1` from an old bookmark is just an ordinary query param now.
-      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard?r=1');
+      expect(res.headers.get('location')).toBe('/dashboard?r=1');
       const res2 = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res2.headers.get('location')).toBe('https://web.example.com/dashboard');
+      expect(res2.headers.get('location')).toBe('/dashboard');
     });
 
     it('does not set the marker when the refresh fails', async () => {
@@ -89,7 +89,7 @@ describe('GET /api/auth/refresh', () => {
         JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } },
       )) as unknown as typeof globalThis.fetch;
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
+      expect(res.headers.get('location')).toBe('/login?next=%2Fdashboard');
       expect(res.headers.getSetCookie().some((c) => c.startsWith('qa_refresh_attempt=1'))).toBe(false);
     });
   });
@@ -97,26 +97,26 @@ describe('GET /api/auth/refresh', () => {
   describe('carrying the requested page through to /login (B15)', () => {
     it('omits next when there is none (it would validate to the default anyway)', async () => {
       const res = await GET(req('/api/auth/refresh'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+      expect(res.headers.get('location')).toBe('/login');
     });
 
     it('omits next when it validates to the default /', async () => {
       const res = await GET(req('/api/auth/refresh?next=%2F'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+      expect(res.headers.get('location')).toBe('/login');
     });
 
     it.each(['//evil.com', 'https://evil.com', '/.//evil.com', '/%2e%2e//evil.com', '/\\evil.com'])(
       'drops a hostile next (%s) rather than carrying it to /login',
       async (raw) => {
         const res = await GET(req(`/api/auth/refresh?next=${encodeURIComponent(raw)}`));
-        expect(res.headers.get('location')).toBe('https://web.example.com/login');
+        expect(res.headers.get('location')).toBe('/login');
       },
     );
 
     it('preserves path and query, encoded, on the no-refresh-cookie branch', async () => {
       const res = await GET(req(`/api/auth/refresh?next=${encodeURIComponent('/dashboard/q?tab=slow&page=2')}`));
-      const location = new URL(res.headers.get('location')!);
-      expect(location.origin + location.pathname).toBe('https://web.example.com/login');
+      const location = new URL(res.headers.get('location')!, 'https://public.example');
+      expect(location.pathname).toBe('/login');
       expect(location.search).toBe('?next=%2Fdashboard%2Fq%3Ftab%3Dslow%26page%3D2');
       expect(location.searchParams.get('next')).toBe('/dashboard/q?tab=slow&page=2');
     });
@@ -126,7 +126,7 @@ describe('GET /api/auth/refresh', () => {
     // The genuinely-logged-out case: no refresh token to recover with.
     const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
     expect(res.status).toBe(307);
-    expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
+    expect(res.headers.get('location')).toBe('/login?next=%2Fdashboard');
   });
 
   describe('the next= open-redirect guard', () => {
@@ -139,14 +139,14 @@ describe('GET /api/auth/refresh', () => {
       const res = await GET(req('/api/auth/refresh?next=%2F%2Fevil.com'));
       const location = res.headers.get('location') ?? '';
       expect(location).not.toContain('evil.com');
-      expect(location).toBe('https://web.example.com/');
+      expect(location).toBe('/');
     });
 
     it('rejects an absolute next (https://evil.com) and falls back to /', async () => {
       const res = await GET(req('/api/auth/refresh?next=https%3A%2F%2Fevil.com'));
       const location = res.headers.get('location') ?? '';
       expect(location).not.toContain('evil.com');
-      expect(location).toBe('https://web.example.com/');
+      expect(location).toBe('/');
     });
 
     it('rejects a backslash-prefixed next (/\\evil.com) and falls back to /', async () => {
@@ -157,7 +157,7 @@ describe('GET /api/auth/refresh', () => {
       const res = await GET(req('/api/auth/refresh?next=%2F%5Cevil.com'));
       const location = res.headers.get('location') ?? '';
       expect(location).not.toContain('evil.com');
-      expect(location).toBe('https://web.example.com/');
+      expect(location).toBe('/');
     });
 
     it.each([
@@ -172,18 +172,18 @@ describe('GET /api/auth/refresh', () => {
       // that pathname as a string would make it protocol-relative.
       const res = await GET(req(`/api/auth/refresh?next=${encodeURIComponent(raw)}`));
       const location = res.headers.get('location') ?? '';
-      expect(new URL(location).origin).toBe('https://web.example.com');
-      expect(location).toBe('https://web.example.com/');
+      expect(new URL(location, 'https://public.example').origin).toBe('https://public.example');
+      expect(location).toBe('/');
     });
 
     it('accepts a same-origin absolute path', async () => {
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard');
+      expect(res.headers.get('location')).toBe('/dashboard');
     });
 
     it('preserves an existing query string on next when building the retry URL', async () => {
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard%3Ffoo%3Dbar'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard?foo=bar');
+      expect(res.headers.get('location')).toBe('/dashboard?foo=bar');
     });
   });
 
@@ -227,7 +227,7 @@ describe('GET /api/auth/refresh', () => {
         'not json', { status: 200 },
       )) as unknown as typeof globalThis.fetch;
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
+      expect(res.headers.get('location')).toBe('/login?next=%2Fdashboard');
     });
 
     it('redirects to /login when the upstream 200 omits accessToken', async () => {
@@ -235,7 +235,60 @@ describe('GET /api/auth/refresh', () => {
         JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } },
       )) as unknown as typeof globalThis.fetch;
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
+      expect(res.headers.get('location')).toBe('/login?next=%2Fdashboard');
+    });
+  });
+
+  describe('Location is relative, never the bind address (Ruling B18)', () => {
+    // In Next's standalone server request.url is built from the HOSTNAME env
+    // and PORT, not the Host header — the final review's probe saw
+    // `location: https://0.0.0.0:3918/login?...`. Every exit must therefore
+    // emit a bare path that the browser resolves against the public host.
+    const bindReq = (path: string) => new Request(`http://0.0.0.0:3918${path}`, {
+      headers: { host: 'qa.example.com', 'x-forwarded-proto': 'https' },
+    });
+    const assertHostFree = (location: string | null) => {
+      expect(location).not.toBeNull();
+      expect(location).toMatch(/^\/(?!\/)/);
+      expect(location).not.toContain('0.0.0.0');
+      expect(location).not.toContain('3918');
+      expect(location).not.toMatch(/^[a-z]+:/i);
+    };
+
+    it('no refresh cookie: relative /login?next=…', async () => {
+      const res = await GET(bindReq('/api/auth/refresh?next=%2Fdashboard'));
+      expect(res.headers.get('location')).toBe('/login?next=%2Fdashboard');
+      assertHostFree(res.headers.get('location'));
+    });
+
+    it('second hop (marker present): relative /login?next=…', async () => {
+      cookieStore.set('qa_refresh', 'sometoken');
+      cookieStore.set('qa_refresh_attempt', '1');
+      const res = await GET(bindReq('/api/auth/refresh?next=%2Fdashboard'));
+      assertHostFree(res.headers.get('location'));
+    });
+
+    it('upstream 401: relative /login?next=…', async () => {
+      cookieStore.set('qa_refresh', 'sometoken');
+      globalThis.fetch = vi.fn(async () => new Response('{}', { status: 401 })) as unknown as typeof globalThis.fetch;
+      const res = await GET(bindReq('/api/auth/refresh?next=%2Fdashboard'));
+      assertHostFree(res.headers.get('location'));
+    });
+
+    it('successful rotation: relative path back to the page', async () => {
+      cookieStore.set('qa_refresh', 'sometoken');
+      globalThis.fetch = successFetchMock() as unknown as typeof globalThis.fetch;
+      const res = await GET(bindReq('/api/auth/refresh?next=%2Fdashboard%3Ftab%3Dslow'));
+      expect(res.status).toBe(307);
+      expect(res.headers.get('location')).toBe('/dashboard?tab=slow');
+      assertHostFree(res.headers.get('location'));
+    });
+
+    it('a next naming the bind address itself is dropped, not echoed', async () => {
+      cookieStore.set('qa_refresh', 'sometoken');
+      globalThis.fetch = successFetchMock() as unknown as typeof globalThis.fetch;
+      const res = await GET(bindReq(`/api/auth/refresh?next=${encodeURIComponent('http://0.0.0.0:3918/dashboard')}`));
+      expect(res.headers.get('location')).toBe('/');
     });
   });
 });

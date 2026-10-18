@@ -96,7 +96,7 @@ describe('refresh round trip', () => {
     expect(first).toBe('/api/auth/refresh?next=%2Fdashboard%3Ftab%3Dqueries');
 
     const r1 = await hitRefresh(first);
-    expect(r1.headers.get('location')).toBe(`${WEB}/dashboard?tab=queries`);
+    expect(r1.headers.get('location')).toBe(`/dashboard?tab=queries`);
     expect(refreshCalls).toBe(1);
     expect(jar.get('qa_session')).toBe('access-1');
     expect(jar.get('qa_refresh')).toBe('rot-1');
@@ -110,7 +110,7 @@ describe('refresh round trip', () => {
 
     // Hop 2: marker present -> stop.
     const r2 = await hitRefresh(second);
-    expect(r2.headers.get('location')).toBe(`${WEB}/login?next=%2Fdashboard%3Ftab%3Dqueries`);
+    expect(r2.headers.get('location')).toBe(`/login?next=%2Fdashboard%3Ftab%3Dqueries`);
     expect(refreshCalls).toBe(1);
     expect(jar.has('qa_refresh_attempt')).toBe(false);
   });
@@ -121,7 +121,7 @@ describe('refresh round trip', () => {
     jar.set('qa_refresh', 'orig');
     const loc = await renderPage('/dashboard?r=1');
     const res = await hitRefresh(loc);
-    expect(res.headers.get('location')).toBe(`${WEB}/dashboard?r=1`);
+    expect(res.headers.get('location')).toBe(`/dashboard?r=1`);
     expect(refreshCalls).toBe(1);
   });
 
@@ -130,9 +130,9 @@ describe('refresh round trip', () => {
     // refresh handler rather than deciding "logged out" on its own.
     jar.set('qa_refresh', 'orig');
     const p = proxy(new NextRequest(`${WEB}/dashboard?tab=queries`));
-    const loc = new URL(p.headers.get('location')!);
+    const loc = new URL(p.headers.get('location')!, WEB);
     const res = await hitRefresh(loc.pathname + loc.search);
-    expect(res.headers.get('location')).toBe(`${WEB}/dashboard?tab=queries`);
+    expect(res.headers.get('location')).toBe(`/dashboard?tab=queries`);
     expect(refreshCalls).toBe(1);
     expect(jar.get('qa_session')).toBe('access-1');
   });
@@ -140,9 +140,9 @@ describe('refresh round trip', () => {
   it('from the proxy: a visitor with no refresh cookie ends at /login carrying the original path and query', async () => {
     // B15: after logging in they must land where they asked to go.
     const p = proxy(new NextRequest(`${WEB}/dashboard/q?tab=slow&page=2`));
-    const loc = new URL(p.headers.get('location')!);
+    const loc = new URL(p.headers.get('location')!, WEB);
     const res = await hitRefresh(loc.pathname + loc.search);
-    const login = new URL(res.headers.get('location')!);
+    const login = new URL(res.headers.get('location')!, WEB);
     expect(login.origin + login.pathname).toBe(`${WEB}/login`);
     expect(login.searchParams.get('next')).toBe('/dashboard/q?tab=slow&page=2');
     expect(refreshCalls).toBe(0);

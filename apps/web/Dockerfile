@@ -52,6 +52,10 @@ RUN pnpm --filter @query-analyser/web build
 FROM base AS run
 ENV NODE_ENV=production
 ENV PORT=3000
+# Bind on all interfaces, as Next's reference Dockerfile does; Docker's default
+# HOSTNAME is the container ID. Hygiene only: redirects never carry this host,
+# because route handlers emit relative Locations (Ruling B18).
+ENV HOSTNAME=0.0.0.0
 # Next's standalone output is a self-contained server: it bundles only the
 # node_modules it actually needs, so this stage installs nothing.
 COPY --from=build /app/apps/web/.next/standalone ./
