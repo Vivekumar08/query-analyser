@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createIndexCall, histogramData, trendData } from './detail-view';
+import { createIndexCall, histogramData, trendData, trendValueText } from './detail-view';
 
 describe('createIndexCall', () => {
   it('keeps field order and direction', () =>
@@ -28,7 +28,17 @@ describe('trendData', () => {
     ], 'hourly');
     expect(d[0]).toMatchObject({ label: '09:00', calls: 4, p95: 180 });
     expect(d[1]!.p95).toBeNull();
+    expect(d[0]!.p95Basis).toBe('interpolated');
+    expect(d[1]!.p95Basis).toBeNull();
   });
   it('daily labels', () =>
     expect(trendData([{ at: '2026-10-18T00:00:00.000Z', count: 1, totalMs: '1', maxMs: 1, avgMs: 1, p95: { value: 1, basis: 'interpolated' } }], 'daily')[0]!.label).toBe('Oct 18'));
+});
+
+describe('trend floor basis', () => {
+  const floorPoint = { at: '2026-10-18T09:00:00.000Z', count: 2, totalMs: '30000', maxMs: 20000, avgMs: 15000, p95: { value: 14002, basis: 'floor' as const } };
+  it('keeps basis per point', () => expect(trendData([floorPoint], 'hourly')[0]).toMatchObject({ p95: 14002, p95Basis: 'floor' }));
+  it('floor tooltip uses the lower-bound glyph via formatMs', () => expect(trendValueText('p95', 14002, 'floor')).toBe('≥ 14s'));
+  it('interpolated tooltip uses ≈', () => expect(trendValueText('p95', 300, 'interpolated')).toBe('≈ 300ms'));
+  it('calls use formatCount', () => expect(trendValueText('calls', 1234, null)).toBe('1,234'));
 });

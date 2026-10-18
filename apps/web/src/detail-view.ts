@@ -1,5 +1,6 @@
 import type { SeriesPoint, SuggestionField } from './dashboard-types';
 import { histLabels } from './hist';
+import { formatCount, formatMs } from './format';
 
 const IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
@@ -26,6 +27,17 @@ export function trendData(points: SeriesPoint[], grain: 'hourly' | 'daily') {
     const label = grain === 'hourly'
       ? `${String(d.getUTCHours()).padStart(2, '0')}:00`
       : `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
-    return { label, at: p.at, calls: p.count, p95: p.count > 0 ? p.p95.value : null };
+    const has = p.count > 0;
+    return {
+      label, at: p.at, calls: p.count,
+      p95: has ? p.p95.value : null,
+      p95Basis: has ? p.p95.basis : null,
+    };
   });
+}
+
+/** Tooltip/axis text for a trend series; p95 carries its basis glyph like <Percentile>. */
+export function trendValueText(series: 'calls' | 'p95', value: number, basis: 'interpolated' | 'floor' | null): string {
+  if (series === 'calls') return formatCount(value);
+  return `${basis === 'floor' ? '≥' : '≈'} ${formatMs(value)}`;
 }
