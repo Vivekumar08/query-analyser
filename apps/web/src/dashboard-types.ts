@@ -1,4 +1,4 @@
-import type { PercentileResult, RankedQueryRow, Serialized } from '@query-analyser/contract';
+import type { PercentileResult, RankedQueryRow, Serialized, WrappedKey } from '@query-analyser/contract';
 
 /*
  * Wire shapes of the dashboard read endpoints, verified against
@@ -13,6 +13,12 @@ export interface OrgSummary { id: string; name: string; slug: string; plan: stri
 
 /** GET /v1/orgs/:orgId/apps → AppSummary[] (a bare array). */
 export interface AppSummary { id: string; name: string; env: string; createdAt: string }
+
+/**
+ * GET /v1/apps/:id/sample-key (VIEWER+). `wrapped` is the passphrase-wrapped
+ * private key, unusable without the passphrase, which never leaves the browser.
+ */
+export interface SampleKeyStatus { enabled: boolean; publicKey?: string; wrapped?: WrappedKey }
 
 /** GET /v1/apps/:id */
 export interface AppDetail extends AppSummary { orgId: string; ingest: { lastSeenAt: string | null; keyCount: number } }

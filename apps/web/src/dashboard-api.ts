@@ -1,6 +1,6 @@
 import { authedFetch, type ApiResult } from './api';
 import type {
-  AppDetail, AppSummary, OrgSummary, QueryDetail, QueryListResponse, SeriesResponse,
+  AppDetail, AppSummary, OrgSummary, QueryDetail, QueryListResponse, SampleKeyStatus, SeriesResponse,
 } from './dashboard-types';
 import type { Session } from './auth';
 
@@ -20,3 +20,5 @@ export const getQuery = (t: string, app: string, hash: string): Promise<ApiResul
   authedFetch(`/v1/apps/${e(app)}/queries/${e(hash)}`, t);
 export const getSeries = (t: string, app: string, hash: string, w: { from: string; to: string }): Promise<ApiResult<SeriesResponse>> =>
   authedFetch(`/v1/apps/${e(app)}/queries/${e(hash)}/series?${windowQuery(w)}`, t);
+export const getSampleKey = (t: string, app: string): Promise<ApiResult<SampleKeyStatus>> =>
+  authedFetch(`/v1/apps/${e(app)}/sample-key`, t);
