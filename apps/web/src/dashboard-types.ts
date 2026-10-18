@@ -1,4 +1,4 @@
-import type { PercentileResult, RankedQueryRow, Serialized, WrappedKey } from '@query-analyser/contract';
+import type { EncryptedSample, PercentileResult, RankedQueryRow, Serialized, WrappedKey } from '@query-analyser/contract';
 
 /*
  * Wire shapes of the dashboard read endpoints, verified against
@@ -45,12 +45,14 @@ export interface Advice {
  * of the signature and ignores `from`/`to`.
  * `avgMs` is 0 (not null) when count is 0; `p95`/`p99` are always present
  * (`floor` basis with value 0 when there is no data).
+ * `encryptedSample` is opaque ciphertext, decryptable only in the browser
+ * with the team passphrase; null when the app has no key or none arrived yet.
  */
 export interface QueryDetail {
   hash: string; signature: string; model: string; operation: string;
   firstSeen: string; lastSeen: string; count: number; totalMs: string; maxMs: number;
   avgMs: number; p95: PercentileResult; p99: PercentileResult;
-  hist: number[]; redactedSample: unknown | null; advice: Advice | null;
+  hist: number[]; redactedSample: unknown | null; encryptedSample: EncryptedSample | null; advice: Advice | null;
 }
 
 /** Same `avgMs`/`p95` guarantees as QueryDetail. */

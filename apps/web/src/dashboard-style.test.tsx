@@ -41,7 +41,7 @@ describe('dashboard wears Mist', () => {
   });
 
   it('accent highlights in dashboard/onboarding use periwinkle tokens, not the ink primary', () => {
-    for (const f of ['components/dashboard/QueriesTable.tsx', 'components/onboarding/InstallStep.tsx', 'components/onboarding/OnboardingFlow.tsx', 'components/settings/SampleKeySection.tsx']) {
+    for (const f of ['components/dashboard/QueriesTable.tsx', 'components/onboarding/InstallStep.tsx', 'components/onboarding/OnboardingFlow.tsx', 'components/settings/SampleKeySection.tsx', 'components/dashboard/CompassQuery.tsx', 'components/dashboard/RevealValues.tsx']) {
       const src = readFileSync(path.resolve(__dirname, '..', f), 'utf8');
       expect(src, f).not.toMatch(/\b(bg|border|text)-primary\b(?![-/])/);
     }

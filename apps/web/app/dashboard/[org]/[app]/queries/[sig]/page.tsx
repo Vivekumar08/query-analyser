@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { ArrowLeft } from 'lucide-react';
-import { getQuery, getSeries } from '@/src/dashboard-api';
+import { getQuery, getSampleKey, getSeries } from '@/src/dashboard-api';
 import { getShellContext } from '@/src/shell-context';
 import { parseRange, rangeToParams, rangeToWindow } from '@/src/range';
 import { formatMs } from '@/src/format';
@@ -15,6 +15,7 @@ import { HistogramChart } from '@/components/dashboard/HistogramChart';
 import { TrendChart } from '@/components/dashboard/TrendChart';
 import { AdviceCard } from '@/components/dashboard/AdviceCard';
 import { CopyButton } from '@/components/dashboard/CopyButton';
+import { CompassQuery } from '@/components/dashboard/CompassQuery';
 import { CountUp } from '@/components/dashboard/CountUp';
 import { FadeIn } from '@/components/dashboard/FadeIn';
 
@@ -43,9 +44,10 @@ export default async function QueryDetailPage({
   const appId = ctx.app.id;
 
   // Detail is all-time (the API ignores a window); only the trend is range-scoped.
-  const [detail, series] = await Promise.all([
+  const [detail, series, sampleKey] = await Promise.all([
     getQuery(token, appId, sig),
     getSeries(token, appId, sig, rangeToWindow(range)),
+    getSampleKey(token, appId),
   ]);
   if (!detail.ok) {
     if (detail.status === 401) redirect(`/api/auth/refresh?next=${encodeURIComponent(self)}`);
@@ -54,6 +56,10 @@ export default async function QueryDetailPage({
   }
   const d = detail.data;
   const title = `${d.model}.${d.operation}`;
+  // Only whether a key exists reaches the client; the wrapped key is fetched
+  // through the BFF at unlock time. A failed lookup just hides Reveal.
+  const sampleKeyEnabled = sampleKey.ok && sampleKey.data.enabled;
+  const canManage = ctx.currentOrg.role === 'OWNER' || ctx.currentOrg.role === 'ADMIN';
 
   return (
     <>
@@ -100,14 +106,16 @@ export default async function QueryDetailPage({
 
         <AdviceCard appId={appId} model={d.model} advice={d.advice} />
 
-        {d.redactedSample != null && (
-          <Card>
-            <CardHeader><CardTitle className="text-base">Redacted sample <span className="ml-1 text-xs font-normal text-muted-foreground">All time</span></CardTitle></CardHeader>
-            <CardContent className="flex flex-col gap-2">
-              <pre className="overflow-x-auto rounded-md border bg-muted p-3 font-mono text-xs"><code>{JSON.stringify(d.redactedSample, null, 2)}</code></pre>
-              <p className="text-xs text-muted-foreground">Values are never sent — shapes only.</p>
-            </CardContent>
-          </Card>
+        {(d.redactedSample != null || d.encryptedSample != null) && (
+          <CompassQuery
+            model={d.model}
+            redactedSample={d.redactedSample}
+            appId={appId}
+            encryptedSample={d.encryptedSample ?? null}
+            sampleKeyEnabled={sampleKeyEnabled}
+            canManage={canManage}
+            settingsHref={`${base}/settings#samples`}
+          />
         )}
       </div>
       </FadeIn>
