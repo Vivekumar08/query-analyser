@@ -116,9 +116,10 @@ async function passphraseKey(
   iterations: number,
   usage: KeyUsage,
 ): Promise<CryptoKey> {
-  const base = await subtle().importKey('raw', encoder.encode(passphrase), 'PBKDF2', false, [
-    'deriveKey',
-  ]);
+  // NFC so the same passphrase typed on different keyboards/OSes (precomposed
+  // vs combining accents) derives the same key. Used by both wrap and unwrap.
+  const material = encoder.encode(passphrase.normalize('NFC'));
+  const base = await subtle().importKey('raw', material, 'PBKDF2', false, ['deriveKey']);
   return subtle().deriveKey(
     { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
     base,
