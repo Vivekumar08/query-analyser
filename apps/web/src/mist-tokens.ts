@@ -9,9 +9,9 @@ export const MIST = {
   hazeSky: '#E3EEFF',
   ink: '#1E2235',
   muted: '#5A607A',
-  caption: '#686E8A',
-  // Spec's #6A72C9 measures ~4.1:1 on the base; darkened to pass AA for small text.
-  accentText: '#5B63B8',
+  caption: '#5C627C',
+  // Spec's #6A72C9 measures ~4.1:1; darkened until small text passes AA on the base, strong glass and every haze stop.
+  accentText: '#5259AC',
   // Bars and chart strokes only — about 3.3:1, never used for text.
   accentChart: '#7C83D6',
   border: '#E3E6F3',

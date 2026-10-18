@@ -31,6 +31,14 @@ describe('Mist tokens', () => {
     });
   }
 
+  for (const [name, hex] of Object.entries(textTokens)) {
+    it(`${name} passes AA (4.5:1) directly on every haze stop`, () => {
+      for (const haze of [MIST.hazeBlue, MIST.hazeLilac, MIST.hazeSky]) {
+        expect(contrastRatio(hex, haze), `${name} on ${haze}`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  }
+
   it('the chart periwinkle is not a text token', () => {
     expect(Object.values(textTokens)).not.toContain(MIST.accentChart);
   });
