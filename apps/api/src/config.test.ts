@@ -60,4 +60,11 @@ describe('loadConfig', () => {
 
     expect(message).toContain('WEB_ORIGIN');
   });
+
+  it('treats an empty WEB_PROXY_SECRET as unset, and rejects a short one', () => {
+    expect(loadConfig({ ...base }).WEB_PROXY_SECRET).toBeUndefined();
+    expect(loadConfig({ ...base, WEB_PROXY_SECRET: '' }).WEB_PROXY_SECRET).toBeUndefined();
+    expect(loadConfig({ ...base, WEB_PROXY_SECRET: 'p'.repeat(32) }).WEB_PROXY_SECRET).toBe('p'.repeat(32));
+    expect(() => loadConfig({ ...base, WEB_PROXY_SECRET: 'too-short' })).toThrow(/WEB_PROXY_SECRET/);
+  });
 });

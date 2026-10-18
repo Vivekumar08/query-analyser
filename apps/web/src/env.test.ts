@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { loadWebEnv } from './env.js';
+import { loadWebEnv } from './env';
 
 const valid = { API_ORIGIN: 'https://api.example.com' };
 

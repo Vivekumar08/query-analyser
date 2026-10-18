@@ -7,6 +7,7 @@ import { appRoutes } from './apps/routes.js';
 import { inviteRoutes } from './orgs/invites.js';
 import { adminRoutes } from './admin/routes.js';
 import { createMailer, type Mailer, type MailMessage } from './mail/mailer.js';
+import { makeRateLimitKey } from './rate-limit-key.js';
 
 export interface BuildOptions {
   logger?: boolean;
@@ -191,8 +192,11 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
     // never engage — while every request still costs a KeyResolver.resolve
     // DB round-trip on a novel hash before returning 401. `req.ip` is the
     // only safe key (the socket address, or the real client address once a
-    // deployment sets TRUST_PROXY to resolve it behind a trusted proxy).
-    keyGenerator: (req) => req.ip,
+    // deployment sets TRUST_PROXY to resolve it behind a trusted proxy) —
+    // with one exception: the web app's BFF hop, which proves itself with
+    // WEB_PROXY_SECRET and forwards the browser's IP (Ruling B20). See
+    // rate-limit-key.ts; with the secret unset this is exactly `req.ip`.
+    keyGenerator: makeRateLimitKey(config.WEB_PROXY_SECRET),
   });
   await app.register(import('./plugins/prisma.js'));
   await app.register(import('./analysis/scheduler.js'), {

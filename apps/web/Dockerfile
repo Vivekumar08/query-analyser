@@ -35,13 +35,11 @@ RUN pnpm install --frozen-lockfile --filter @query-analyser/web...
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
+COPY --from=deps /app/packages/contract/node_modules ./packages/contract/node_modules
 COPY . .
-# NOTE: apps/web does not depend on @query-analyser/contract yet, so nothing
-# is built here but the web app itself. When Plan B has the UI import the
-# contract's wire types, this stage gains
-#   COPY --from=deps /app/packages/contract/node_modules ./packages/contract/node_modules
-#   RUN pnpm --filter @query-analyser/contract build
-# because the contract is consumed through its `dist`, which is not committed.
+# The contract is consumed through its `dist`, which is not committed, so it
+# must be built before the web app that imports it.
+RUN pnpm --filter @query-analyser/contract build
 # This placeholder is pre-emptive: nothing imports env.ts's loadWebEnv yet, so
 # next build would succeed without it today. It exists so the build does not
 # start failing the moment a later plan wires loadWebEnv into a Server
@@ -54,6 +52,10 @@ RUN pnpm --filter @query-analyser/web build
 FROM base AS run
 ENV NODE_ENV=production
 ENV PORT=3000
+# Bind on all interfaces, as Next's reference Dockerfile does; Docker's default
+# HOSTNAME is the container ID. Hygiene only: redirects never carry this host,
+# because route handlers emit relative Locations (Ruling B18).
+ENV HOSTNAME=0.0.0.0
 # Next's standalone output is a self-contained server: it bundles only the
 # node_modules it actually needs, so this stage installs nothing.
 COPY --from=build /app/apps/web/.next/standalone ./
