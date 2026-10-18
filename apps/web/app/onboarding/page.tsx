@@ -6,10 +6,13 @@ import { OnboardingFlow } from '@/components/onboarding/OnboardingFlow';
 
 export default async function OnboardingPage({ searchParams }: { searchParams: Promise<{ org?: string }> }) {
   const { org: targetOrg } = await searchParams;
-  const session = await requireSession(targetOrg ? `/onboarding?org=${encodeURIComponent(targetOrg)}` : '/onboarding');
+  const path = targetOrg ? `/onboarding?org=${encodeURIComponent(targetOrg)}` : '/onboarding';
+  const session = await requireSession(path);
+  const refresh = `/api/auth/refresh?next=${encodeURIComponent(path)}`;
   const verified = Boolean(session.user.emailVerifiedAt);
   // /v1/orgs requires a verified email; don't call it before then.
   const orgsRes = verified ? await listOrgs(session.accessToken) : null;
+  if (orgsRes && !orgsRes.ok && orgsRes.status === 401) redirect(refresh);
   if (orgsRes && !orgsRes.ok) throw new Error('Could not load workspaces');
   const orgs = orgsRes?.ok ? orgsRes.data : [];
   // A returning user (reload, or back after leaving): find an app that never
@@ -17,6 +20,7 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
   let apps: { id: string; name: string; lastSeenAt: string | null }[] | undefined;
   if (verified && !targetOrg && orgs[0]) {
     const list = await listApps(session.accessToken, orgs[0].id);
+    if (!list.ok && list.status === 401) redirect(refresh);
     if (!list.ok) throw new Error('Could not load apps');
     const details = await Promise.all(list.data.map((a) => getApp(session.accessToken, a.id)));
     // An app whose detail can't be read is treated as connected: never trap
