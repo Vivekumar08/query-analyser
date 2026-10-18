@@ -57,3 +57,6 @@ export function bucketOf(date: Date): string {
     p(date.getUTCHours())
   );
 }
+
+// End-to-end sample crypto (Web Crypto only, zero-dependency).
+export * from './sample-crypto.js';
