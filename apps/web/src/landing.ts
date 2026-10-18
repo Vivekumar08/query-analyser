@@ -22,3 +22,13 @@ export function resolveLanding(input: {
 export function appPath(org: string, app: string): string {
   return `/dashboard/${encodeURIComponent(org)}/${encodeURIComponent(app)}/queries`;
 }
+
+/** The cookie value is URI-encoded by RememberApp; a malformed one is treated as absent. */
+export function readLastApp(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return undefined;
+  }
+}

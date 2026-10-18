@@ -1,6 +1,6 @@
 // apps/web/src/landing.test.ts
 import { describe, it, expect } from 'vitest';
-import { resolveLanding, appPath } from './landing';
+import { resolveLanding, appPath, readLastApp } from './landing';
 
 const orgs = [
   { slug: 'acme', apps: [{ id: 'a1' }, { id: 'a2' }] },
@@ -28,4 +28,19 @@ describe('resolveLanding', () => {
 describe('appPath', () => {
   it('builds the queries path with encoded segments', () =>
     expect(appPath('ac me', 'a/1')).toBe('/dashboard/ac%20me/a%2F1/queries'));
+});
+
+describe('readLastApp', () => {
+  it('decodes the URI-encoded cookie value', () => {
+    expect(readLastApp('acme%2Fa1')).toBe('acme/a1');
+    expect(resolveLanding({
+      emailVerified: true,
+      orgs: [{ slug: 'acme', apps: [{ id: 'a1' }] }],
+      lastApp: readLastApp('acme%2Fa1'),
+    })).toEqual({ kind: 'app', org: 'acme', app: 'a1' });
+  });
+  it('returns undefined for missing or malformed values', () => {
+    expect(readLastApp(undefined)).toBeUndefined();
+    expect(readLastApp('%E0%A4%A')).toBeUndefined();
+  });
 });

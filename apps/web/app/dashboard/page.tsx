@@ -2,7 +2,7 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { requireSession } from '@/src/auth';
 import { listApps, listOrgs } from '@/src/dashboard-api';
-import { LAST_APP_COOKIE, appPath, resolveLanding } from '@/src/landing';
+import { LAST_APP_COOKIE, appPath, readLastApp, resolveLanding } from '@/src/landing';
 
 /** Where a signed-in visitor belongs: their last app, their first app, or onboarding. */
 export default async function DashboardIndex() {
@@ -35,7 +35,7 @@ export default async function DashboardIndex() {
   const landing = resolveLanding({
     emailVerified: true,
     orgs: withApps,
-    lastApp: (await cookies()).get(LAST_APP_COOKIE)?.value,
+    lastApp: readLastApp((await cookies()).get(LAST_APP_COOKIE)?.value),
   });
   redirect(landing.kind === 'onboarding' ? '/onboarding' : appPath(landing.org, landing.app));
 }
