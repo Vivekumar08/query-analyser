@@ -92,14 +92,19 @@ model RefreshToken {
 }
 
 model App {
-  id         String           @id @default(uuid())
-  orgId      String
-  name       String
-  env        String
-  createdAt  DateTime         @default(now()) @db.Timestamptz(3)
-  org        Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  keys       IngestKey[]
-  signatures QuerySignature[]
+  id               String           @id @default(uuid())
+  orgId            String
+  name             String
+  env              String
+  createdAt        DateTime         @default(now()) @db.Timestamptz(3)
+  /// Base64 SPKI of the app's ECDH P-256 sample key; null = real-value samples off.
+  samplePublicKey  String?
+  /// The private key wrapped under the team passphrase in the browser
+  /// (`WrappedKey`). Useless to the server without the passphrase.
+  sampleKeyWrapped Json?
+  org              Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  keys             IngestKey[]
+  signatures       QuerySignature[]
 
   @@unique([orgId, name, env])
   @@index([orgId])
@@ -119,23 +124,25 @@ model IngestKey {
 }
 
 model QuerySignature {
-  id             String             @id @default(uuid())
-  appId          String
-  hash           String
-  signature      String
-  model          String
-  operation      String
-  filterShape    Json
-  sortKeys       Json
-  stages         String[]
-  redactedSample Json?
-  firstSeen      DateTime           @default(now()) @db.Timestamptz(3)
-  lastSeen       DateTime           @default(now()) @db.Timestamptz(3)
-  app            App                @relation(fields: [appId], references: [id], onDelete: Cascade)
-  rollups        QueryRollup[]
-  dailyRollups   QueryDailyRollup[]
-  alerts         Alert[]
-  advice         Advice?
+  id              String             @id @default(uuid())
+  appId           String
+  hash            String
+  signature       String
+  model           String
+  operation       String
+  filterShape     Json
+  sortKeys        Json
+  stages          String[]
+  redactedSample  Json?
+  /// End-to-end encrypted real-value sample (`EncryptedSample`); opaque here.
+  encryptedSample Json?
+  firstSeen       DateTime           @default(now()) @db.Timestamptz(3)
+  lastSeen        DateTime           @default(now()) @db.Timestamptz(3)
+  app             App                @relation(fields: [appId], references: [id], onDelete: Cascade)
+  rollups         QueryRollup[]
+  dailyRollups    QueryDailyRollup[]
+  alerts          Alert[]
+  advice          Advice?
 
   @@unique([appId, hash])
   @@index([appId, lastSeen])

@@ -162,6 +162,24 @@ describe('read APIs', () => {
     expect(res.json().redactedSample).toEqual({ ms: 20 });
   });
 
+  it('detail returns encryptedSample: null when none is stored', async () => {
+    const { token, appId, sigHash } = await seed();
+    const res = await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/${sigHash}`, headers: as(token) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toHaveProperty('encryptedSample', null);
+  });
+
+  it('detail returns the stored encryptedSample, and the list does not', async () => {
+    const { token, appId, sigHash, sigId } = await seed();
+    const env = { v: 1, epk: 'ZXBr', iv: 'aXZpdml2aXZpdml2', ct: 'Y2lwaGVydGV4dA==' };
+    await app.prisma.querySignature.update({ where: { id: sigId }, data: { encryptedSample: env } });
+    const res = await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/${sigHash}`, headers: as(token) });
+    expect(res.json().encryptedSample).toEqual(env);
+    const list = await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries`, headers: as(token) });
+    expect(list.statusCode).toBe(200);
+    expect(JSON.stringify(list.json())).not.toContain('encryptedSample');
+  });
+
   it.each([
     ['detail', (appId: string, hash: string) => `/v1/apps/${appId}/queries/${hash}`],
     ['series', (appId: string, hash: string) => `/v1/apps/${appId}/queries/${hash}/series`],

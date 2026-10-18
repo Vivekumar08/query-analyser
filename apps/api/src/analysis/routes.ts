@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { PrismaClient } from '../db.js';
+import type { EncryptedSample } from '@query-analyser/contract';
 import { requireAppRole } from '../orgs/rbac.js';
 import { percentileFromHist, avgMs } from './percentile.js';
 
@@ -367,6 +368,7 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
       p99: percentileFromHist(hist, maxMs, 0.99),
       hist,
       redactedSample: signature.redactedSample,
+      encryptedSample: signature.encryptedSample as EncryptedSample | null,
       advice: signature.advice,
     };
   });

@@ -45,16 +45,25 @@ export async function writeBatch(
     sortKeys: i.sortKeys,
     stages: i.stages,
     redactedSample: i.sample ?? null,
+    encryptedSample: i.encryptedSample ?? null,
   }));
 
+  // `encryptedSample` is kept only while the app has a sample key: an app
+  // that never opted in stores nothing new, whatever a client sends. The
+  // check is part of the same statement, so no extra round-trip. Like
+  // `redactedSample`, a null never overwrites a stored envelope, which also
+  // makes a flush split across several requests (SDK chunking) safe.
   const ids = await prisma.$queryRaw<{ id: string; hash: string }[]>`
-    INSERT INTO "QuerySignature" ("id","appId","hash","signature","model","operation","filterShape","sortKeys","stages","redactedSample","firstSeen","lastSeen")
-    SELECT gen_random_uuid(), t."appId", t.hash, t.signature, t.model, t.operation, t."filterShape", t."sortKeys", t.stages, t."redactedSample", ${now}, ${now}
+    WITH k AS (SELECT ("samplePublicKey" IS NOT NULL) AS keyed FROM "App" WHERE id = ${appId})
+    INSERT INTO "QuerySignature" ("id","appId","hash","signature","model","operation","filterShape","sortKeys","stages","redactedSample","encryptedSample","firstSeen","lastSeen")
+    SELECT gen_random_uuid(), t."appId", t.hash, t.signature, t.model, t.operation, t."filterShape", t."sortKeys", t.stages, t."redactedSample",
+      CASE WHEN (SELECT keyed FROM k) THEN t."encryptedSample" END, ${now}, ${now}
     FROM jsonb_to_recordset(${JSON.stringify(sigRows)}::jsonb)
-      AS t("appId" uuid, hash text, signature text, model text, operation text, "filterShape" jsonb, "sortKeys" jsonb, stages text[], "redactedSample" jsonb)
+      AS t("appId" uuid, hash text, signature text, model text, operation text, "filterShape" jsonb, "sortKeys" jsonb, stages text[], "redactedSample" jsonb, "encryptedSample" jsonb)
     ON CONFLICT ("appId","hash") DO UPDATE SET
       "lastSeen" = EXCLUDED."lastSeen",
-      "redactedSample" = COALESCE(EXCLUDED."redactedSample", "QuerySignature"."redactedSample")
+      "redactedSample" = COALESCE(EXCLUDED."redactedSample", "QuerySignature"."redactedSample"),
+      "encryptedSample" = COALESCE(EXCLUDED."encryptedSample", "QuerySignature"."encryptedSample")
     RETURNING id, hash
   `;
 
