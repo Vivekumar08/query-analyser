@@ -22,6 +22,10 @@ describe('formatMs', () => {
 describe('formatAvg', () => {
   it('converts before dividing', () => expect(formatAvg('3000', 4)).toBe('750ms'));
   it('zero count shows an em dash', () => expect(formatAvg('0', 0)).toBe('—'));
+  it('converts before dividing, so garbage throws instead of rendering 0ms', () =>
+    expect(() => formatAvg('12ms', 2)).toThrow());
+  it('huge totals average without throwing', () =>
+    expect(formatAvg('90071992547409930', 2)).toMatch(/h \d+m$/));
 });
 
 describe('formatCount', () => {

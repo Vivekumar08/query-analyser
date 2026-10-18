@@ -28,14 +28,17 @@ export function getParams(p: Params, key: string): string[] {
 
 export function parseRange(p: Params): RangeState {
   const range = getParam(p, 'range');
-  if (range && range in PRESET_MS) return { kind: 'preset', preset: range as RangePreset };
+  if (range && Object.hasOwn(PRESET_MS, range)) return { kind: 'preset', preset: range as RangePreset };
   if (range === 'custom') {
     const from = getParam(p, 'from');
     const to = getParam(p, 'to');
     if (!from || !to || !DAY.test(from) || !DAY.test(to)) return DEFAULT;
     const f = new Date(`${from}T00:00:00.000Z`);
     const t = new Date(`${to}T23:59:59.999Z`);
-    if (Number.isNaN(f.getTime()) || Number.isNaN(t.getTime()) || f > t) return DEFAULT;
+    if (Number.isNaN(f.getTime()) || Number.isNaN(t.getTime())) return DEFAULT;
+    // Reject calendar-invalid dates such as 2026-02-31, which Date would roll over.
+    if (f.toISOString().slice(0, 10) !== from || t.toISOString().slice(0, 10) !== to) return DEFAULT;
+    if (f > t) return DEFAULT;
     return { kind: 'custom', from: f.toISOString(), to: t.toISOString() };
   }
   return DEFAULT;

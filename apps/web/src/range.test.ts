@@ -16,6 +16,17 @@ describe('parseRange', () => {
   it('garbage custom dates fall back to 24h', () =>
     expect(parseRange({ range: 'custom', from: 'yesterday', to: 'x' })).toEqual({ kind: 'preset', preset: '24h' }));
   it('accepts URLSearchParams', () => expect(parseRange(new URLSearchParams('range=1h'))).toEqual({ kind: 'preset', preset: '1h' }));
+  it('inherited object keys are not presets', () => {
+    for (const range of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect(parseRange({ range })).toEqual({ kind: 'preset', preset: '24h' });
+    }
+  });
+  it('calendar-invalid custom date falls back to 24h', () =>
+    expect(parseRange({ range: 'custom', from: '2026-02-31', to: '2026-03-05' })).toEqual({ kind: 'preset', preset: '24h' }));
+  it('same-day custom range covers the whole day', () =>
+    expect(parseRange({ range: 'custom', from: '2026-10-05', to: '2026-10-05' })).toEqual({
+      kind: 'custom', from: '2026-10-05T00:00:00.000Z', to: '2026-10-05T23:59:59.999Z',
+    }));
 });
 
 describe('rangeToWindow', () => {
