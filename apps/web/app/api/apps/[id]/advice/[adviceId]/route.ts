@@ -24,8 +24,10 @@ export async function PATCH(
     body: JSON.stringify({ status: body.status }),
   });
   if (!res.ok) {
-    const status = res.status === 404 ? 404 : res.status === 403 ? 403 : res.status >= 500 || res.status === 0 ? 502 : 400;
-    return NextResponse.json({ error: safeUpstreamMessage(res.status, 'generic') }, { status });
+    // 401 stays 401 so the client can send the user through /api/auth/refresh.
+    const status = res.status === 401 ? 401 : res.status === 404 ? 404 : res.status === 403 ? 403 : res.status >= 500 || res.status === 0 ? 502 : 400;
+    const error = res.status === 400 ? "This suggestion can't be updated." : safeUpstreamMessage(res.status, 'generic');
+    return NextResponse.json({ error }, { status });
   }
   return NextResponse.json({ status: body.status });
 }

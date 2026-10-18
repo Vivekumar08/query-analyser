@@ -50,4 +50,14 @@ describe('PATCH advice', () => {
     vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 503, error: 'x' });
     expect((await PATCH(req({ status: 'APPLIED' }), ctx)).status).toBe(502);
   });
+  it('upstream 401 → 401 (so the client can refresh the session)', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 401, error: 'expired' });
+    expect((await PATCH(req({ status: 'APPLIED' }), ctx)).status).toBe(401);
+  });
+  it('upstream 400 → 400 with an advice-specific message, not the name message', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 400, error: 'bad' });
+    const res = await PATCH(req({ status: 'APPLIED' }), ctx);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "This suggestion can't be updated." });
+  });
 });

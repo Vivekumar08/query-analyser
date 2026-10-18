@@ -30,4 +30,15 @@ describe('AdviceCard', () => {
     render(<AdviceCard appId="a1" model="Order" advice={null} />);
     expect(screen.getByText(/No index suggestion/)).toBeTruthy();
   });
+  it('a 401 from the PATCH sends the user through /api/auth/refresh back to this page', async () => {
+    const assign = vi.fn();
+    vi.stubGlobal('location', { pathname: '/dashboard/o/a/queries/s1', search: '?range=7d', assign });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({}) }));
+    render(<AdviceCard appId="a1" model="Order" advice={advice} />);
+    fireEvent.click(screen.getByRole('button', { name: /mark as applied/i }));
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+    await vi.waitFor(() => expect(assign).toHaveBeenCalled());
+    expect(assign).toHaveBeenCalledWith('/api/auth/refresh?next=' + encodeURIComponent('/dashboard/o/a/queries/s1?range=7d'));
+    vi.unstubAllGlobals();
+  });
 });

@@ -11,6 +11,7 @@ import { RangeControl } from '@/components/dashboard/RangeControl';
 import { QueryFiltersBar } from '@/components/dashboard/QueryFilters';
 import { QueriesTable } from '@/components/dashboard/QueriesTable';
 import { QueriesEmpty } from '@/components/dashboard/EmptyState';
+import { FadeIn } from '@/components/dashboard/FadeIn';
 
 const INSTALL_HREF = 'https://www.npmjs.com/package/@vivekumar08/query-analyser';
 
@@ -55,6 +56,7 @@ export default async function QueriesPage({
   return (
     <>
       <PageHeader title="Queries" crumbs={[{ label: org }, { label: 'Queries' }]} actions={<RangeControl value={filters.range} />} />
+      <FadeIn>
       <div className="flex flex-col gap-4 p-6">
         <QueryFiltersBar models={models} ops={ops} value={filters} />
         {(!sortExact || sortNote) && (
@@ -78,6 +80,7 @@ export default async function QueriesPage({
           </Button>
         )}
       </div>
+      </FadeIn>
     </>
   );
 }

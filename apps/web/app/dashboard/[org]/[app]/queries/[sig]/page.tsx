@@ -4,7 +4,7 @@ import { ArrowLeft } from 'lucide-react';
 import { getQuery, getSeries } from '@/src/dashboard-api';
 import { getShellContext } from '@/src/shell-context';
 import { parseRange, rangeToParams, rangeToWindow } from '@/src/range';
-import { formatCount, formatMs } from '@/src/format';
+import { formatMs } from '@/src/format';
 import { histogramData, trendData } from '@/src/detail-view';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { PageHeader } from '@/components/dashboard/PageHeader';
@@ -15,6 +15,8 @@ import { HistogramChart } from '@/components/dashboard/HistogramChart';
 import { TrendChart } from '@/components/dashboard/TrendChart';
 import { AdviceCard } from '@/components/dashboard/AdviceCard';
 import { CopyButton } from '@/components/dashboard/CopyButton';
+import { CountUp } from '@/components/dashboard/CountUp';
+import { FadeIn } from '@/components/dashboard/FadeIn';
 
 const COPY_CLASS = 'rounded-md border px-3 py-1 text-xs text-muted-foreground hover:bg-muted';
 
@@ -60,6 +62,7 @@ export default async function QueryDetailPage({
         crumbs={[{ label: org }, { label: 'Queries', href: listHref }, { label: title }]}
         actions={<RangeControl value={range} />}
       />
+      <FadeIn>
       <div className="flex flex-col gap-6 p-6">
         <Link href={listHref} className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
           <ArrowLeft className="size-4" /> All queries
@@ -73,10 +76,10 @@ export default async function QueryDetailPage({
         <section aria-label="All-time stats" className="flex flex-col gap-2">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">All time</p>
           <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <StatCard label="Calls">{formatCount(d.count)}</StatCard>
+            <StatCard label="Calls"><CountUp value={d.count} kind="count" /></StatCard>
             <StatCard label="Time wasted">{formatMs(d.totalMs)}</StatCard>
             <StatCard label="p95" hint={<Percentile label="p99" value={d.p99} />}><Percentile label="p95" showLabel={false} value={d.p95} /></StatCard>
-            <StatCard label="Max">{formatMs(d.maxMs)}</StatCard>
+            <StatCard label="Max"><CountUp value={d.maxMs} kind="ms" /></StatCard>
           </div>
         </section>
 
@@ -107,6 +110,7 @@ export default async function QueryDetailPage({
           </Card>
         )}
       </div>
+      </FadeIn>
     </>
   );
 }

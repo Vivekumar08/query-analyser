@@ -42,6 +42,10 @@ export function AdviceCard({ appId, model, advice }: { appId: string; model: str
         body: JSON.stringify({ status: target }),
       });
       const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (res.status === 401) {
+        window.location.assign(`/api/auth/refresh?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+        return;
+      }
       if (!res.ok) throw new Error(body.error ?? 'Something went wrong. Please try again.');
       setStatus(target);
       toast.success(target === 'APPLIED' ? 'Marked as applied' : 'Suggestion dismissed');

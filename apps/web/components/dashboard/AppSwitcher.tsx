@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Check, ChevronsUpDown, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -18,10 +19,17 @@ export function AppSwitcher({
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
-  // Navigate once, from onSelect (cmdk fires it for both click and Enter), then close.
+  // Items are real anchors (middle/cmd-click open a new tab). A plain click follows
+  // the Link, and stopPropagation keeps cmdk's click-driven onSelect from navigating
+  // a second time; onSelect still handles keyboard Enter.
   const go = (href: string) => {
     setOpen(false);
     router.push(href);
+  };
+  const close = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    // Leave the popover (and the anchor) mounted for modifier-clicks so the browser opens the tab.
+    if (!(e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)) setOpen(false);
   };
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -41,11 +49,11 @@ export function AppSwitcher({
               <CommandGroup key={g.org.slug} heading={g.org.name}>
                 {g.apps.map((a) => (
                   <CommandItem key={a.id} value={`${g.org.slug}/${a.id}`} onSelect={() => go(a.href)}>
-                    <span className="flex min-w-0 flex-1 items-center">
+                    <Link href={a.href} onClick={close} className="flex min-w-0 flex-1 items-center">
                       <span className="truncate">{a.name}</span>
                       <span className="ml-1 text-xs text-muted-foreground">{a.env}</span>
                       {a.current && <Check className="ml-auto size-4" aria-label="current" />}
-                    </span>
+                    </Link>
                   </CommandItem>
                 ))}
               </CommandGroup>
@@ -53,9 +61,9 @@ export function AppSwitcher({
             <CommandSeparator />
             <CommandGroup>
               <CommandItem value="new-app" onSelect={() => go(newAppHref)}>
-                <span className="flex flex-1 items-center gap-2">
+                <Link href={newAppHref} onClick={close} className="flex flex-1 items-center gap-2">
                   <Plus className="size-4" aria-hidden /> New app
-                </span>
+                </Link>
               </CommandItem>
             </CommandGroup>
           </CommandList>
