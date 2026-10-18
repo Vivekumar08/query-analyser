@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { navigateToRefresh } from './session-expiry';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 export function VerifyStep({ email }: { email: string }) {
@@ -30,7 +31,8 @@ export function VerifyStep({ email }: { email: string }) {
         headers: { 'content-type': 'application/json' },
         body: '{}',
       });
-      if (res.ok) toast.success('Email sent');
+      if (res.status === 401) navigateToRefresh();
+      else if (res.ok) toast.success('Email sent');
       else toast.error('Something went wrong. Please try again.');
     } catch {
       toast.error('Something went wrong. Please try again.');

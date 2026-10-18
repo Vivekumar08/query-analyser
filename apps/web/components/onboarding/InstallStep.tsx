@@ -11,16 +11,22 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { navigateToRefresh } from './session-expiry';
 import { buildSnippet } from './snippet';
 
 const POLL_MS = 5000;
 const HELP_AFTER_MS = 180_000;
 
 export function InstallStep({
-  appId, appName, ingestKey, doneHref,
-}: { appId: string; appName: string; ingestKey: string | null; doneHref: string }) {
+  appId, appName, ingestKey, keyError = null, doneHref,
+}: { appId: string; appName: string; ingestKey: string | null; keyError?: 'forbidden' | 'failed' | null; doneHref: string }) {
   const router = useRouter();
   const reduce = useReducedMotion();
+  // The key lives only here (and in OnboardingFlow's state): a new one from
+  // "Create a new key" replaces the prop's value.
+  const [key, setKey] = useState<string | null>(ingestKey);
+  const [creating, setCreating] = useState(false);
+  const [expired, setExpired] = useState(false);
   const [copied, setCopied] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -28,13 +34,29 @@ export function InstallStep({
   const [showHelp, setShowHelp] = useState(false);
   const started = useRef(Date.now());
 
+  // A 401 with an uncopied key must not navigate away: keep the key on screen
+  // and let the user continue once they have copied it.
+  const handleExpired = () => {
+    if (keyRef.current && !copiedRef.current) setExpired(true);
+    else navigateToRefresh();
+  };
+  const keyRef = useRef(key);
+  const copiedRef = useRef(copied);
+  keyRef.current = key;
+  copiedRef.current = copied;
+
   useEffect(() => {
-    if (connected) return;
+    if (connected || expired) return;
     let stopped = false;
     const tick = async () => {
       if (document.visibilityState !== 'visible') return;
       try {
         const res = await fetch(`/api/apps/${encodeURIComponent(appId)}/status`, { cache: 'no-store' });
+        if (res.status === 401) {
+          stopped = true;
+          handleExpired();
+          return;
+        }
         if (!res.ok) throw new Error(String(res.status));
         const body = (await res.json()) as { lastSeenAt: string | null };
         setReconnecting(false);
@@ -47,29 +69,66 @@ export function InstallStep({
     void tick();
     const id = setInterval(tick, POLL_MS);
     return () => { stopped = true; clearInterval(id); };
-  }, [appId, connected]);
+  }, [appId, connected, expired]);
 
   // Closing the tab before copying would lose the key for good.
   useEffect(() => {
-    if (!ingestKey || copied) return;
+    if (!key || copied) return;
     const warn = (e: BeforeUnloadEvent) => { e.preventDefault(); };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
-  }, [ingestKey, copied]);
+  }, [key, copied]);
 
-  if (!ingestKey) {
+  const createKey = async () => {
+    setCreating(true);
+    try {
+      const res = await fetch(`/api/apps/${encodeURIComponent(appId)}/keys`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      const body = (await res.json().catch(() => ({}))) as { key?: string; error?: string };
+      if (res.status === 401) { navigateToRefresh(); return; }
+      if (res.status === 201 && body.key) {
+        setKey(body.key);
+        return;
+      }
+      toast.error(body.error ?? 'Something went wrong. Please try again.');
+    } catch {
+      toast.error('Something went wrong. Please try again.');
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  if (!key) {
+    const forbidden = keyError === 'forbidden';
     return (
       <Card>
-        <CardHeader><CardTitle>Key already shown</CardTitle></CardHeader>
+        <CardHeader><CardTitle>{keyError === 'failed' ? "Couldn't create a key" : forbidden ? 'No key created' : 'Key already shown'}</CardTitle></CardHeader>
         <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
-          <p>For your security an ingest key is only shown once. Create a new key from Settings (coming soon), or create another app.</p>
-          <Button asChild variant="outline" className="self-start"><Link href={doneHref}>Go to your queries</Link></Button>
+          {forbidden ? (
+            <p>Only workspace admins can create keys — ask an admin.</p>
+          ) : (
+            <p>
+              {keyError === 'failed'
+                ? 'Your app was created, but we could not create its ingest key.'
+                : 'For your security an ingest key is only shown once.'}{' '}
+              Create a new key to install the agent.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {!forbidden && (
+              <Button onClick={createKey} disabled={creating}>Create a new key</Button>
+            )}
+            <Button asChild variant="outline"><Link href={doneHref}>Go to your queries</Link></Button>
+          </div>
         </CardContent>
       </Card>
     );
   }
 
-  const s = buildSnippet(ingestKey, appName);
+  const s = buildSnippet(key, appName);
   const copy = async (text: string, what: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -85,6 +144,12 @@ export function InstallStep({
   return (
     <div className="flex flex-col gap-5">
       <h2 className="text-xl font-semibold tracking-tight">Install the agent</h2>
+      {expired && (
+        <div role="alert" className="flex flex-wrap items-center gap-3 rounded-lg border p-3 text-sm">
+          <p className="flex-1">Your session expired — copy your key, then continue.</p>
+          <Button onClick={navigateToRefresh}>Continue</Button>
+        </div>
+      )}
       <div role="note" className="flex gap-2 rounded-lg border border-amber-200 bg-warning-bg p-3 text-sm text-warning-fg">
         <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
         <p><strong>This key is shown once.</strong> Copy it now — we can&apos;t show it again.</p>
@@ -93,7 +158,7 @@ export function InstallStep({
       <p className="text-xs text-muted-foreground">Prefer an environment variable in production: <code className="font-mono">apiKey: process.env.QA_KEY</code>.</p>
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => copy(`${s.install}\n\n${s.code}`, 'Snippet')}><Copy className="size-4" /> Copy snippet</Button>
-        <Button variant="outline" onClick={() => copy(ingestKey, 'Key')}><Copy className="size-4" /> Copy key</Button>
+        <Button variant="outline" onClick={() => copy(key, 'Key')}><Copy className="size-4" /> Copy key</Button>
       </div>
 
       <Card aria-live="polite">

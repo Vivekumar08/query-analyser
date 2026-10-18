@@ -5,9 +5,10 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { navigateToRefresh } from './session-expiry';
 import { Label } from '@/components/ui/label';
 
-export function AppStep({ org, onCreated }: { org: string; onCreated: (app: { id: string; name: string }, key: string | null) => void }) {
+export function AppStep({ org, onCreated }: { org: string; onCreated: (app: { id: string; name: string }, key: string | null, keyError: 'forbidden' | 'failed' | null) => void }) {
   const [name, setName] = useState('');
   const [pending, setPending] = useState(false);
 
@@ -21,11 +22,12 @@ export function AppStep({ org, onCreated }: { org: string; onCreated: (app: { id
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ org, name }),
       });
-      const body = (await res.json().catch(() => ({}))) as { error?: string; app?: { id: string; name: string }; key?: string | null };
+      const body = (await res.json().catch(() => ({}))) as { error?: string; app?: { id: string; name: string }; key?: string | null; keyError?: 'forbidden' | 'failed' };
       if (res.status === 201) {
-        const ok = body as { app: { id: string; name: string }; key: string | null }; onCreated(ok.app, ok.key);
+        onCreated(body.app!, body.key ?? null, body.keyError ?? null);
         return;
       }
+      if (res.status === 401) { navigateToRefresh(); return; }
       toast.error(body.error ?? 'Something went wrong. Please try again.');
     } catch {
       toast.error('Something went wrong. Please try again.');

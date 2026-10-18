@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { OnboardingStart } from '@/src/onboarding-state';
 import { appPath } from '@/src/landing';
 import { VerifyStep } from './VerifyStep';
 import { OrgStep } from './OrgStep';
@@ -16,11 +17,12 @@ const STEPS: { id: Step; label: string }[] = [
   { id: 'install', label: 'Install' },
 ];
 
-export function OnboardingFlow({ start, email }: { start: { step: 'verify' | 'org' | 'app'; org?: string }; email: string }) {
+export function OnboardingFlow({ start, email }: { start: OnboardingStart; email: string }) {
   const [step, setStep] = useState<Step>(start.step);
   const [org, setOrg] = useState<string | undefined>(start.org);
-  const [app, setApp] = useState<{ id: string; name: string } | null>(null);
+  const [app, setApp] = useState<{ id: string; name: string } | null>(start.app ?? null);
   const [key, setKey] = useState<string | null>(null);
+  const [keyError, setKeyError] = useState<'forbidden' | 'failed' | null>(null);
   const index = STEPS.findIndex((s) => s.id === step);
 
   return (
@@ -42,10 +44,10 @@ export function OnboardingFlow({ start, email }: { start: { step: 'verify' | 'or
         {step === 'verify' && <VerifyStep email={email} />}
         {step === 'org' && <OrgStep onCreated={(slug) => { setOrg(slug); setStep('app'); }} />}
         {step === 'app' && org && (
-          <AppStep org={org} onCreated={(a, k) => { setApp(a); setKey(k); setStep('install'); }} />
+          <AppStep org={org} onCreated={(a, k, e) => { setApp(a); setKey(k); setKeyError(e); setStep('install'); }} />
         )}
         {step === 'install' && app && org && (
-          <InstallStep appId={app.id} appName={app.name} ingestKey={key} doneHref={appPath(org, app.id)} />
+          <InstallStep appId={app.id} appName={app.name} ingestKey={key} keyError={keyError} doneHref={appPath(org, app.id)} />
         )}
       </section>
     </>

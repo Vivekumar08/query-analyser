@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
+import { navigateToRefresh } from './session-expiry';
 import { Label } from '@/components/ui/label';
 
 export function OrgStep({ onCreated }: { onCreated: (slug: string) => void }) {
@@ -26,6 +27,7 @@ export function OrgStep({ onCreated }: { onCreated: (slug: string) => void }) {
         onCreated((body as { slug: string }).slug);
         return;
       }
+      if (res.status === 401) { navigateToRefresh(); return; }
       toast.error(body.error ?? 'Something went wrong. Please try again.');
     } catch {
       toast.error('Something went wrong. Please try again.');

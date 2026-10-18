@@ -8,6 +8,7 @@ import { authedFetch } from '@/src/api';
 import { POST as createOrg } from '@/app/api/onboarding/org/route';
 import { POST as createApp } from '@/app/api/onboarding/app/route';
 import { POST as verifyRequest } from '@/app/api/auth/verify-request/route';
+import { POST as createKey } from '@/app/api/apps/[id]/keys/route';
 import { GET as status } from '@/app/api/apps/[id]/status/route';
 
 const ORIGIN = 'https://app.test';
@@ -103,7 +104,15 @@ describe('POST /api/onboarding/app', () => {
       .mockResolvedValueOnce({ ok: true, data: { id: 'a1', name: 'svc' } })
       .mockResolvedValueOnce({ ok: false, status: 500, error: 'x' });
     const res = await createApp(post('/api/onboarding/app', { org: 'acme', name: 'svc' }));
-    expect(await res.json()).toEqual({ app: { id: 'a1', name: 'svc' }, key: null });
+    expect(await res.json()).toEqual({ app: { id: 'a1', name: 'svc' }, key: null, keyError: 'failed' });
+  });
+  it('key creation 403 (member) reports keyError forbidden', async () => {
+    vi.mocked(authedFetch)
+      .mockResolvedValueOnce({ ok: true, data: orgs })
+      .mockResolvedValueOnce({ ok: true, data: { id: 'a1', name: 'svc' } })
+      .mockResolvedValueOnce({ ok: false, status: 403, error: 'x' });
+    const res = await createApp(post('/api/onboarding/app', { org: 'acme', name: 'svc' }));
+    expect(await res.json()).toEqual({ app: { id: 'a1', name: 'svc' }, key: null, keyError: 'forbidden' });
   });
   it('rejects an invalid body', async () => {
     expect((await createApp(post('/api/onboarding/app', { org: '', name: '' }))).status).toBe(400);
@@ -143,5 +152,35 @@ describe('GET /api/apps/[id]/status', () => {
     vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 403, error: 'x' });
     const res = await status(new Request(`${ORIGIN}/api/apps/a1/status`), { params: Promise.resolve({ id: 'a1' }) });
     expect(res.status).toBe(404);
+  });
+});
+
+describe('POST /api/apps/[id]/keys', () => {
+  const ctx = { params: Promise.resolve({ id: 'a1' }) };
+  it('cross-site is 403 and never calls the API', async () => {
+    const res = await createKey(post('/api/apps/a1/keys', {}, { origin: 'https://evil.test' }), ctx);
+    expect(res.status).toBe(403);
+    expect(authedFetch).not.toHaveBeenCalled();
+  });
+  it('401 without a session', async () => {
+    vi.mocked(getSession).mockResolvedValue(null);
+    expect((await createKey(post('/api/apps/a1/keys', {}), ctx)).status).toBe(401);
+  });
+  it('upstream 403 maps to the admin message', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 403, error: 'internal detail' });
+    const res = await createKey(post('/api/apps/a1/keys', {}), ctx);
+    const body = await res.json();
+    expect(res.status).toBe(403);
+    expect(body.error).toBe('Only workspace admins can create keys — ask an admin.');
+    expect(JSON.stringify(body)).not.toContain('internal detail');
+  });
+  it('success returns the key once, no-store, no cookie', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: true, data: { id: 'k', prefix: 'qa_', key: 'qa_new' } });
+    const res = await createKey(post('/api/apps/a1/keys', {}), ctx);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ key: 'qa_new' });
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(vi.mocked(authedFetch).mock.calls[0]![0]).toBe('/v1/apps/a1/keys');
   });
 });

@@ -48,8 +48,13 @@ export async function POST(request: Request): Promise<Response> {
   }
   const key = await authedFetch<{ key: string }>(`/v1/apps/${encodeURIComponent(created.data.id)}/keys`, t, { method: 'POST' });
 
+  const appBody = { id: created.data.id, name: created.data.name };
+  const headers = { 'cache-control': 'no-store' };
+  if (key.ok) return NextResponse.json({ app: appBody, key: key.data.key }, { status: 201, headers });
+  // The app exists; the UI offers a recovery path. Creating keys needs ADMIN,
+  // so a MEMBER gets 'forbidden' (no retry button), anything else 'failed'.
   return NextResponse.json(
-    { app: { id: created.data.id, name: created.data.name }, key: key.ok ? key.data.key : null },
-    { status: 201, headers: { 'cache-control': 'no-store' } },
+    { app: appBody, key: null, keyError: key.status === 403 ? 'forbidden' : 'failed' },
+    { status: 201, headers },
   );
 }
