@@ -1,6 +1,4 @@
-import { notFound, redirect } from 'next/navigation';
-import { requireSession } from '@/src/auth';
-import { getApp, listApps, listOrgs } from '@/src/dashboard-api';
+import { getShellContext } from '@/src/shell-context';
 import { AppSwitcher } from '@/components/dashboard/AppSwitcher';
 import { groupForSwitcher } from '@/components/dashboard/switcher';
 import { MobileNav } from '@/components/dashboard/MobileNav';
@@ -17,35 +15,12 @@ export default async function AppShell({
 }) {
   const { org, app } = await params;
   const base = `/dashboard/${encodeURIComponent(org)}/${encodeURIComponent(app)}`;
-  const session = await requireSession(`${base}/queries`);
-  const t = session.accessToken;
-  const refresh = `/api/auth/refresh?next=${encodeURIComponent(`${base}/queries`)}`;
-
-  const [orgsRes, appRes] = await Promise.all([listOrgs(t), getApp(t, app)]);
-  if (!orgsRes.ok) {
-    if (orgsRes.status === 401) redirect(refresh);
-    throw new Error('Could not load workspaces');
-  }
-  if (!appRes.ok && appRes.status === 401) redirect(refresh);
-  // The URL carries the org slug; the API keys orgs by id.
-  const currentOrg = orgsRes.data.find((o) => o.slug === org);
-  // 403 and 404 both render not-found: never hint whether something exists.
-  if (!currentOrg || !appRes.ok || appRes.data.orgId !== currentOrg.id) {
-    if (!appRes.ok && appRes.status >= 500) throw new Error('Could not load app');
-    notFound();
-  }
-
-  const appsByOrg = Object.fromEntries(
-    await Promise.all(orgsRes.data.map(async (o) => {
-      const r = await listApps(t, o.id);
-      return [o.slug, r.ok ? r.data : []] as const;
-    })),
-  );
-  const groups = groupForSwitcher(orgsRes.data, appsByOrg, { org, app });
+  const { session, currentOrg, app: appData, orgs, appsByOrg } = await getShellContext(org, app);
+  const groups = groupForSwitcher(orgs, appsByOrg, { org, app });
   const switcher = (
     <AppSwitcher
       groups={groups}
-      currentLabel={{ org: currentOrg.name, app: appRes.data.name }}
+      currentLabel={{ org: currentOrg.name, app: appData.name }}
       newAppHref={`/onboarding?org=${encodeURIComponent(org)}`}
     />
   );
@@ -68,7 +43,7 @@ export default async function AppShell({
             <div className="flex-1 py-2">{nav}</div>
             <div className="border-t p-3">{footer}</div>
           </MobileNav>
-          <span className="truncate text-sm font-medium">{appRes.data.name}</span>
+          <span className="truncate text-sm font-medium">{appData.name}</span>
         </div>
         <main className="flex-1">{children}</main>
       </div>

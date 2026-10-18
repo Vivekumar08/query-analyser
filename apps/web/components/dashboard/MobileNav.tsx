@@ -1,11 +1,16 @@
 'use client';
+import { useEffect, useState } from 'react';
+import { usePathname } from 'next/navigation';
 import { Menu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet';
 
 export function MobileNav({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const pathname = usePathname();
+  useEffect(() => setOpen(false), [pathname]);
   return (
-    <Sheet>
+    <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger asChild>
         <Button variant="ghost" size="icon" className="md:hidden" aria-label="Open navigation">
           <Menu className="size-5" />
