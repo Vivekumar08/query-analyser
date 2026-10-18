@@ -1,4 +1,4 @@
-import { loadWebEnv } from './env.js';
+import { loadWebEnv } from './env';
 
 export type ApiResult<T> =
   | { ok: true; data: T }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { apiFetch, apiOrigin, authedFetch } from './api.js';
+import { apiFetch, apiOrigin, authedFetch } from './api';
 
 const ORIGIN = 'https://api.example.com';
 let originalFetch: typeof globalThis.fetch;

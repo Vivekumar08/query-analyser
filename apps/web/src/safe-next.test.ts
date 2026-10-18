@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { safeNext } from './safe-next.js';
+import { safeNext } from './safe-next';
 
 const ORIGIN = 'https://site.example';
 

@@ -1,7 +1,7 @@
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { SESSION_COOKIE } from './session.js';
-import { authedFetch } from './api.js';
+import { SESSION_COOKIE } from './session';
+import { authedFetch } from './api';
 
 export interface Session {
   accessToken: string;

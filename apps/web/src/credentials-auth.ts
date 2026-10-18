@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
-import { SESSION_COOKIE, sessionCookieOptions } from './session.js';
-import { apiOrigin } from './api.js';
-import { forwardRefreshCookie } from './refresh-cookie.js';
+import { SESSION_COOKIE, sessionCookieOptions } from './session';
+import { apiOrigin } from './api';
+import { forwardRefreshCookie } from './refresh-cookie';
 
 /**
  * The shared body of the login and signup route handlers.

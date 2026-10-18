@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { handleCredentialsAuth } from './credentials-auth.js';
-import { POST as loginPost } from '../app/api/auth/login/route.js';
-import { POST as signupPost } from '../app/api/auth/signup/route.js';
+import { handleCredentialsAuth } from './credentials-auth';
+import { POST as loginPost } from '../app/api/auth/login/route';
+import { POST as signupPost } from '../app/api/auth/signup/route';
 
 const ORIGIN = 'https://api.example.com';
 let originalFetch: typeof globalThis.fetch;

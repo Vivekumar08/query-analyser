@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { unstable_doesMiddlewareMatch } from 'next/experimental/testing/server';
 import { NextRequest } from 'next/server';
-import { config, proxy } from '../proxy.js';
+import { config, proxy } from '../proxy';
 
 describe('proxy matcher', () => {
   it('runs on dashboard routes', () => {

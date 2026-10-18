@@ -7,7 +7,7 @@ vi.mock('next/headers', () => ({
   }),
 }));
 
-import { GET } from '../app/api/auth/refresh/route.js';
+import { GET } from '../app/api/auth/refresh/route';
 
 let originalFetch: typeof globalThis.fetch;
 beforeEach(() => {

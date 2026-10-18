@@ -15,7 +15,7 @@ vi.mock('next/navigation', () => ({
   },
 }));
 
-import { getSession, requireSession } from './auth.js';
+import { getSession, requireSession } from './auth';
 
 let originalFetch: typeof globalThis.fetch;
 beforeEach(() => {

@@ -23,10 +23,10 @@ vi.mock('next/navigation', () => ({
   },
 }));
 
-import { requireSession } from './auth.js';
-import { GET } from '../app/api/auth/refresh/route.js';
+import { requireSession } from './auth';
+import { GET } from '../app/api/auth/refresh/route';
 import { NextRequest } from 'next/server';
-import { proxy } from '../proxy.js';
+import { proxy } from '../proxy';
 
 const WEB = 'https://web.example.com';
 

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { SESSION_COOKIE } from './src/session.js';
+import { SESSION_COOKIE } from './src/session';
 
 /**
  * Redirect UX only. This is NOT the security gate.

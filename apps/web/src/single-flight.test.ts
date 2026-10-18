@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { singleFlight } from './single-flight.js';
+import { singleFlight } from './single-flight';
 
 const deferred = <T>() => {
   let resolve!: (v: T) => void;

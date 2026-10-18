@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SESSION_COOKIE, SESSION_MAX_AGE_SECONDS, sessionCookieOptions } from './session.js';
+import { SESSION_COOKIE, SESSION_MAX_AGE_SECONDS, sessionCookieOptions } from './session';
 
 describe('session cookie', () => {
   it('is named distinctly from the API\'s refresh cookie', () => {

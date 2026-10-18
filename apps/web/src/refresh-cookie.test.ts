@@ -5,7 +5,7 @@ import {
   forwardRefreshCookie,
   REFRESH_COOKIE,
   REFRESH_COOKIE_PATH,
-} from './refresh-cookie.js';
+} from './refresh-cookie';
 
 describe('rescopeRefreshCookie', () => {
   it('changes Path=/v1/auth to Path=/api/auth', () => {
