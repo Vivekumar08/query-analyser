@@ -62,4 +62,18 @@ describe('proxy redirect', () => {
     expect(location.host).toBe('0.0.0.0:3918');
     expect(location.pathname + location.search).toBe('/api/auth/refresh?next=%2Fdashboard%3Ftab%3Dslow');
   });
+
+  it('gates /invite and keeps next=/invite?token=… so the visitor returns to accept', () => {
+    expect(unstable_doesMiddlewareMatch({ config, nextConfig: {}, url: '/invite?token=abc' })).toBe(true);
+    const res = proxy(new NextRequest('https://web.example.com/invite?token=tOk_en-1'));
+    expect(res.status).toBe(307);
+    const location = new URL(res.headers.get('location')!);
+    expect(location.pathname).toBe('/api/auth/refresh');
+    expect(location.searchParams.get('next')).toBe('/invite?token=tOk_en-1');
+  });
+
+  it('lets /invite through with a session', () => {
+    const res = proxy(new NextRequest('https://web.example.com/invite?token=t', { headers: { cookie: 'qa_session=tok' } }));
+    expect(res.headers.get('location')).toBeNull();
+  });
 });

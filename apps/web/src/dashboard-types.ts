@@ -11,6 +11,14 @@ export type Role = 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER';
 /** GET /v1/orgs → OrgSummary[] (a bare array). */
 export interface OrgSummary { id: string; name: string; slug: string; plan: string; createdAt: string; role: Role }
 
+export const ROLES: readonly Role[] = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'];
+
+/** GET /v1/orgs/:orgId/members (ADMIN+) → Member[]. `id` is the membership id. */
+export interface Member { id: string; role: Role; createdAt: string; user: { id: string; email: string; name: string | null } }
+
+/** GET /v1/orgs/:orgId/invites (ADMIN+) → PendingInvite[]. Never carries the token. */
+export interface PendingInvite { id: string; email: string; role: Role; expiresAt: string; createdAt: string }
+
 /** GET /v1/orgs/:orgId/apps → AppSummary[] (a bare array). */
 export interface AppSummary { id: string; name: string; env: string; createdAt: string }
 
