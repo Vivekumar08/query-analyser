@@ -23,6 +23,7 @@ export default async function DashboardIndex() {
       // The API's `:org` is the org id; the slug is only for URLs.
       const apps = await listApps(session.accessToken, o.id);
       if (!apps.ok) {
+        if (apps.status === 401) redirect('/api/auth/refresh?next=%2Fdashboard');
         // A suspended org (403) or one we lost access to (404) is skipped;
         // anything else is an outage, not an empty org.
         if (apps.status === 403 || apps.status === 404) return { slug: o.slug, apps: [] };

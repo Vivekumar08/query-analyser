@@ -20,9 +20,10 @@ export interface AppDetail extends AppSummary { orgId: string; ingest: { lastSee
 export interface SuggestionField { field: string; dir: 1 | -1 }
 
 /**
- * The raw `Advice` row. `suggestion` is a Prisma `Json` column and nothing in
- * apps/api writes it yet, so `SuggestionField[]` is the intended shape, not a
- * verified one.
+ * The raw `Advice` row. `suggestion` is written by the nightly job
+ * (analysis/jobs.ts upsert, from adviceFor in advice.ts): a non-empty ordered
+ * list of `{field, dir: 1 | -1}` in index key order (equality, sort, range;
+ * `_id` excluded).
  */
 export interface Advice {
   id: string;
@@ -52,8 +53,8 @@ export interface SeriesPoint { at: string; count: number; totalMs: string; maxMs
 /** GET /v1/apps/:id/queries/:sig/series */
 export interface SeriesResponse { grain: 'hourly' | 'daily'; from: string; to: string; points: SeriesPoint[] }
 
-/** One row of the ranked list. The list route DOES return `avgMs` and `p95` per row. */
-export type QueryRow = Serialized<RankedQueryRow> & { avgMs: number; p95: PercentileResult };
+/** One row of the ranked list. The list route returns `avgMs` and `p95` per row, but NOT `hist` (toItem drops it). */
+export type QueryRow = Omit<Serialized<RankedQueryRow>, 'hist'> & { avgMs: number; p95: PercentileResult };
 
 /**
  * GET /v1/apps/:id/queries — an envelope, NOT a bare array. `sortExact` is
