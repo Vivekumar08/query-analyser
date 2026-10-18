@@ -154,7 +154,7 @@ export function InstallStep({
         <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
         <p><strong>This key is shown once.</strong> Copy it now — we can&apos;t show it again.</p>
       </div>
-      <pre className="overflow-x-auto rounded-lg border bg-muted p-4 font-mono text-sm"><code>{s.install}{'\n\n'}{s.code}</code></pre>
+      <pre className="overflow-x-auto rounded-xl border bg-white/70 p-4 font-mono text-sm"><code>{s.install}{'\n\n'}{s.code}</code></pre>
       <p className="text-xs text-muted-foreground">Prefer an environment variable in production: <code className="font-mono">apiKey: process.env.QA_KEY</code>.</p>
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => copy(`${s.install}\n\n${s.code}`, 'Snippet')}><Copy className="size-4" /> Copy snippet</Button>

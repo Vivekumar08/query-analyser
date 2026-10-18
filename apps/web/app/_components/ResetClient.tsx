@@ -46,10 +46,10 @@ export function ResetClient({ token }: { token: string }) {
   if (done) {
     return (
       <>
-        <p className="text-slate-800">
+        <p className="text-foreground">
           Your password is changed. Every other session has been signed out.
         </p>
-        <Link href="/login" className="underline">Sign in</Link>
+        <Link href="/login" className="font-medium text-accent-text underline underline-offset-4">Sign in</Link>
       </>
     );
   }
@@ -60,14 +60,14 @@ export function ResetClient({ token }: { token: string }) {
         <span className="text-sm font-medium">New password</span>
         <input name="password" type="password" required minLength={12}
           autoComplete="new-password"
-          className="rounded-md border border-slate-300 px-3 py-2" />
-        <span className="text-xs text-slate-500">At least 12 characters.</span>
+          className="rounded-xl border border-input bg-white/80 px-3.5 py-2.5 outline-none transition focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/30" />
+        <span className="text-xs text-caption">At least 12 characters.</span>
       </label>
 
       {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
 
       <button type="submit" disabled={pending}
-        className="rounded-md bg-slate-900 px-4 py-2 text-white disabled:opacity-60">
+        className="rounded-full bg-primary px-5 py-2.5 font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60">
         {pending ? 'Saving…' : 'Set new password'}
       </button>
     </form>
