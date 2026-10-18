@@ -110,7 +110,7 @@ describe('refresh round trip', () => {
 
     // Hop 2: marker present -> stop.
     const r2 = await hitRefresh(second);
-    expect(r2.headers.get('location')).toBe(`${WEB}/login`);
+    expect(r2.headers.get('location')).toBe(`${WEB}/login?next=%2Fdashboard%3Ftab%3Dqueries`);
     expect(refreshCalls).toBe(1);
     expect(jar.has('qa_refresh_attempt')).toBe(false);
   });
@@ -135,5 +135,16 @@ describe('refresh round trip', () => {
     expect(res.headers.get('location')).toBe(`${WEB}/dashboard?tab=queries`);
     expect(refreshCalls).toBe(1);
     expect(jar.get('qa_session')).toBe('access-1');
+  });
+
+  it('from the proxy: a visitor with no refresh cookie ends at /login carrying the original path and query', async () => {
+    // B15: after logging in they must land where they asked to go.
+    const p = proxy(new NextRequest(`${WEB}/dashboard/q?tab=slow&page=2`));
+    const loc = new URL(p.headers.get('location')!);
+    const res = await hitRefresh(loc.pathname + loc.search);
+    const login = new URL(res.headers.get('location')!);
+    expect(login.origin + login.pathname).toBe(`${WEB}/login`);
+    expect(login.searchParams.get('next')).toBe('/dashboard/q?tab=slow&page=2');
+    expect(refreshCalls).toBe(0);
   });
 });

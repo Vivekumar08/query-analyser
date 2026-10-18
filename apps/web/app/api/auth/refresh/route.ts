@@ -21,7 +21,19 @@ const run = singleFlight<Response>();
 export async function GET(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const isProd = process.env.NODE_ENV === 'production';
-  const toLogin = () => NextResponse.redirect(new URL('/login', url.origin));
+  // Validated once, up front: every exit — back to the page or on to /login —
+  // carries the same safe target. safeNext returns a single-slash same-origin
+  // path or '/', never anything that re-parses off-origin (Ruling B12).
+  const next = safeNext(url.searchParams.get('next'), url.origin);
+
+  // Every /login exit carries `next` (Ruling B15) so that after signing in
+  // the visitor lands on the page they asked for, not on the default. Built
+  // as a URL object; omitted when it validated to the default '/'.
+  const toLogin = () => {
+    const login = new URL('/login', url.origin);
+    if (next !== '/') login.searchParams.set('next', next);
+    return NextResponse.redirect(login);
+  };
 
   const jar = await cookies();
 
@@ -74,7 +86,7 @@ export async function GET(request: Request): Promise<Response> {
   // so this URL object resolves on our origin. Redirect with the URL object
   // itself; never hand the path to anything that re-parses it as a string.
   // The origin re-check is belt and braces: if it ever fails, safeNext broke.
-  const target = new URL(safeNext(url.searchParams.get('next'), url.origin), url.origin);
+  const target = new URL(next, url.origin);
   if (target.origin !== url.origin) return toLogin();
 
   const res = NextResponse.redirect(target);

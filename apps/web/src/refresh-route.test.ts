@@ -49,7 +49,7 @@ describe('GET /api/auth/refresh', () => {
 
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
       expect(res.status).toBe(307);
-      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+      expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
       expect(fn).not.toHaveBeenCalled();
       const marker = res.headers.getSetCookie().find((c) => c.startsWith('qa_refresh_attempt='));
       expect(marker).toBeDefined();
@@ -89,8 +89,36 @@ describe('GET /api/auth/refresh', () => {
         JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } },
       )) as unknown as typeof globalThis.fetch;
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+      expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
       expect(res.headers.getSetCookie().some((c) => c.startsWith('qa_refresh_attempt=1'))).toBe(false);
+    });
+  });
+
+  describe('carrying the requested page through to /login (B15)', () => {
+    it('omits next when there is none (it would validate to the default anyway)', async () => {
+      const res = await GET(req('/api/auth/refresh'));
+      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+    });
+
+    it('omits next when it validates to the default /', async () => {
+      const res = await GET(req('/api/auth/refresh?next=%2F'));
+      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+    });
+
+    it.each(['//evil.com', 'https://evil.com', '/.//evil.com', '/%2e%2e//evil.com', '/\\evil.com'])(
+      'drops a hostile next (%s) rather than carrying it to /login',
+      async (raw) => {
+        const res = await GET(req(`/api/auth/refresh?next=${encodeURIComponent(raw)}`));
+        expect(res.headers.get('location')).toBe('https://web.example.com/login');
+      },
+    );
+
+    it('preserves path and query, encoded, on the no-refresh-cookie branch', async () => {
+      const res = await GET(req(`/api/auth/refresh?next=${encodeURIComponent('/dashboard/q?tab=slow&page=2')}`));
+      const location = new URL(res.headers.get('location')!);
+      expect(location.origin + location.pathname).toBe('https://web.example.com/login');
+      expect(location.search).toBe('?next=%2Fdashboard%2Fq%3Ftab%3Dslow%26page%3D2');
+      expect(location.searchParams.get('next')).toBe('/dashboard/q?tab=slow&page=2');
     });
   });
 
@@ -98,7 +126,7 @@ describe('GET /api/auth/refresh', () => {
     // The genuinely-logged-out case: no refresh token to recover with.
     const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
     expect(res.status).toBe(307);
-    expect(res.headers.get('location')).toBe('https://web.example.com/login');
+    expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
   });
 
   describe('the next= open-redirect guard', () => {
@@ -199,7 +227,7 @@ describe('GET /api/auth/refresh', () => {
         'not json', { status: 200 },
       )) as unknown as typeof globalThis.fetch;
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+      expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
     });
 
     it('redirects to /login when the upstream 200 omits accessToken', async () => {
@@ -207,7 +235,7 @@ describe('GET /api/auth/refresh', () => {
         JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } },
       )) as unknown as typeof globalThis.fetch;
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+      expect(res.headers.get('location')).toBe('https://web.example.com/login?next=%2Fdashboard');
     });
   });
 });
