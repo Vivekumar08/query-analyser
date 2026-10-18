@@ -5,7 +5,7 @@ import './globals.css';
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' });
 const mono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-jetbrains-mono', display: 'swap' });
-// Italic accent words only ("quietly", "never values"): one weight, latin subset.
+// Italic accent words only ("quietly", "Values only if you hold the key."): one weight, latin subset.
 const serif = Instrument_Serif({
   subsets: ['latin'],
   weight: '400',
