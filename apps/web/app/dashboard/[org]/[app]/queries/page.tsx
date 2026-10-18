@@ -1,8 +1,9 @@
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import { listQueries } from '@/src/dashboard-api';
 import { getShellContext } from '@/src/shell-context';
 import { filtersToApiQuery, filtersToSearch, parseFilters, PAGE_SIZE } from '@/src/filters';
-import { clearFiltersHref, emptyKind, toRowsView } from '@/src/queries-view';
+import { clearFiltersHref, emptyKind, listOutcome, toRowsView } from '@/src/queries-view';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { PageHeader } from '@/components/dashboard/PageHeader';
@@ -28,14 +29,26 @@ export default async function QueriesPage({
   const filters = parseFilters(sp);
   const search = filtersToSearch(filters);
 
-  const res = await listQueries(ctx.session.accessToken, ctx.app.id, filtersToApiQuery(filters));
-  if (!res.ok) throw new Error('Could not load queries');
-  const { items, sortExact, sortNote } = res.data;
+  const token = ctx.session.accessToken;
+  const res = await listQueries(token, ctx.app.id, filtersToApiQuery(filters));
+  if (!res.ok && res.status === 401) redirect(`/api/auth/refresh?next=${encodeURIComponent(`${base}/queries${search ? `?${search}` : ''}`)}`);
+  const outcome = listOutcome(res);
+  if (outcome === 'error') throw new Error('Could not load queries');
+
+  const filtered = filters.model !== undefined || filters.op !== undefined;
+  const { items, sortExact, sortNote } = res.ok ? res.data : { items: [], sortExact: true, sortNote: undefined };
   const rows = toRowsView(items);
-  const filtered = filters.models.length > 0 || filters.ops.length > 0;
   const kind = emptyKind({ rows: rows.length, filtered });
-  const models = [...new Set([...items.map((r) => r.model), ...filters.models])].sort();
-  const ops = [...new Set([...items.map((r) => r.operation), ...filters.ops])].sort();
+
+  // Options come from the unfiltered window; with a filter active the current
+  // rows are all one model/op, so one extra unfiltered call supplies the rest.
+  let optionRows = items;
+  if (filtered) {
+    const all = await listQueries(token, ctx.app.id, filtersToApiQuery({ range: filters.range, sort: 'wasted', limit: 500 }));
+    if (all.ok) optionRows = all.data.items;
+  }
+  const models = [...new Set([...optionRows.map((r) => r.model), ...(filters.model ? [filters.model] : [])])].sort();
+  const ops = [...new Set([...optionRows.map((r) => r.operation), ...(filters.op ? [filters.op] : [])])].sort();
   const more = new URLSearchParams(search);
   more.set('limit', String(filters.limit + PAGE_SIZE));
 
@@ -47,14 +60,19 @@ export default async function QueriesPage({
         {(!sortExact || sortNote) && (
           <p className="text-xs text-muted-foreground">{sortNote ?? 'Ordering by this column is approximate.'}</p>
         )}
-        {kind === 'none' ? (
+        {outcome === 'invalid-filters' ? (
+          <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed px-6 py-16 text-center">
+            <p className="font-medium">These filters aren&apos;t valid.</p>
+            <Button asChild variant="outline"><Link href={clearFiltersHref(base, filters)}>Clear filters</Link></Button>
+          </div>
+        ) : kind === 'none' ? (
           <Card className="overflow-hidden p-0">
             <QueriesTable base={base} search={search} rows={rows} />
           </Card>
         ) : (
           <QueriesEmpty kind={kind} clearHref={clearFiltersHref(base, filters)} installHref={INSTALL_HREF} />
         )}
-        {rows.length === filters.limit && (
+        {outcome === 'ok' && rows.length === filters.limit && (
           <Button asChild variant="outline" className="self-center">
             <Link href={`${base}/queries?${more.toString()}`} scroll={false}>Show more</Link>
           </Button>

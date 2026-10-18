@@ -15,16 +15,21 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: 'maxMs', label: 'Max' },
 ];
 
-function MultiSelect({ label, options, selected, onChange }: {
-  label: string; options: string[]; selected: string[]; onChange: (next: string[]) => void;
+/** Single select with an "All" option; the API accepts one value per filter. */
+function SingleSelect({ label, options, selected, onChange }: {
+  label: string; options: string[]; selected: string | undefined; onChange: (next: string | null) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const pick = (v: string | null) => {
+    setOpen(false);
+    onChange(v);
+  };
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm">
           <ListFilter className="size-4" aria-hidden />
-          {label}
-          {selected.length > 0 && <span className="rounded bg-muted px-1.5 text-xs">{selected.length}</span>}
+          <span className="max-w-40 truncate">{label}: {selected ?? 'All'}</span>
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-56 p-0" align="start">
@@ -33,15 +38,16 @@ function MultiSelect({ label, options, selected, onChange }: {
           <CommandList>
             <CommandEmpty>None found.</CommandEmpty>
             <CommandGroup>
-              {options.map((o) => {
-                const on = selected.includes(o);
-                return (
-                  <CommandItem key={o} value={o} onSelect={() => onChange(on ? selected.filter((s) => s !== o) : [...selected, o])}>
-                    <Check className={`size-4 ${on ? 'opacity-100' : 'opacity-0'}`} aria-hidden />
-                    <span className="truncate">{o}</span>
-                  </CommandItem>
-                );
-              })}
+              <CommandItem value="__all__" keywords={['all']} onSelect={() => pick(null)}>
+                <Check className={`size-4 ${selected === undefined ? 'opacity-100' : 'opacity-0'}`} aria-hidden />
+                All
+              </CommandItem>
+              {options.map((o) => (
+                <CommandItem key={o} value={o} onSelect={() => pick(o)}>
+                  <Check className={`size-4 ${selected === o ? 'opacity-100' : 'opacity-0'}`} aria-hidden />
+                  <span className="truncate">{o}</span>
+                </CommandItem>
+              ))}
             </CommandGroup>
           </CommandList>
         </Command>
@@ -54,14 +60,13 @@ export function QueryFiltersBar({ models, ops, value }: { models: string[]; ops:
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
-  const [sortOpen, setSortOpen] = useState(false);
 
-  // Rewrites model/op/sort, keeps range/from/to, resets paging.
-  const apply = (next: { models?: string[]; ops?: string[]; sort?: SortKey | null }) => {
+  // Replaces model/op/sort (null clears), keeps range/from/to, resets paging.
+  const apply = (next: { model?: string | null; op?: string | null; sort?: SortKey | null }) => {
     const s = new URLSearchParams(params.toString());
     s.delete('limit');
-    if (next.models) { s.delete('model'); next.models.forEach((m) => s.append('model', m)); }
-    if (next.ops) { s.delete('op'); next.ops.forEach((o) => s.append('op', o)); }
+    if (next.model !== undefined) { s.delete('model'); if (next.model) s.set('model', next.model); }
+    if (next.op !== undefined) { s.delete('op'); if (next.op) s.set('op', next.op); }
     if (next.sort !== undefined) {
       if (next.sort === null || next.sort === 'wasted') s.delete('sort');
       else s.set('sort', next.sort);
@@ -70,14 +75,14 @@ export function QueryFiltersBar({ models, ops, value }: { models: string[]; ops:
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   };
 
-  const dirty = value.models.length > 0 || value.ops.length > 0 || value.sort !== 'wasted';
+  const dirty = value.model !== undefined || value.op !== undefined || value.sort !== 'wasted';
   const sortLabel = SORTS.find((s) => s.key === value.sort)!.label;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <MultiSelect label="Model" options={models} selected={value.models} onChange={(m) => apply({ models: m })} />
-      <MultiSelect label="Operation" options={ops} selected={value.ops} onChange={(o) => apply({ ops: o })} />
-      <DropdownMenu open={sortOpen} onOpenChange={setSortOpen}>
+      <SingleSelect label="Model" options={models} selected={value.model} onChange={(m) => apply({ model: m })} />
+      <SingleSelect label="Operation" options={ops} selected={value.op} onChange={(o) => apply({ op: o })} />
+      <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button variant="outline" size="sm">
             Sort: {sortLabel}
@@ -91,7 +96,7 @@ export function QueryFiltersBar({ models, ops, value }: { models: string[]; ops:
         </DropdownMenuContent>
       </DropdownMenu>
       {dirty && (
-        <Button variant="ghost" size="sm" onClick={() => apply({ models: [], ops: [], sort: null })}>Clear</Button>
+        <Button variant="ghost" size="sm" onClick={() => apply({ model: null, op: null, sort: null })}>Clear</Button>
       )}
     </div>
   );

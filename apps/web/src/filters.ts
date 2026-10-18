@@ -4,11 +4,19 @@ export type SortKey = 'wasted' | 'count' | 'p95' | 'maxMs';
 const SORTS: SortKey[] = ['wasted', 'count', 'p95', 'maxMs'];
 export const PAGE_SIZE = 25;
 const MAX_LIMIT = 500;
+const MAX_VALUE_LEN = 200;
+
+/** First non-empty value of at most 200 chars, else undefined. */
+function firstValue(values: string[]): string | undefined {
+  const v = values.find((x) => x.length > 0);
+  return v !== undefined && v.length <= MAX_VALUE_LEN ? v : undefined;
+}
 
 export interface QueryFilters {
   range: RangeState;
-  models: string[];
-  ops: string[];
+  /** The API takes ONE model and ONE op (each 1..200 chars); repeats are a 400. */
+  model?: string;
+  op?: string;
   sort: SortKey;
   limit: number;
 }
@@ -21,10 +29,12 @@ export function parseFilters(p: Params): QueryFilters {
   const limit = Number.isInteger(rawLimit) && rawLimit > 0
     ? Math.min(MAX_LIMIT, Math.ceil(rawLimit / PAGE_SIZE) * PAGE_SIZE)
     : PAGE_SIZE;
+  const model = firstValue(getParams(p, 'model'));
+  const op = firstValue(getParams(p, 'op'));
   return {
     range: parseRange(p),
-    models: getParams(p, 'model').filter(Boolean),
-    ops: getParams(p, 'op').filter(Boolean),
+    ...(model !== undefined && { model }),
+    ...(op !== undefined && { op }),
     sort: SORTS.includes(sort as SortKey) ? (sort as SortKey) : 'wasted',
     limit,
   };
@@ -32,8 +42,8 @@ export function parseFilters(p: Params): QueryFilters {
 
 export function filtersToSearch(f: QueryFilters): string {
   const s = new URLSearchParams(rangeToParams(f.range));
-  for (const m of f.models) s.append('model', m);
-  for (const o of f.ops) s.append('op', o);
+  if (f.model) s.set('model', f.model);
+  if (f.op) s.set('op', f.op);
   if (f.sort !== 'wasted') s.set('sort', f.sort);
   if (f.limit !== PAGE_SIZE) s.set('limit', String(f.limit));
   return s.toString();
@@ -42,7 +52,7 @@ export function filtersToSearch(f: QueryFilters): string {
 export function filtersToApiQuery(f: QueryFilters, now: Date = new Date()): string {
   const { from, to } = rangeToWindow(f.range, now);
   const s = new URLSearchParams({ from, to, sort: f.sort, limit: String(f.limit) });
-  for (const m of f.models) s.append('model', m);
-  for (const o of f.ops) s.append('op', o);
+  if (f.model) s.set('model', f.model);
+  if (f.op) s.set('op', f.op);
   return s.toString();
 }

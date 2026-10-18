@@ -1,6 +1,7 @@
 import type { PercentileResult } from '@query-analyser/contract';
 import type { QueryRow } from './dashboard-types';
 import { filtersToSearch, PAGE_SIZE, type QueryFilters } from './filters';
+import type { ApiResult } from './api';
 import { formatAvg, formatMs, toMs } from './format';
 
 export interface RowView {
@@ -32,6 +33,15 @@ export function emptyKind(input: { rows: number; filtered: boolean }): 'none' | 
 
 /** Keeps the time range, drops model/op/sort/limit. */
 export function clearFiltersHref(base: string, f: QueryFilters): string {
-  const qs = filtersToSearch({ range: f.range, models: [], ops: [], sort: 'wasted', limit: PAGE_SIZE });
+  const qs = filtersToSearch({ range: f.range, sort: 'wasted', limit: PAGE_SIZE });
   return `${base}/queries${qs ? `?${qs}` : ''}`;
+}
+
+/**
+ * The list route 400s on bad filters (e.g. an over-long model); that renders
+ * inline. Every other failure still goes to the error boundary.
+ */
+export function listOutcome(res: ApiResult<unknown>): 'ok' | 'invalid-filters' | 'error' {
+  if (res.ok) return 'ok';
+  return res.status === 400 ? 'invalid-filters' : 'error';
 }

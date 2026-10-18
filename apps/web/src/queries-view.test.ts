@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { clearFiltersHref, emptyKind, toRowsView } from './queries-view';
+import { clearFiltersHref, emptyKind, listOutcome, toRowsView } from './queries-view';
 import { parseFilters } from './filters';
 
 const row = (hash: string, totalMs: string, count: number) => ({
@@ -30,4 +30,11 @@ describe('clearFiltersHref', () => {
     expect(clearFiltersHref('/b', parseFilters(new URLSearchParams('range=7d&model=A&sort=count')))).toBe('/b/queries?range=7d'));
   it('default range → bare path', () =>
     expect(clearFiltersHref('/b', parseFilters(new URLSearchParams('model=A')))).toBe('/b/queries'));
+});
+
+describe('listOutcome', () => {
+  it('ok → ok', () => expect(listOutcome({ ok: true, data: {} })).toBe('ok'));
+  it('400 → invalid-filters', () => expect(listOutcome({ ok: false, status: 400, error: 'x' })).toBe('invalid-filters'));
+  it.each([401, 403, 404, 500, 503])('%i → error', (status) =>
+    expect(listOutcome({ ok: false, status, error: 'x' })).toBe('error'));
 });
