@@ -4,11 +4,20 @@ import { addToHist, newHist } from './histogram.js';
 import type { SignatureResult } from './signature.js';
 
 /**
+ * A buffered item: the wire item plus, when sample encryption is on, the raw
+ * (unredacted) sample input of its slowest occurrence. `rawSample` lives only
+ * in memory until the flush encrypts it; it is never put on the wire.
+ */
+export interface AggregatedItem extends IngestItem {
+  rawSample?: unknown;
+}
+
+/**
  * In-memory fold of slow queries by signature. The only state the hot path
  * touches. `swap()` hands the window to the transport and starts a fresh one.
  */
 export class Aggregator {
-  private buffer = new Map<string, IngestItem>();
+  private buffer = new Map<string, AggregatedItem>();
   private droppedCount = 0;
 
   constructor(private readonly maxSignatures: number) {}
@@ -17,7 +26,7 @@ export class Aggregator {
     return this.buffer.size;
   }
 
-  add(sig: SignatureResult, durationMs: number, sample: unknown): void {
+  add(sig: SignatureResult, durationMs: number, sample: unknown, rawSample?: unknown): void {
     let item = this.buffer.get(sig.hash);
 
     if (!item) {
@@ -52,11 +61,12 @@ export class Aggregator {
     if (durationMs >= item.maxMs) {
       item.maxMs = durationMs;
       item.sample = sample;   // keep the sample from the worst occurrence
+      setRawSample(item, rawSample);
     }
   }
 
   /** Take the current window and reset. */
-  swap(): { items: IngestItem[]; dropped: number } {
+  swap(): { items: AggregatedItem[]; dropped: number } {
     const items = [...this.buffer.values()];
     const dropped = this.droppedCount;
     this.buffer = new Map();
@@ -65,7 +75,7 @@ export class Aggregator {
   }
 
   /** Fold an un-delivered batch back in, bounded by the same cap. */
-  merge(items: IngestItem[]): void {
+  merge(items: AggregatedItem[]): void {
     for (const incoming of items) {
       const existing = this.buffer.get(incoming.hash);
       if (!existing) {
@@ -81,6 +91,7 @@ export class Aggregator {
       if (incoming.maxMs > existing.maxMs) {
         existing.maxMs = incoming.maxMs;
         existing.sample = incoming.sample;
+        setRawSample(existing, incoming.rawSample);
       }
       if (incoming.lastTs > existing.lastTs) {
         existing.lastTs = incoming.lastTs;
@@ -88,4 +99,10 @@ export class Aggregator {
       }
     }
   }
+}
+
+/** The raw sample always belongs to the same occurrence as `sample`; none captured clears it. */
+function setRawSample(item: AggregatedItem, rawSample: unknown): void {
+  if (rawSample !== undefined) item.rawSample = rawSample;
+  else delete item.rawSample;
 }

@@ -3,8 +3,8 @@ import mongoose from 'mongoose';
 import { installHooks, type MongooseSchemaLike } from './hooks.js';
 import { Aggregator } from './aggregator.js';
 
-function ctx(threshold = 0, isDisabled: () => boolean = () => false) {
-  return { aggregator: new Aggregator(100), thresholdMs: threshold, onError: vi.fn(), isDisabled };
+function ctx(threshold = 0, isDisabled: () => boolean = () => false, captureRawSample?: () => boolean) {
+  return { aggregator: new Aggregator(100), thresholdMs: threshold, onError: vi.fn(), isDisabled, captureRawSample };
 }
 
 type RecordedFns = {
@@ -76,6 +76,25 @@ describe('installHooks', () => {
     expect(postNext).toHaveBeenCalledTimes(1);
     expect(c.onError).toHaveBeenCalledTimes(1);
     expect((c.onError.mock.calls[0]![0] as Error).message).toBe('boom');
+  });
+
+  it('hands the raw (unredacted) sample input to the aggregator only when capture is on', () => {
+    for (const capture of [true, false]) {
+      const c = ctx(0, () => false, () => capture);
+      const addSpy = vi.spyOn(c.aggregator, 'add');
+      const recorded: RecordedFns = {};
+      installHooks(fakeSchemaRecording(recorded), () => c);
+
+      const fakeThis = fakeQuery();
+      recorded.pre!.call(fakeThis, vi.fn());
+      fakeThis._qaStart = (fakeThis._qaStart as number) - 5;
+      recorded.post!.call(fakeThis, {}, vi.fn());
+
+      expect(addSpy).toHaveBeenCalledTimes(1);
+      const [, , redacted, raw] = addSpy.mock.calls[0]!;
+      expect(redacted).toEqual({ filter: { a: '<number>' } });
+      expect(raw).toEqual(capture ? { filter: { a: 1 } } : undefined);
+    }
   });
 
   // Fix round 1, Important 2: once the transport latch trips (401/403), the

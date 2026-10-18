@@ -7,7 +7,7 @@
  * `.d.ts` re-export of an unresolvable module specifier — a published
  * consumer's `tsc` would fail with TS2307 trying to resolve it.
  *
- * So the SDK carries its own structural copy of the four wire shapes it
+ * So the SDK carries its own structural copy of the wire shapes it
  * needs, defined here, instead of importing types from that package. The
  * contract package remains the single source of truth for the wire format; a
  * compile-time equality test in the contract package asserts these
@@ -27,6 +27,15 @@ export interface SortKey {
   dir: 1 | -1;
 }
 
+/** End-to-end encrypted sample envelope (ECIES, P-256 + AES-256-GCM), base64 fields. */
+export interface EncryptedSample {
+  v: 1;
+  /** Ephemeral P-256 public key, raw uncompressed point, base64. */
+  epk: string;
+  iv: string;
+  ct: string;
+}
+
 export interface IngestItem {
   signature: string;
   hash: string;
@@ -42,6 +51,8 @@ export interface IngestItem {
   lastTs: number;
   hist: number[];
   sample: unknown | null;
+  /** Present only when the SDK was given a `sampleKey`; `null` when this item's sample was skipped. */
+  encryptedSample?: EncryptedSample | null;
 }
 
 export interface IngestPayload {

@@ -13,6 +13,16 @@ export const sortKeySchema = z.object({
   dir: z.union([z.literal(1), z.literal(-1)]),
 });
 
+// An end-to-end encrypted real-value sample (see sample-crypto.ts). Opaque to
+// the server. Caps: a 16 KiB plaintext encrypts to at most ~21 900 base64
+// chars of `ct`, so 24 000 leaves headroom without admitting arbitrary blobs.
+export const encryptedSampleSchema = z.object({
+  v: z.literal(1),
+  epk: z.string().min(1).max(200),
+  iv: z.string().min(1).max(32),
+  ct: z.string().min(1).max(24_000),
+});
+
 export const ingestItemSchema = z.object({
   signature: z.string().min(1).max(400),
   hash: z.string().length(16),
@@ -28,6 +38,8 @@ export const ingestItemSchema = z.object({
   lastTs: z.number().int().nonnegative(),
   hist: z.array(z.number().int().nonnegative()).length(HIST_SIZE),
   sample: z.unknown().nullable(),
+  // Sent only by an SDK configured with a `sampleKey`; absent otherwise.
+  encryptedSample: encryptedSampleSchema.nullable().optional(),
 });
 
 export const ingestPayloadSchema = z.object({

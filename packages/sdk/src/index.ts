@@ -1,8 +1,9 @@
 import { hostname } from 'node:os';
 import { createRequire } from 'node:module';
-import { bucketOf } from '@query-analyser/contract/runtime';
-import type { IngestPayload } from './types.js';
-import { Aggregator } from './aggregator.js';
+import { bucketOf, encryptSample, importSamplePublicKey } from '@query-analyser/contract/runtime';
+import type { EncryptedSample, IngestItem, IngestPayload } from './types.js';
+import { Aggregator, type AggregatedItem } from './aggregator.js';
+import { serializeSample } from './ejson.js';
 import { installHooks, INSTALLED, type MongooseSchemaLike, type HookContext, type GetHookContext } from './hooks.js';
 import { createTransport } from './transport.js';
 
@@ -97,7 +98,19 @@ export interface InitOptions {
   mongoose?: MongooseLike;
   fetchImpl?: typeof fetch;
   onError?: (e: Error) => void;
+  /**
+   * Opt-in end-to-end encrypted real-value samples: the app's sample public
+   * key (base64 SPKI, P-256), typically `process.env.QA_SAMPLE_KEY`. When set,
+   * the slowest occurrence of each query shape is also sent encrypted to this
+   * key, so only someone with the app's passphrase can read its values. When
+   * unset (or empty), payloads are exactly as without this option.
+   */
+  sampleKey?: string;
 }
+
+// Distinct encryption-failure causes reported per analyser; past this, new
+// causes are dropped so a pathological stream of errors can't grow memory.
+const MAX_REPORTED_SAMPLE_ERRORS = 16;
 
 export interface Analyser {
   flush(): Promise<void>;
@@ -266,8 +279,75 @@ export function init(options: InitOptions): Analyser {
     onError,
   });
 
+  const reportSafely = (e: Error) => { try { onError(e); } catch { /* never throw from reporting */ } };
+
+  // Sample encryption. The key is validated asynchronously (Web Crypto has no
+  // sync import), so it starts 'pending': the hook already captures raw
+  // samples, and the first flush waits for the check before deciding. An
+  // invalid key is reported once and turns encryption off for good — raw
+  // samples captured meanwhile are simply discarded, never sent.
+  const sampleKey = typeof options.sampleKey === 'string' && options.sampleKey !== '' ? options.sampleKey : undefined;
+  let sampleEncryption: 'off' | 'pending' | 'on' = sampleKey ? 'pending' : 'off';
+  const sampleKeyCheck: Promise<void> | null = sampleKey
+    ? Promise.resolve()
+      .then(() => importSamplePublicKey(sampleKey))
+      .then(
+        () => { sampleEncryption = 'on'; },
+        () => {
+          sampleEncryption = 'off';
+          reportSafely(new Error(
+            'query-analyser: sampleKey is not a valid sample public key (base64 SPKI, P-256); encrypted samples are off for this process',
+          ));
+        },
+      )
+    : null;
+  const reportedSampleErrors = new Set<string>();
+  const reportSampleError = (err: unknown) => {
+    const cause = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    if (reportedSampleErrors.has(cause) || reportedSampleErrors.size >= MAX_REPORTED_SAMPLE_ERRORS) return;
+    reportedSampleErrors.add(cause);
+    reportSafely(new Error(`query-analyser: could not encrypt a sample (${cause}); sending the item without it`));
+  };
+
+  const encryptRawSample = async (key: string, rawSample: unknown): Promise<EncryptedSample | null> => {
+    if (rawSample === undefined) return null;
+    // Over 16 KiB (or unserialisable): skipped by design, not an error.
+    const text = serializeSample(rawSample);
+    if (text === null) return null;
+    try {
+      return await encryptSample(key, text);
+    } catch (err) {
+      reportSampleError(err);
+      return null;
+    }
+  };
+
+  // Buffered items -> wire items. `rawSample` never goes on the wire.
+  // Without encryption the wire items are exactly what they were before this
+  // feature (same keys, same order — no `encryptedSample` key at all).
+  const withoutRawSamples = (items: AggregatedItem[]): IngestItem[] =>
+    items.map(({ rawSample: _raw, ...item }) => item);
+
+  // Items are encrypted one at a time so serialisation never monopolises the
+  // event loop for the whole batch at once.
+  const toEncryptedWireItems = async (items: AggregatedItem[]): Promise<IngestItem[]> => {
+    if (sampleKeyCheck) await sampleKeyCheck;
+    if (sampleEncryption !== 'on' || sampleKey === undefined) return withoutRawSamples(items);
+    const wire: IngestItem[] = [];
+    for (const { rawSample, ...item } of items) {
+      wire.push({ ...item, encryptedSample: await encryptRawSample(sampleKey, rawSample) });
+    }
+    return wire;
+  };
+
   let disabled = false;
-  const ctx = { aggregator, thresholdMs, onError, isDisabled: () => disabled };
+  const ctx: HookContext = {
+    aggregator,
+    thresholdMs,
+    onError,
+    isDisabled: () => disabled,
+    captureRawSample: () => sampleEncryption !== 'off',
+  };
   let installedModels = 0;
   let backoffUntil = 0;
   // Fix round 2: was a boolean `flushing` guard. That made a timer-driven
@@ -380,7 +460,9 @@ export function init(options: InitOptions): Analyser {
         bucket: bucketOf(new Date()),
         thresholdMs,
         dropped,
-        items,
+        // No sampleKey: stay fully synchronous up to transport.send(), as
+        // before this feature.
+        items: sampleKey === undefined ? withoutRawSamples(items) : await toEncryptedWireItems(items),
       };
 
       const result = await transport.send(payload);
