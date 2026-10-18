@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { listQueries } from '@/src/dashboard-api';
 import { getShellContext } from '@/src/shell-context';
-import { filtersToApiQuery, filtersToSearch, parseFilters, PAGE_SIZE } from '@/src/filters';
+import { filtersToApiQuery, filtersToSearch, parseFilters, showMore, MAX_LIMIT, PAGE_SIZE } from '@/src/filters';
 import { clearFiltersHref, emptyKind, listOutcome, toRowsView } from '@/src/queries-view';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -74,10 +74,13 @@ export default async function QueriesPage({
         ) : (
           <QueriesEmpty kind={kind} clearHref={clearFiltersHref(base, filters)} installHref={INSTALL_HREF} />
         )}
-        {outcome === 'ok' && rows.length === filters.limit && (
+        {outcome === 'ok' && showMore(rows, filters.limit) === 'more' && (
           <Button asChild variant="outline" className="self-center">
             <Link href={`${base}/queries?${more.toString()}`} scroll={false}>Show more</Link>
           </Button>
+        )}
+        {outcome === 'ok' && showMore(rows, filters.limit) === 'capped' && (
+          <p className="text-center text-sm text-muted-foreground">Showing the top {MAX_LIMIT}</p>
         )}
       </div>
       </FadeIn>

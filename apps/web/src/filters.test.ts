@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseFilters, filtersToSearch, filtersToApiQuery } from './filters';
+import { parseFilters, filtersToSearch, filtersToApiQuery, showMore } from './filters';
 
 const NOW = new Date('2026-10-18T12:00:00.000Z');
 
@@ -52,4 +52,12 @@ describe('filtersToApiQuery', () => {
     expect(q.get('sort')).toBe('count');
     expect(q.get('limit')).toBe('25');
   });
+});
+
+describe('showMore', () => {
+  const rows = (n: number) => Array.from({ length: n }, () => ({}));
+  it('more when the page is full below the cap', () => expect(showMore(rows(25), 25)).toBe('more'));
+  it('none when the page is short', () => expect(showMore(rows(10), 25)).toBe('none'));
+  it('capped when full at 500', () => expect(showMore(rows(500), 500)).toBe('capped'));
+  it('none when short at 500', () => expect(showMore(rows(499), 500)).toBe('none'));
 });

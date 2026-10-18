@@ -3,7 +3,7 @@ import { getParam, getParams, parseRange, rangeToParams, rangeToWindow, type Ran
 export type SortKey = 'wasted' | 'count' | 'p95' | 'maxMs';
 const SORTS: SortKey[] = ['wasted', 'count', 'p95', 'maxMs'];
 export const PAGE_SIZE = 25;
-const MAX_LIMIT = 500;
+export const MAX_LIMIT = 500;
 const MAX_VALUE_LEN = 200;
 
 /** First non-empty value of at most 200 chars, else undefined. */
@@ -55,4 +55,10 @@ export function filtersToApiQuery(f: QueryFilters, now: Date = new Date()): stri
   if (f.model) s.set('model', f.model);
   if (f.op) s.set('op', f.op);
   return s.toString();
+}
+
+/** 'more' when a further page may exist, 'capped' at the hard row cap, else 'none'. */
+export function showMore(rows: readonly unknown[], limit: number): 'more' | 'capped' | 'none' {
+  if (rows.length !== limit) return 'none';
+  return limit < MAX_LIMIT ? 'more' : 'capped';
 }
