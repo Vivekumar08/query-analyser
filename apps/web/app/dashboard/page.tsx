@@ -1,22 +1,41 @@
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
 import { requireSession } from '@/src/auth';
-import { LogoutButton } from '../_components/LogoutButton';
+import { listApps, listOrgs } from '@/src/dashboard-api';
+import { LAST_APP_COOKIE, appPath, readLastApp, resolveLanding } from '@/src/landing';
 
-/**
- * Placeholder until Plan C builds the real dashboard (Ruling B22). It exists
- * so that login, signup and email verification — which all land on
- * /dashboard — reach a real, session-gated page instead of a 404.
- * requireSession is the gate; proxy.ts only smooths the redirect.
- */
-export default async function DashboardPage() {
+/** Where a signed-in visitor belongs: their last app, their first app, or onboarding. */
+export default async function DashboardIndex() {
   const session = await requireSession('/dashboard');
+  // Every org/app read requires a verified email (403 otherwise), so an
+  // unverified visitor is routed on without asking the API.
+  if (!session.user.emailVerifiedAt) redirect('/onboarding');
 
-  return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-4 px-4">
-      <h1 className="text-2xl font-semibold">Your dashboard is coming soon</h1>
-      <p className="text-slate-600">
-        You&apos;re signed in as <span className="font-medium">{session.user.email}</span>.
-      </p>
-      <LogoutButton />
-    </main>
+  const orgsRes = await listOrgs(session.accessToken);
+  if (!orgsRes.ok) {
+    if (orgsRes.status === 401) redirect('/api/auth/refresh?next=%2Fdashboard');
+    // An outage must not look like "you have no workspace".
+    throw new Error('orgs unavailable');
+  }
+
+  const withApps = await Promise.all(
+    orgsRes.data.map(async (o) => {
+      // The API's `:org` is the org id; the slug is only for URLs.
+      const apps = await listApps(session.accessToken, o.id);
+      if (!apps.ok) {
+        if (apps.status === 401) redirect('/api/auth/refresh?next=%2Fdashboard');
+        // A suspended org (403) or one we lost access to (404) is skipped;
+        // anything else is an outage, not an empty org.
+        if (apps.status === 403 || apps.status === 404) return { slug: o.slug, apps: [] };
+        throw new Error('apps unavailable');
+      }
+      return { slug: o.slug, apps: apps.data };
+    }),
   );
+  const landing = resolveLanding({
+    emailVerified: true,
+    orgs: withApps,
+    lastApp: readLastApp((await cookies()).get(LAST_APP_COOKIE)?.value),
+  });
+  redirect(landing.kind === 'onboarding' ? '/onboarding' : appPath(landing.org, landing.app));
 }
