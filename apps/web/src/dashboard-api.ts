@@ -15,7 +15,8 @@ export const listApps = (t: string, orgId: string): Promise<ApiResult<AppSummary
 export const getApp = (t: string, app: string): Promise<ApiResult<AppDetail>> => authedFetch(`/v1/apps/${e(app)}`, t);
 export const listQueries = (t: string, app: string, apiQuery: string): Promise<ApiResult<QueryListResponse>> =>
   authedFetch(`/v1/apps/${e(app)}/queries?${apiQuery}`, t);
-export const getQuery = (t: string, app: string, hash: string, w: { from: string; to: string }): Promise<ApiResult<QueryDetail>> =>
-  authedFetch(`/v1/apps/${e(app)}/queries/${e(hash)}?${windowQuery(w)}`, t);
+/** The detail endpoint is all-time and ignores from/to, so it takes no window. */
+export const getQuery = (t: string, app: string, hash: string): Promise<ApiResult<QueryDetail>> =>
+  authedFetch(`/v1/apps/${e(app)}/queries/${e(hash)}`, t);
 export const getSeries = (t: string, app: string, hash: string, w: { from: string; to: string }): Promise<ApiResult<SeriesResponse>> =>
   authedFetch(`/v1/apps/${e(app)}/queries/${e(hash)}/series?${windowQuery(w)}`, t);

@@ -16,10 +16,10 @@ describe('dashboard-api', () => {
     await listQueries('t', 'a1', 'from=x&to=y&sort=count&limit=25');
     expect(vi.mocked(authedFetch).mock.calls[0]![0]).toBe('/v1/apps/a1/queries?from=x&to=y&sort=count&limit=25');
   });
-  it('detail and series carry the window', async () => {
-    await getQuery('t', 'a1', 'h#1', { from: 'f', to: 'g' });
+  it('detail is all-time (no window); series carries the window', async () => {
+    await getQuery('t', 'a1', 'h#1');
     await getSeries('t', 'a1', 'h#1', { from: 'f', to: 'g' });
-    expect(vi.mocked(authedFetch).mock.calls[0]![0]).toBe('/v1/apps/a1/queries/h%231?from=f&to=g');
+    expect(vi.mocked(authedFetch).mock.calls[0]![0]).toBe('/v1/apps/a1/queries/h%231');
     expect(vi.mocked(authedFetch).mock.calls[1]![0]).toBe('/v1/apps/a1/queries/h%231/series?from=f&to=g');
   });
 });
