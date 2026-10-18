@@ -7,7 +7,7 @@ import { init, shutdown } from '../index.js';
 // (never a runtime one — see types.ts for why SDK source never imports it),
 // used here purely to prove the SDK's real serialised output parses under
 // the same schema the ingest API enforces.
-import { ingestPayloadSchema } from '@query-analyser/contract';
+import { ingestPayloadSchema, generateSampleKeyPair, decryptSample } from '@query-analyser/contract';
 
 let mongod: MongoMemoryServer;
 
@@ -295,5 +295,31 @@ describe('end to end', () => {
     await a.flush();
     // The latch held: no second network call, ever.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('with sampleKey, a real find sends an envelope that decrypts to the cast filter, and the body still passes the contract', async () => {
+    const { publicKey, privateKey } = await generateSampleKeyPair();
+    const Enc = mongoose.model(`IntEnc${suffix()}`, new mongoose.Schema({ owner: mongoose.Schema.Types.ObjectId, email: String, at: Date }));
+    const { bodies, fetchImpl } = capture();
+    const onError = vi.fn();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl, onError, sampleKey: publicKey });
+
+    const owner = new mongoose.Types.ObjectId();
+    await Enc.find({ owner: owner.toHexString(), email: 'ana@secret.test', at: { $gte: new Date('2026-01-01T00:00:00Z') } }).exec();
+    await a.flush();
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).not.toContain('ana@secret.test');
+    const parsed = ingestPayloadSchema.parse(JSON.parse(bodies[0]!));
+    const env = parsed.items[0]!.encryptedSample!;
+    const sample = JSON.parse(await decryptSample(privateKey, env));
+    expect(sample).toEqual({
+      filter: {
+        owner: { $oid: owner.toHexString() },
+        email: 'ana@secret.test',
+        at: { $gte: { $date: '2026-01-01T00:00:00.000Z' } },
+      },
+    });
   });
 });

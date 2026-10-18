@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { gunzipSync } from 'node:zlib';
 import mongoose from 'mongoose';
+// Test-only: the contract is a dev dependency, used here to make a recipient
+// key pair and to decrypt what the SDK sent.
+import { generateSampleKeyPair, decryptSample } from '@query-analyser/contract/runtime';
 import { init, shutdown } from './index.js';
 import { buildSignature, type SignatureResult } from './signature.js';
 
@@ -15,7 +19,7 @@ const okFetch = () => Promise.resolve(new Response('{}', { status: 202 }));
  */
 type Seedable = {
   _aggregator: {
-    add(sig: SignatureResult, ms: number, sample: unknown): void;
+    add(sig: SignatureResult, ms: number, sample: unknown, rawSample?: unknown): void;
     swap(): { items: unknown[]; dropped: number };
     size: number;
   };
@@ -371,5 +375,127 @@ describe('init', () => {
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string };
     const { SDK_VERSION } = await import('./index.js');
     expect(SDK_VERSION).toBe(pkg.version);
+  });
+});
+
+/** The JSON text of the n-th request body, gunzipped when the transport compressed it. */
+function bodyText(fetchImpl: { mock: { calls: unknown[][] } }, n = 0): string {
+  const init = fetchImpl.mock.calls[n]![1] as RequestInit;
+  const gz = (init.headers as Record<string, string>)['Content-Encoding'] === 'gzip';
+  return gz ? gunzipSync(init.body as Buffer).toString('utf8') : String(init.body);
+}
+
+const WIRE_ITEM_KEYS = [
+  'signature', 'hash', 'model', 'operation', 'filterShape', 'sortKeys', 'stages',
+  'count', 'totalMs', 'maxMs', 'lastMs', 'lastTs', 'hist', 'sample',
+];
+
+describe('encrypted samples', () => {
+  const sigFor = (key: string) => buildSignature({ model: 'M', operation: 'find', filter: { [key]: 1 } });
+
+  it('without sampleKey the payload has no encryptedSample key and never the raw values', async () => {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl });
+    const agg = (a as unknown as Seedable)._aggregator;
+    agg.add(sigFor('email'), 150, { filter: { email: '<string>' } }, { filter: { email: 'ana@secret.test' } });
+    await a.flush();
+
+    const text = bodyText(fetchImpl);
+    expect(text).not.toContain('encryptedSample');
+    expect(text).not.toContain('rawSample');
+    expect(text).not.toContain('ana@secret.test');
+    const sent = JSON.parse(text) as { items: Record<string, unknown>[] };
+    expect(Object.keys(sent.items[0]!)).toEqual(WIRE_ITEM_KEYS);
+  });
+
+  it('with sampleKey it sends an envelope that decrypts to the slowest call\'s real filter', async () => {
+    const { publicKey, privateKey } = await generateSampleKeyPair();
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError, sampleKey: publicKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const sig = sigFor('email');
+    agg.add(sig, 150, { filter: { email: '<string>' } }, { filter: { email: 'fast@secret.test' } });
+    agg.add(sig, 900, { filter: { email: '<string>' } }, { filter: { email: 'slow@secret.test' } });
+    await a.flush();
+
+    const text = bodyText(fetchImpl);
+    expect(text).not.toContain('secret.test');
+    expect(text).not.toContain('rawSample');
+    const sent = JSON.parse(text) as { items: { sample: unknown; encryptedSample: Parameters<typeof decryptSample>[1] }[] };
+    const item = sent.items[0]!;
+    expect(item.sample).toEqual({ filter: { email: '<string>' } });
+    expect(item.encryptedSample).toMatchObject({ v: 1 });
+    const plain = await decryptSample(privateKey, item.encryptedSample);
+    expect(JSON.parse(plain)).toEqual({ filter: { email: 'slow@secret.test' } });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('skips (null) a sample whose serialised form is over 16 KiB, without an error', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError, sampleKey: publicKey });
+    (a as unknown as Seedable)._aggregator.add(sigFor('big'), 150, null, { filter: { big: 'x'.repeat(20_000) } });
+    await a.flush();
+
+    const sent = JSON.parse(bodyText(fetchImpl)) as { items: { encryptedSample: unknown }[] };
+    expect(sent.items[0]!.encryptedSample).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('on an encryption failure reports onError once and still sends the batch with encryptedSample: null', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError, sampleKey: publicKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const encrypt = vi.spyOn(globalThis.crypto.subtle, 'encrypt').mockRejectedValue(new Error('gcm exploded'));
+    try {
+      agg.add(sigFor('a'), 150, null, { filter: { a: 1 } });
+      agg.add(sigFor('b'), 150, null, { filter: { b: 2 } });
+      await a.flush();
+      agg.add(sigFor('c'), 150, null, { filter: { c: 3 } });
+      await a.flush();
+    } finally {
+      encrypt.mockRestore();
+    }
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const first = JSON.parse(bodyText(fetchImpl, 0)) as { items: { encryptedSample: unknown }[] };
+    expect(first.items).toHaveLength(2);
+    expect(first.items.map((i) => i.encryptedSample)).toEqual([null, null]);
+    const second = JSON.parse(bodyText(fetchImpl, 1)) as { items: { encryptedSample: unknown }[] };
+    expect(second.items[0]!.encryptedSample).toBeNull();
+    // One distinct cause, reported once across both flushes.
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]![0] as Error).message).toMatch(/gcm exploded/);
+  });
+
+  it('an invalid sampleKey reports onError once and runs without encryption', async () => {
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError, sampleKey: 'not-a-real-key' });
+    const agg = (a as unknown as Seedable)._aggregator;
+    agg.add(sigFor('a'), 150, null, { filter: { a: 'ana@secret.test' } });
+    await a.flush();
+    agg.add(sigFor('b'), 150, null, { filter: { b: 'ana@secret.test' } });
+    await a.flush();
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]![0] as Error).message).toMatch(/sampleKey/);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    for (const n of [0, 1]) {
+      const text = bodyText(fetchImpl, n);
+      expect(text).not.toContain('encryptedSample');
+      expect(text).not.toContain('secret.test');
+    }
+  });
+
+  it('never makes init() throw, whatever the sampleKey', async () => {
+    for (const sampleKey of ['', '!!!', 'A'.repeat(10_000)]) {
+      expect(() => init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError: () => {}, sampleKey })).not.toThrow();
+      await shutdown();
+    }
   });
 });

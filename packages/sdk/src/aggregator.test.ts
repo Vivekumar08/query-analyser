@@ -90,6 +90,36 @@ describe('Aggregator', () => {
     expect(agg.swap().items[0]!.sample).toEqual({ tag: 'slow-900' });
   });
 
+  it('keeps the raw sample of the slowest occurrence alongside the redacted one', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 120, { tag: '<string>' }, { filter: { tag: 'a' } });
+    agg.add(sigA, 900, { tag: '<string>' }, { filter: { tag: 'b' } });
+    agg.add(sigA, 200, { tag: '<string>' }, { filter: { tag: 'c' } });
+    expect(agg.swap().items[0]!.rawSample).toEqual({ filter: { tag: 'b' } });
+  });
+
+  it('holds no raw sample when none was captured', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 120, { tag: '<string>' });
+    expect('rawSample' in agg.swap().items[0]!).toBe(false);
+  });
+
+  it('drops a stale raw sample when a slower occurrence arrives without one', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 120, null, { filter: { tag: 'a' } });
+    agg.add(sigA, 900, null);
+    expect('rawSample' in agg.swap().items[0]!).toBe(false);
+  });
+
+  it('carries the raw sample of the slower side through a merge', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 900, null, { filter: { tag: 'returned' } });
+    const returned = agg.swap().items;
+    agg.add(sigA, 100, null, { filter: { tag: 'new' } });
+    agg.merge(returned);
+    expect(agg.swap().items[0]!.rawSample).toEqual({ filter: { tag: 'returned' } });
+  });
+
   it('merges a returned batch back, summing counts and adding histograms elementwise', () => {
     const agg = new Aggregator(10);
     agg.add(sigA, 120, null);
