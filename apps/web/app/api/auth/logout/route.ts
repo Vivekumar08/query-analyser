@@ -3,8 +3,13 @@ import { cookies } from 'next/headers';
 import { SESSION_COOKIE } from '@/src/session';
 import { apiOrigin } from '@/src/api';
 import { REFRESH_COOKIE, REFRESH_COOKIE_PATH } from '@/src/refresh-cookie';
+import { rejectCrossSiteAuthPost } from '@/src/same-origin-guard';
 
-export async function POST(): Promise<Response> {
+export async function POST(request: Request): Promise<Response> {
+  // Logout CSRF is low impact (a forced logout), but the guard is free and
+  // keeps every auth POST under one rule (Ruling B19).
+  const rejected = rejectCrossSiteAuthPost(request);
+  if (rejected) return rejected;
   const jar = await cookies();
   // Scoped to /api/auth by the login/signup handlers, so it arrives here.
   const refresh = jar.get(REFRESH_COOKIE)?.value;

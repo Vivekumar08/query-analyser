@@ -8,6 +8,7 @@ let originalFetch: typeof globalThis.fetch;
 
 beforeEach(() => {
   process.env.API_ORIGIN = ORIGIN;
+  process.env.WEB_ORIGIN = 'https://web.example.com';
   originalFetch = globalThis.fetch;
 });
 
@@ -66,6 +67,7 @@ describe('route wiring', () => {
     stubUpstreamSuccess();
     const req = new Request('https://web.example.com/api/auth/login', {
       method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://web.example.com' },
       body: JSON.stringify({ email: 'a@b.com', password: 'secret' }),
     });
     const res = await loginPost(req);
@@ -78,6 +80,7 @@ describe('route wiring', () => {
     stubUpstreamSuccess();
     const req = new Request('https://web.example.com/api/auth/signup', {
       method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://web.example.com' },
       body: JSON.stringify({ email: 'a@b.com', password: 'secret' }),
     });
     const res = await signupPost(req);

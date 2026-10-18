@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
 import { apiOrigin } from '@/src/api';
+import { rejectCrossSiteAuthPost } from '@/src/same-origin-guard';
 
 export async function POST(request: Request): Promise<Response> {
+  const rejected = rejectCrossSiteAuthPost(request);
+  if (rejected) return rejected;
   const body = await request.text();
   const upstream = await fetch(`${apiOrigin()}/v1/auth/verify/confirm`, {
     method: 'POST',
