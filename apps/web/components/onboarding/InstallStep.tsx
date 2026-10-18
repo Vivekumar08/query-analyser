@@ -171,8 +171,8 @@ export function InstallStep({
           ) : (
             <div className="flex flex-1 items-center gap-3 text-sm text-muted-foreground">
               <span className="relative flex size-2.5">
-                {!reduce && <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary/60" />}
-                <span className="relative inline-flex size-2.5 rounded-full bg-primary" />
+                {!reduce && <span className="absolute inline-flex size-full animate-ping rounded-full bg-chart-1/60" />}
+                <span className="relative inline-flex size-2.5 rounded-full bg-chart-1" />
               </span>
               {reconnecting ? 'Reconnecting…' : 'Waiting for your first batch…'}
             </div>
