@@ -12,6 +12,7 @@ import { POST as signupPost } from '../app/api/auth/signup/route';
 import { POST as logoutPost } from '../app/api/auth/logout/route';
 import { POST as verifyPost } from '../app/api/auth/verify/route';
 import { POST as resetPost } from '../app/api/auth/reset/route';
+import { POST as passwordRequestPost } from '../app/api/auth/password-request/route';
 import { GET as refreshGet } from '../app/api/auth/refresh/route';
 
 /**
@@ -59,6 +60,7 @@ describe.each([
   ['logout', () => logoutPost(post('logout'))],
   ['verify', () => verifyPost(post('verify'))],
   ['reset', () => resetPost(post('reset'))],
+  ['password-request', () => passwordRequestPost(post('password-request'))],
   ['refresh', () => {
     // A unique token per run: the refresh handler single-flights on it.
     cookieStore.set('qa_refresh', `tok-${Math.random()}`);

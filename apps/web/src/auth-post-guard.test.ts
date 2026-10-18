@@ -9,6 +9,7 @@ import { POST as signupPost } from '../app/api/auth/signup/route';
 import { POST as logoutPost } from '../app/api/auth/logout/route';
 import { POST as verifyPost } from '../app/api/auth/verify/route';
 import { POST as resetPost } from '../app/api/auth/reset/route';
+import { POST as passwordRequestPost } from '../app/api/auth/password-request/route';
 
 /**
  * Pins Ruling B19 at the route level: every auth POST handler runs the guard
@@ -39,6 +40,7 @@ const handlers = [
   ['logout', logoutPost],
   ['verify', verifyPost],
   ['reset', resetPost],
+  ['password-request', passwordRequestPost],
 ] as const;
 
 function post(name: string, headers: Record<string, string>, body = '{"email":"a@b.com","password":"x"}'): Request {
@@ -72,7 +74,7 @@ describe.each(handlers)('POST /api/auth/%s', (name, handler) => {
 
   it('lets a same-origin JSON post through to the API', async () => {
     const res = await handler(post(name, { 'content-type': 'application/json', origin: WEB }));
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(name === 'password-request' ? 202 : 200);
     expect(upstream).toHaveBeenCalledTimes(1);
   });
 });

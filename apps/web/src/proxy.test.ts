@@ -11,7 +11,7 @@ describe('proxy matcher', () => {
   it('does not run on the public pages', () => {
     // If the matcher caught these, an anonymous visitor would be redirected
     // away from the login page they were just sent to — an infinite bounce.
-    for (const url of ['/', '/login', '/signup', '/verify', '/reset-password']) {
+    for (const url of ['/', '/login', '/signup', '/verify', '/reset-password', '/forgot-password']) {
       expect(unstable_doesMiddlewareMatch({ config, nextConfig: {}, url })).toBe(false);
     }
   });

@@ -21,6 +21,9 @@ export default async function LoginPage({
       <h1 className="text-2xl font-semibold">Sign in</h1>
       <AuthForm mode="login" next={target} />
       <p className="text-sm text-slate-600">
+        <Link href="/forgot-password" className="underline">Forgot password?</Link>
+      </p>
+      <p className="text-sm text-slate-600">
         No account? <Link href="/signup" className="underline">Create one</Link>
       </p>
     </main>
