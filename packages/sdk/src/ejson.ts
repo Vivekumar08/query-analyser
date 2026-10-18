@@ -156,14 +156,25 @@ export function serializeSample(value: unknown, maxBytes = 16_384): string | nul
         emit(`{"$regex":${JSON.stringify(obj.source)},"$options":${JSON.stringify(obj.flags)}}`);
         return;
       }
-      if (obj instanceof Uint8Array) { writeBinary(obj, 0); return; }
+      // Any typed array, DataView or (Shared)ArrayBuffer is binary: sized by
+      // byteLength before encoding, never walked index by index (C5-4).
+      if (ArrayBuffer.isView(obj)) {
+        writeBinary(new Uint8Array(obj.buffer, obj.byteOffset, obj.byteLength), 0);
+        return;
+      }
+      if (obj instanceof ArrayBuffer || (typeof SharedArrayBuffer !== 'undefined' && obj instanceof SharedArrayBuffer)) {
+        writeBinary(new Uint8Array(obj), 0);
+        return;
+      }
       if (obj instanceof Map) { writeArray(obj.entries(), depth); return; }
       if (obj instanceof Set || Array.isArray(obj)) { writeArray(obj as Iterable<unknown>, depth); return; }
 
       emit('{');
       let first = true;
-      // for-in (own keys only) rather than Object.keys(): it can stop early
-      // instead of materialising every key of a huge object first.
+      // Note: V8 enumerates an object's full key list up front whichever
+      // loop is used, so the per-key budget charge below bounds the work
+      // done per key, not the enumeration itself. Typed arrays (the
+      // large-index case) never reach here — they are binary above.
       for (const key in obj) {
         if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
         const field = (obj as Record<string, unknown>)[key];
