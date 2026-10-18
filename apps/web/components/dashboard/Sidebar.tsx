@@ -41,9 +41,9 @@ export function Sidebar({
   footer: React.ReactNode;
 }) {
   return (
-    <aside className="glass-strong hidden w-60 shrink-0 flex-col border-y-0 border-l-0 shadow-none md:flex">
+    <aside className="glass-strong sticky top-0 hidden h-dvh w-60 shrink-0 flex-col border-y-0 border-l-0 shadow-none md:flex">
       <div className="p-3">{switcher}</div>
-      <div className="flex-1 py-2">{nav}</div>
+      <div className="min-h-0 flex-1 overflow-y-auto py-2">{nav}</div>
       <div className="border-t p-3">{footer}</div>
     </aside>
   );

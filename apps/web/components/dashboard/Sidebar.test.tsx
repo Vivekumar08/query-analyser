@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
-import { SidebarNav } from './Sidebar';
+import { Sidebar, SidebarNav } from './Sidebar';
 
 afterEach(cleanup);
 
@@ -14,5 +14,23 @@ describe('SidebarNav', () => {
       expect(screen.getByText(name).closest('[aria-disabled="true"]')).toBeTruthy();
     }
     expect(screen.getAllByText('Soon')).toHaveLength(3);
+  });
+});
+
+describe('Sidebar', () => {
+  it('sidebar is pinned', () => {
+    const { container } = render(
+      <Sidebar
+        switcher={<span>switch</span>}
+        nav={<SidebarNav base="/dashboard/acme/a1" active="queries" />}
+        footer={<span>foot</span>}
+      />,
+    );
+    const aside = container.querySelector('aside');
+    expect(aside).toBeTruthy();
+    const classes = aside!.className.split(/\s+/);
+    expect(classes).toEqual(expect.arrayContaining(['sticky', 'top-0', 'h-dvh']));
+    const navWrapper = aside!.querySelector('nav')!.parentElement!;
+    expect(navWrapper.className.split(/\s+/)).toContain('overflow-y-auto');
   });
 });
