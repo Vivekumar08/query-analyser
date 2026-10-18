@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { apiOrigin } from '@/src/api';
 import { rejectCrossSiteAuthPost } from '@/src/same-origin-guard';
+import { upstreamAuthHeaders } from '@/src/upstream-headers';
 
 export async function POST(request: Request): Promise<Response> {
   const rejected = rejectCrossSiteAuthPost(request);
@@ -8,7 +9,7 @@ export async function POST(request: Request): Promise<Response> {
   const body = await request.text();
   const upstream = await fetch(`${apiOrigin()}/v1/auth/verify/confirm`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: upstreamAuthHeaders(request, { 'content-type': 'application/json' }),
     body,
     cache: 'no-store',
   });

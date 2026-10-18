@@ -9,6 +9,7 @@ import {
 } from '@/src/refresh-cookie';
 import { singleFlight } from '@/src/single-flight';
 import { safeNext } from '@/src/safe-next';
+import { upstreamAuthHeaders } from '@/src/upstream-headers';
 import { loginPath, relativeRedirect } from '@/src/relative-redirect';
 
 /**
@@ -64,7 +65,7 @@ export async function GET(request: Request): Promise<Response> {
   const upstream = await run(refresh, () =>
     fetch(`${apiOrigin()}/v1/auth/refresh`, {
       method: 'POST',
-      headers: { cookie: `${REFRESH_COOKIE}=${refresh}` },
+      headers: upstreamAuthHeaders(request, { cookie: `${REFRESH_COOKIE}=${refresh}` }),
       cache: 'no-store',
     }),
   );

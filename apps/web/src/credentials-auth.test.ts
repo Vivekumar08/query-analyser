@@ -29,6 +29,10 @@ const stubUpstreamSuccess = () => {
   )) as unknown as typeof globalThis.fetch;
 };
 
+const jsonPost = (body: string) => new Request('https://web.example.com/api/auth/login', {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body,
+});
+
 describe('handleCredentialsAuth', () => {
   // Shared by login and signup, so a single parametrised suite exercises
   // both — losing the forwarding call for either path would show up here,
@@ -37,7 +41,7 @@ describe('handleCredentialsAuth', () => {
     'forwards the re-scoped refresh cookie alongside its own session cookie (%s)',
     async (upstreamPath) => {
       stubUpstreamSuccess();
-      const res = await handleCredentialsAuth(upstreamPath, JSON.stringify({ email: 'a@b.com', password: 'x' }));
+      const res = await handleCredentialsAuth(upstreamPath, jsonPost(JSON.stringify({ email: 'a@b.com', password: 'x' })));
       const all = res.headers.getSetCookie();
 
       expect(all.some((c) => c.startsWith('qa_session='))).toBe(true);
@@ -53,7 +57,7 @@ describe('handleCredentialsAuth', () => {
       headers: { 'content-type': 'application/json' },
     })) as unknown as typeof globalThis.fetch;
 
-    const res = await handleCredentialsAuth('/v1/auth/login', JSON.stringify({ email: 'a@b.com', password: 'x' }));
+    const res = await handleCredentialsAuth('/v1/auth/login', jsonPost(JSON.stringify({ email: 'a@b.com', password: 'x' })));
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: 'bad credentials' });
   });

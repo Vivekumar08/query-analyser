@@ -57,6 +57,7 @@ manual `db:generate` step. See `turbo.json`.
 | `LOG_LEVEL` | pino log level, default `info` |
 | `TRUST_PROXY` | default **`false`**. See warning below. |
 | `NODE_ENV` | `production` makes the refresh cookie `Secure` |
+| `WEB_PROXY_SECRET` | optional, ≥32 chars, must equal the web service's value. See below. |
 
 See `apps/api/.env.example` for the full list with defaults.
 
@@ -70,6 +71,27 @@ left at its default, Fastify will **not** trust `X-Forwarded-For`, so
 single bucket behind an untrusted proxy — effectively rate-limiting all
 tenants together. Set `TRUST_PROXY=true` (or a comma-separated list of
 trusted CIDRs/IPs) whenever this service is deployed behind a proxy.
+
+### `WEB_PROXY_SECRET`: per-browser auth rate limits behind the web app
+
+Browsers never call `/v1/auth/*` directly: `apps/web`'s route handlers do,
+server to server, so `req.ip` for every login and signup is the web
+container's address. With nothing else configured, the per-IP limits (login
+20/min, signup 30/min, password request 10/min) are one bucket shared by
+every user, and one client sending bad logins locks everyone out.
+
+Set the same random value (≥32 chars, e.g. `openssl rand -hex 32`) as
+`WEB_PROXY_SECRET` on **both** the API and the web service. The web app then
+sends the browser's IP in `x-qa-client-ip` and the secret in
+`x-qa-proxy-secret`; the rate limiter uses the forwarded IP only when the
+secret matches (constant-time compare) and the value is a literal IP. Any
+other request, including one with a wrong or missing secret, keys on
+`req.ip` exactly as before. Unset means unchanged behaviour.
+
+Trust assumption: the web app takes the browser's IP from the **first**
+`X-Forwarded-For` entry it receives, so the proxy in front of the web service
+(EasyPanel's Traefik) must set that header itself rather than pass a
+client-supplied one through. Never expose the secret to the browser.
 
 ### `totalMs` is a string, not a number
 

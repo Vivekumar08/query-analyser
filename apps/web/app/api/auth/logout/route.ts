@@ -4,6 +4,7 @@ import { SESSION_COOKIE } from '@/src/session';
 import { apiOrigin } from '@/src/api';
 import { REFRESH_COOKIE, REFRESH_COOKIE_PATH } from '@/src/refresh-cookie';
 import { rejectCrossSiteAuthPost } from '@/src/same-origin-guard';
+import { upstreamAuthHeaders } from '@/src/upstream-headers';
 
 export async function POST(request: Request): Promise<Response> {
   // Logout CSRF is low impact (a forced logout), but the guard is free and
@@ -20,7 +21,7 @@ export async function POST(request: Request): Promise<Response> {
   // who clicked "log out" must end up logged out of this browser regardless.
   await fetch(`${apiOrigin()}/v1/auth/logout`, {
     method: 'POST',
-    headers: refresh ? { cookie: `${REFRESH_COOKIE}=${refresh}` } : {},
+    headers: upstreamAuthHeaders(request, refresh ? { cookie: `${REFRESH_COOKIE}=${refresh}` } : {}),
     cache: 'no-store',
   }).catch(() => null);
 

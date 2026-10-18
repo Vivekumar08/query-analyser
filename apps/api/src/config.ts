@@ -24,6 +24,12 @@ const schema = z.object({
   // silently ship production emails containing a localhost link. A deploy
   // must choose this explicitly or fail loudly at boot.
   WEB_ORIGIN: z.string().url(),
+  // Shared with the web app (Ruling B20). When set, the rate limiter keys on
+  // the `x-qa-client-ip` header of requests that present it in
+  // `x-qa-proxy-secret`, so per-IP auth limits apply per browser rather than
+  // to the web server as a whole. Unset (or empty): every limit keys on
+  // req.ip, as before. Must match WEB_PROXY_SECRET on the web service.
+  WEB_PROXY_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(32).optional()),
 });
 
 export type Config = z.infer<typeof schema>;

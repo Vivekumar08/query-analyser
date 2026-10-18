@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { SESSION_COOKIE, sessionCookieOptions } from './session';
 import { apiOrigin } from './api';
 import { forwardRefreshCookie } from './refresh-cookie';
+import { upstreamAuthHeaders } from './upstream-headers';
 
 /**
  * The shared body of the login and signup route handlers.
@@ -17,12 +18,14 @@ import { forwardRefreshCookie } from './refresh-cookie';
  */
 export async function handleCredentialsAuth(
   upstreamPath: '/v1/auth/login' | '/v1/auth/signup',
-  body: string,
+  request: Request,
 ): Promise<Response> {
   const upstream = await fetch(`${apiOrigin()}${upstreamPath}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body,
+    // Carries the browser's IP + proxy secret so the API's per-IP limits
+    // apply per browser, not to this server as a whole (Ruling B20).
+    headers: upstreamAuthHeaders(request, { 'content-type': 'application/json' }),
+    body: await request.text(),
     cache: 'no-store',
   });
 

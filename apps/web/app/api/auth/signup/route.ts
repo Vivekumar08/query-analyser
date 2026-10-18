@@ -6,5 +6,5 @@ export async function POST(request: Request): Promise<Response> {
   if (rejected) return rejected;
   // Success status from the API is 201; handleCredentialsAuth always
   // responds 200 on success.
-  return handleCredentialsAuth('/v1/auth/signup', await request.text());
+  return handleCredentialsAuth('/v1/auth/signup', request);
 }
