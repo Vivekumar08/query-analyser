@@ -11,18 +11,26 @@ export const PROXY_SECRET_HEADER = 'x-qa-proxy-secret';
  * believes it when it arrives with `WEB_PROXY_SECRET`, so a client calling the
  * API directly cannot pick its own bucket.
  *
- * The browser's IP is the FIRST X-Forwarded-For entry this server receives.
- * Trust assumption (documented in apps/api/README.md): the proxy in front of
- * the web container (EasyPanel's Traefik) sets that header itself rather than
- * passing a client-supplied one through. With no X-Forwarded-For, no client
- * IP is sent and the API keys on the web server's address, as before.
+ * The browser's IP is the LAST (rightmost) X-Forwarded-For entry: the one
+ * appended by the proxy directly in front of the web container. Every entry
+ * to its left is whatever the client sent, so taking the first would let a
+ * client rotate `X-Forwarded-For: <random>` and get a fresh rate-limit bucket
+ * per request.
+ *
+ * Trust assumption (also in apps/api/README.md and .env.example): EXACTLY ONE
+ * trusted proxy hop (EasyPanel's) sits in front of this container and always
+ * appends the peer address. With zero hops (the container reachable directly)
+ * a client's single spoofed value would be taken as-is; with two or more
+ * hops the rightmost entry is the inner proxy, not the browser. With no
+ * X-Forwarded-For (or an empty last entry) no client IP is sent and the API
+ * keys on the web server's address, as before.
  *
  * `extra` is merged first so callers cannot accidentally drop these two.
  */
 export function upstreamAuthHeaders(request: Request, extra: Record<string, string> = {}): Headers {
   const headers = new Headers(extra);
 
-  const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
+  const clientIp = request.headers.get('x-forwarded-for')?.split(',').at(-1)?.trim();
   if (clientIp) headers.set(CLIENT_IP_HEADER, clientIp);
 
   const secret = process.env.WEB_PROXY_SECRET;

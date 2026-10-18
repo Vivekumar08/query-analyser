@@ -88,10 +88,14 @@ secret matches (constant-time compare) and the value is a literal IP. Any
 other request, including one with a wrong or missing secret, keys on
 `req.ip` exactly as before. Unset means unchanged behaviour.
 
-Trust assumption: the web app takes the browser's IP from the **first**
-`X-Forwarded-For` entry it receives, so the proxy in front of the web service
-(EasyPanel's Traefik) must set that header itself rather than pass a
-client-supplied one through. Never expose the secret to the browser.
+Trust assumption: the web app takes the browser's IP from the **rightmost**
+`X-Forwarded-For` entry it receives — the one appended by the proxy directly
+in front of it. Entries to its left are client-supplied and are ignored (a
+client rotating a fake `X-Forwarded-For` therefore cannot evade the limit).
+This assumes **exactly one** trusted proxy hop (EasyPanel's) in front of the
+web container: with none, a client's own value would be used; with more than
+one, the rightmost entry is the inner proxy. Never expose the secret to the
+browser.
 
 ### `totalMs` is a string, not a number
 

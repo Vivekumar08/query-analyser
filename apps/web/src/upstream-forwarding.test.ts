@@ -48,7 +48,7 @@ afterEach(() => {
 const browserHeaders = {
   'content-type': 'application/json',
   origin: WEB,
-  'x-forwarded-for': '203.0.113.9, 10.0.0.2',
+  'x-forwarded-for': '6.6.6.6, 203.0.113.9',
 };
 const post = (name: string) => new Request(`http://0.0.0.0:3000/api/auth/${name}`, {
   method: 'POST', headers: browserHeaders, body: '{"email":"a@b.com","password":"x","token":"t"}',
@@ -65,11 +65,11 @@ describe.each([
     // A unique token per run: the refresh handler single-flights on it.
     cookieStore.set('qa_refresh', `tok-${Math.random()}`);
     return refreshGet(new Request('http://0.0.0.0:3000/api/auth/refresh?next=%2Fdashboard', {
-      headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.2' },
+      headers: { 'x-forwarded-for': '6.6.6.6, 203.0.113.9' },
     }));
   }],
 ] as const)('%s', (_name, call) => {
-  it('sends x-qa-client-ip (first X-Forwarded-For hop) and x-qa-proxy-secret upstream', async () => {
+  it('sends x-qa-client-ip (rightmost X-Forwarded-For entry) and x-qa-proxy-secret upstream', async () => {
     await call();
     expect(seen).toHaveLength(1);
     expect(seen[0]!.get('x-qa-client-ip')).toBe('203.0.113.9');

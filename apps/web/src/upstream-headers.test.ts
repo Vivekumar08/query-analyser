@@ -10,14 +10,30 @@ afterEach(() => {
 const req = (headers: Record<string, string> = {}) => new Request('http://0.0.0.0:3000/api/auth/login', { headers });
 
 describe('upstreamAuthHeaders', () => {
-  it('forwards the first X-Forwarded-For hop as x-qa-client-ip', () => {
-    const h = upstreamAuthHeaders(req({ 'x-forwarded-for': ' 203.0.113.9 , 10.0.0.2' }));
+  it('forwards the RIGHTMOST X-Forwarded-For entry (the trusted hop), not a client-supplied one', () => {
+    // 6.6.6.6 is what the client put in its own X-Forwarded-For; the proxy
+    // in front of us appended the real peer address.
+    const h = upstreamAuthHeaders(req({ 'x-forwarded-for': '6.6.6.6, 203.0.113.9' }));
+    expect(h.get('x-qa-client-ip')).toBe('203.0.113.9');
+  });
+
+  it('trims whitespace around the rightmost entry', () => {
+    const h = upstreamAuthHeaders(req({ 'x-forwarded-for': '6.6.6.6 ,  203.0.113.9  ' }));
+    expect(h.get('x-qa-client-ip')).toBe('203.0.113.9');
+  });
+
+  it('takes a single value as-is: the documented one-trusted-hop assumption', () => {
+    // With the proxy in place this single value IS the proxy's append. If the
+    // container were reachable with no proxy hop, a client could set it — that
+    // deployment is outside the trust assumption (exactly one trusted hop).
+    const h = upstreamAuthHeaders(req({ 'x-forwarded-for': '203.0.113.9' }));
     expect(h.get('x-qa-client-ip')).toBe('203.0.113.9');
   });
 
   it('sends no client ip when there is no X-Forwarded-For', () => {
     expect(upstreamAuthHeaders(req()).has('x-qa-client-ip')).toBe(false);
     expect(upstreamAuthHeaders(req({ 'x-forwarded-for': ' , ' })).has('x-qa-client-ip')).toBe(false);
+    expect(upstreamAuthHeaders(req({ 'x-forwarded-for': '203.0.113.9, ' })).has('x-qa-client-ip')).toBe(false);
   });
 
   it('sends WEB_PROXY_SECRET as x-qa-proxy-secret when set, and nothing when unset', () => {
