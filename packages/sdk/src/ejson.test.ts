@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import mongoose from 'mongoose';
 import { serializeSample } from './ejson.js';
 
@@ -96,5 +96,60 @@ describe('serializeSample', () => {
 
   it('honours a custom cap', () => {
     expect(serializeSample({ s: 'x'.repeat(100) }, 50)).toBeNull();
+  });
+
+  it('rejects a 16 MB Buffer before base64-encoding it', () => {
+    const big = Buffer.alloc(16 * 1024 * 1024, 1);
+    const toString = vi.spyOn(Buffer.prototype, 'toString');
+    try {
+      const t0 = performance.now();
+      expect(serializeSample({ update: { $set: { blob: big } } })).toBeNull();
+      expect(performance.now() - t0).toBeLessThan(50);
+      expect(toString.mock.calls.filter(([enc]) => enc === 'base64')).toHaveLength(0);
+    } finally {
+      toString.mockRestore();
+    }
+  });
+
+  it('rejects a 20 MB string before JSON-escaping it', () => {
+    const huge = 'x'.repeat(20 * 1024 * 1024);
+    const stringify = vi.spyOn(JSON, 'stringify');
+    try {
+      const t0 = performance.now();
+      expect(serializeSample({ filter: { note: huge } })).toBeNull();
+      expect(performance.now() - t0).toBeLessThan(50);
+      expect(stringify.mock.calls.some(([arg]) => arg === huge)).toBe(false);
+    } finally {
+      stringify.mockRestore();
+    }
+  });
+
+  it('rejects a huge bson Binary before encoding it', () => {
+    const bin = new mongoose.mongo.Binary(Buffer.alloc(8 * 1024 * 1024, 2), 0);
+    const toString = vi.spyOn(Buffer.prototype, 'toString');
+    try {
+      expect(serializeSample({ b: bin })).toBeNull();
+      expect(toString.mock.calls.filter(([enc]) => enc === 'base64')).toHaveLength(0);
+    } finally {
+      toString.mockRestore();
+    }
+  });
+
+  it('stops early on a huge object whose keys are all skipped', () => {
+    const sparse: Record<string, undefined> = {};
+    for (let i = 0; i < 200_000; i++) sparse[`k${i}`] = undefined;
+    const t0 = performance.now();
+    expect(serializeSample({ filter: sparse })).toBeNull();
+    expect(performance.now() - t0).toBeLessThan(50);
+  });
+
+  it('returns null past the depth limit', () => {
+    let deep: unknown = 1;
+    for (let i = 0; i < 100; i++) deep = { d: deep };
+    expect(serializeSample(deep)).toBeNull();
+  });
+
+  it('writes an unknown bson type as a placeholder without stringifying it', () => {
+    expect(parse({ c: { _bsontype: 'Code', code: 'function () {}' } })).toEqual({ c: '<Code>' });
   });
 });

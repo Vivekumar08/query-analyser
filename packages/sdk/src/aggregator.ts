@@ -2,14 +2,16 @@ import type { IngestItem } from './types.js';
 import { HIST_SIZE } from '@query-analyser/contract/runtime';
 import { addToHist, newHist } from './histogram.js';
 import type { SignatureResult } from './signature.js';
+import { serializeSample } from './ejson.js';
 
 /**
- * A buffered item: the wire item plus, when sample encryption is on, the raw
- * (unredacted) sample input of its slowest occurrence. `rawSample` lives only
- * in memory until the flush encrypts it; it is never put on the wire.
+ * A buffered item: the wire item plus, when sample encryption is on, the
+ * serialised real-value sample of its slowest occurrence — a string of at
+ * most 16 KiB, never the query's own objects. `sampleText` lives only in
+ * memory until the flush encrypts it; it is never put on the wire.
  */
 export interface AggregatedItem extends IngestItem {
-  rawSample?: unknown;
+  sampleText?: string;
 }
 
 /**
@@ -26,6 +28,11 @@ export class Aggregator {
     return this.buffer.size;
   }
 
+  /**
+   * `rawSample` (the unredacted sample input, only when encryption is on) is
+   * serialised here, synchronously and bounded, and only when this occurrence
+   * becomes the slowest for its signature. The object itself is never kept.
+   */
   add(sig: SignatureResult, durationMs: number, sample: unknown, rawSample?: unknown): void {
     let item = this.buffer.get(sig.hash);
 
@@ -61,7 +68,7 @@ export class Aggregator {
     if (durationMs >= item.maxMs) {
       item.maxMs = durationMs;
       item.sample = sample;   // keep the sample from the worst occurrence
-      setRawSample(item, rawSample);
+      setSampleText(item, rawSample === undefined ? undefined : serializeSample(rawSample));
     }
   }
 
@@ -91,7 +98,7 @@ export class Aggregator {
       if (incoming.maxMs > existing.maxMs) {
         existing.maxMs = incoming.maxMs;
         existing.sample = incoming.sample;
-        setRawSample(existing, incoming.rawSample);
+        setSampleText(existing, incoming.sampleText);
       }
       if (incoming.lastTs > existing.lastTs) {
         existing.lastTs = incoming.lastTs;
@@ -101,8 +108,11 @@ export class Aggregator {
   }
 }
 
-/** The raw sample always belongs to the same occurrence as `sample`; none captured clears it. */
-function setRawSample(item: AggregatedItem, rawSample: unknown): void {
-  if (rawSample !== undefined) item.rawSample = rawSample;
-  else delete item.rawSample;
+/**
+ * The sample text always belongs to the same occurrence as `sample`; none
+ * captured (or over the 16 KiB cap) clears any older one.
+ */
+function setSampleText(item: AggregatedItem, text: string | null | undefined): void {
+  if (typeof text === 'string') item.sampleText = text;
+  else delete item.sampleText;
 }

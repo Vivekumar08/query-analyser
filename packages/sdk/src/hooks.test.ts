@@ -97,6 +97,23 @@ describe('installHooks', () => {
     }
   });
 
+  it('an aggregate pipeline mutated after the query does not change the captured sample', () => {
+    const c = ctx(0, () => false, () => true);
+    const recorded: RecordedFns = {};
+    installHooks(fakeSchemaRecording(recorded), () => c);
+
+    const stage = { $match: { region: 'IN' } };
+    const fakeAgg = { _model: { modelName: 'Fake' }, pipeline: () => [stage] } as {
+      _qaStart?: number; _model: { modelName: string }; pipeline: () => unknown[];
+    };
+    recorded.pre!.call(fakeAgg, vi.fn());
+    fakeAgg._qaStart = (fakeAgg._qaStart as number) - 5;
+    recorded.post!.call(fakeAgg, {}, vi.fn());
+    stage.$match.region = 'MUTATED';
+
+    expect(c.aggregator.swap().items[0]!.sampleText).toBe('{"pipeline":[{"$match":{"region":"IN"}}]}');
+  });
+
   // Fix round 1, Important 2: once the transport latch trips (401/403), the
   // hot path must stop touching the aggregator entirely, not just stop
   // flushing.

@@ -21,6 +21,7 @@ type Seedable = {
   _aggregator: {
     add(sig: SignatureResult, ms: number, sample: unknown, rawSample?: unknown): void;
     swap(): { items: unknown[]; dropped: number };
+    merge(items: unknown[]): void;
     size: number;
   };
 };
@@ -402,7 +403,7 @@ describe('encrypted samples', () => {
 
     const text = bodyText(fetchImpl);
     expect(text).not.toContain('encryptedSample');
-    expect(text).not.toContain('rawSample');
+    expect(text).not.toContain('sampleText');
     expect(text).not.toContain('ana@secret.test');
     const sent = JSON.parse(text) as { items: Record<string, unknown>[] };
     expect(Object.keys(sent.items[0]!)).toEqual(WIRE_ITEM_KEYS);
@@ -421,7 +422,7 @@ describe('encrypted samples', () => {
 
     const text = bodyText(fetchImpl);
     expect(text).not.toContain('secret.test');
-    expect(text).not.toContain('rawSample');
+    expect(text).not.toContain('sampleText');
     const sent = JSON.parse(text) as { items: { sample: unknown; encryptedSample: Parameters<typeof decryptSample>[1] }[] };
     const item = sent.items[0]!;
     expect(item.sample).toEqual({ filter: { email: '<string>' } });
@@ -490,6 +491,78 @@ describe('encrypted samples', () => {
       expect(text).not.toContain('encryptedSample');
       expect(text).not.toContain('secret.test');
     }
+  });
+
+  it('sends only IngestItem keys and never the plaintext, with and without sampleKey', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    for (const sampleKey of [undefined, publicKey]) {
+      const fetchImpl = vi.fn(okFetch);
+      const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {}, sampleKey });
+      (a as unknown as Seedable)._aggregator.add(sigFor('email'), 150, { filter: { email: '<string>' } }, { filter: { email: 'ana@secret.test' } });
+      await a.flush();
+      const text = bodyText(fetchImpl);
+      expect(text).not.toContain('ana@secret.test');
+      expect(text).not.toContain('sampleText');
+      const sent = JSON.parse(text) as { items: Record<string, unknown>[] };
+      const allowed = sampleKey ? [...WIRE_ITEM_KEYS, 'encryptedSample'] : WIRE_ITEM_KEYS;
+      for (const item of sent.items) expect(Object.keys(item)).toEqual(allowed);
+      await shutdown();
+    }
+  });
+
+  it('on retry re-encrypts from the stored string (fresh envelope, same plaintext)', async () => {
+    const { publicKey, privateKey } = await generateSampleKeyPair();
+    let calls = 0;
+    const fetchImpl = vi.fn(async (_u: Parameters<typeof fetch>[0], _i?: Parameters<typeof fetch>[1]) => {
+      calls++;
+      return calls === 1 ? new Response('unavailable', { status: 503 }) : new Response('{}', { status: 202 });
+    });
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {}, sampleKey: publicKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const raw = { filter: { email: 'retry@secret.test' } };
+    agg.add(sigFor('email'), 300, null, raw);
+    await a.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // The merged-back item holds the bounded string, not the filter object.
+    const held = agg.swap().items as { sampleText?: unknown }[];
+    expect(held).toHaveLength(1);
+    expect(held[0]!.sampleText).toBe('{"filter":{"email":"retry@secret.test"}}');
+    expect(Object.values(held[0]!)).not.toContain(raw);
+    agg.merge(held);
+
+    await a.shutdown();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    type Sent = { items: { encryptedSample: Parameters<typeof decryptSample>[1] }[] };
+    const first = JSON.parse(bodyText(fetchImpl, 0)) as Sent;
+    const second = JSON.parse(bodyText(fetchImpl, 1)) as Sent;
+    expect(second.items).toHaveLength(1);
+    expect(second.items[0]!.encryptedSample.epk).not.toBe(first.items[0]!.encryptedSample.epk);
+    expect(JSON.parse(await decryptSample(privateKey, second.items[0]!.encryptedSample))).toEqual(raw);
+  });
+
+  it('caps the envelopes in one flush so 150 x 16 KiB samples stay under the 2 MiB body limit', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {}, sampleKey: publicKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    for (let i = 0; i < 150; i++) {
+      agg.add(sigFor(`k${i}`), 100 + i, null, { filter: { v: String(i).padEnd(16_300, 'x') } });
+    }
+    await a.flush();
+
+    const text = bodyText(fetchImpl);
+    expect(Buffer.byteLength(text)).toBeLessThan(2 * 1024 * 1024);
+    const sent = JSON.parse(text) as { items: { maxMs: number; encryptedSample: { ct: string } | null }[] };
+    expect(sent.items).toHaveLength(150);
+    const withEnvelope = sent.items.filter((i) => i.encryptedSample !== null);
+    expect(withEnvelope.length).toBeGreaterThan(0);
+    expect(withEnvelope.length).toBeLessThan(150);
+    expect(withEnvelope.reduce((n, i) => n + i.encryptedSample!.ct.length, 0)).toBeLessThanOrEqual(1_048_576);
+    // The slowest items get the budget first.
+    const minWith = Math.min(...withEnvelope.map((i) => i.maxMs));
+    const maxWithout = Math.max(...sent.items.filter((i) => i.encryptedSample === null).map((i) => i.maxMs));
+    expect(minWith).toBeGreaterThan(maxWithout);
   });
 
   it('never makes init() throw, whatever the sampleKey', async () => {
