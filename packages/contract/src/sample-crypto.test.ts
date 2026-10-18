@@ -8,6 +8,7 @@ import {
   unwrapPrivateKey,
   wrapPrivateKey,
   type EncryptedSample,
+  type WrappedKey,
 } from './sample-crypto.js';
 
 // Low iteration count keeps the suite fast; the default is pinned separately.
@@ -146,5 +147,71 @@ describe('sample crypto', () => {
     const env = await encryptSample(publicKey, SAMPLE);
     expect(atob(env.iv)).toHaveLength(12);
     expect(atob(env.epk)).toHaveLength(65); // uncompressed raw P-256 point
+  });
+});
+
+describe('sample crypto: passphrase normalisation', () => {
+  it('unwraps with the NFD form of an NFC passphrase', async () => {
+    const { privateKey } = await generateSampleKeyPair();
+    const wrapped = await wrapPrivateKey(privateKey, 'mot de passe café!', FAST);
+    expect(await unwrapPrivateKey(wrapped, 'mot de passe café!')).toBeTruthy();
+  });
+});
+
+/**
+ * Committed wire-format vectors, produced once by this implementation.
+ * Any change to HKDF info/salt, AAD, IV handling, PBKDF2 parameters or the
+ * PKCS8 wrap layout breaks these — envelopes already stored would no longer
+ * decrypt, so such a change needs a new envelope version, not an edit here.
+ */
+describe('sample crypto: fixed test vectors', () => {
+  const VECTOR_PLAINTEXT = '{"filter":{"email":"a@b.c"}}';
+  const VECTOR_PASSPHRASE = 'vector passphrase café';
+  const VECTOR_PUBLIC_SPKI =
+    'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0sRzWmOPfIwDxkzs/uVqdh4yeAWyIN16XyYIOaNDrvb5EJAawtoCMTKbuke1nQdQnkIF/qqtrDFL968fliHqDA==';
+  // Test-only key. Never use outside this file.
+  const VECTOR_PRIVATE_PKCS8 =
+    'MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgzXC3/kCu3PA086a8jkiQbV6MElVexmB/TIzx4/e414WhRANCAATSxHNaY498jAPGTOz+5Wp2HjJ4BbIg3XpfJgg5o0Ou9vkQkBrC2gIxMpu6R7WdB1CeQgX+qq2sMUv3rx+WIeoM';
+  const VECTOR_ENVELOPE: EncryptedSample = {
+    v: 1,
+    epk: 'BII/sPAHlpnsLEY5t2HroennaX+nFT55ZoutNmTB28PSq31GXn5C0O5iwZ3Ws+lj0D1d4ROD7CxSMEfcW3wTjnQ=',
+    iv: 'lFiWBFSKcfzD+Ss2',
+    ct: 'xB4Rx6NpIkDYh4cUcX9Uvzs8SME2uMJYZjGdd2mMiBtogkTFLaVm8QihKys=',
+  };
+  const VECTOR_WRAPPED: WrappedKey = {
+    v: 1,
+    salt: '/M8x7ZvJ1XCcClb0c6X+5Q==',
+    iv: 'evZbgANI/WV1+aum',
+    iterations: 1000,
+    ciphertext:
+      '9kA9EjUECYoaEAl0aHGm+xIef33EJ89U/qdEnoyRQTid3fPVj17ws/GxiRWdguwIyk7zVABm3yfCuqz1exg7NqpNBskeDlxq+2K/joTKTY3gLtB0184kPxNF6S6FPAz5hyxu/hFHD8RIq5HmKwp01geZrsvK3FBDyXcQAc0hdwcpZBmfW7rcFtdxzPUYQsRdVeW3+JXhkcZTzg==',
+  };
+
+  async function importVectorPrivate() {
+    const der = Uint8Array.from(atob(VECTOR_PRIVATE_PKCS8), (c) => c.charCodeAt(0));
+    return crypto.subtle.importKey('pkcs8', der, { name: 'ECDH', namedCurve: 'P-256' }, false, [
+      'deriveBits',
+    ]);
+  }
+
+  it('decrypts the committed envelope with the committed private key', async () => {
+    expect(await decryptSample(await importVectorPrivate(), VECTOR_ENVELOPE)).toBe(VECTOR_PLAINTEXT);
+  });
+
+  it('the committed public key imports', async () => {
+    expect((await importSamplePublicKey(VECTOR_PUBLIC_SPKI)).type).toBe('public');
+  });
+
+  it('unwraps the committed wrapped key and decrypts the committed envelope', async () => {
+    const key = await unwrapPrivateKey(VECTOR_WRAPPED, VECTOR_PASSPHRASE);
+    expect(await decryptSample(key, VECTOR_ENVELOPE)).toBe(VECTOR_PLAINTEXT);
+  });
+
+  it('unwraps the committed wrapped key with the NFD form of its passphrase', async () => {
+    expect(await unwrapPrivateKey(VECTOR_WRAPPED, 'vector passphrase cafe\u0301')).toBeTruthy();
+  });
+
+  it('rejects the committed wrapped key under another passphrase', async () => {
+    await expectCode(unwrapPrivateKey(VECTOR_WRAPPED, 'vector passphrase cafe'), 'wrong-passphrase');
   });
 });
