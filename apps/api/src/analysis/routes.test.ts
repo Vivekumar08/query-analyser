@@ -117,6 +117,7 @@ describe('read APIs', () => {
       model: null,
       op: null,
       limit: 50,
+      offset: 0,
       sort: 'wasted',
     });
     expect(rows.length).toBeGreaterThan(0);
@@ -315,6 +316,95 @@ describe('read APIs', () => {
 
     const p95s: number[] = body.items.map((i: { p95: { value: number } }) => i.p95.value);
     expect(p95s).toEqual([...p95s].sort((a, b) => b - a));
+  });
+
+  describe('offset pagination', () => {
+    // seed() already holds one signature (totalMs 1000); add six more with
+    // distinct totals so the ranking is fully determined: 7 rows in all.
+    async function seedSeven() {
+      const ctx = await seed();
+      for (let i = 1; i <= 6; i++) {
+        await addSignature(
+          ctx.appId,
+          { hash: `page-${i}-${Date.now()}-${Math.random().toString(36).slice(2)}` },
+          { count: 1, totalMs: BigInt(1000 + i * 100), maxMs: 10, hist: [1, 0, 0, 0, 0, 0, 0, 0] },
+        );
+      }
+      return ctx;
+    }
+    const get = async (token: string, appId: string, qs: string) =>
+      app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries?${qs}`, headers: as(token) });
+
+    it('pages through 7 signatures with hasMore and no overlap', async () => {
+      const { token, appId } = await seedSeven();
+      const p1 = (await get(token, appId, 'limit=3&offset=0')).json();
+      expect(p1.items).toHaveLength(3);
+      expect(p1.hasMore).toBe(true);
+      expect(p1.offset).toBe(0);
+      const p2 = (await get(token, appId, 'limit=3&offset=3')).json();
+      expect(p2.items).toHaveLength(3);
+      expect(p2.hasMore).toBe(true);
+      expect(p2.offset).toBe(3);
+      const p3 = (await get(token, appId, 'limit=3&offset=6')).json();
+      expect(p3.items).toHaveLength(1);
+      expect(p3.hasMore).toBe(false);
+      const hashes = [...p1.items, ...p2.items, ...p3.items].map((i: { hash: string }) => i.hash);
+      expect(new Set(hashes).size).toBe(7);
+      const totals = [...p1.items, ...p2.items, ...p3.items].map((i: { totalMs: string }) => Number(i.totalMs));
+      expect(totals).toEqual([...totals].sort((a, b) => b - a));
+    });
+
+    it('returns an empty page with hasMore false past the end', async () => {
+      const { token, appId } = await seedSeven();
+      const body = (await get(token, appId, 'limit=3&offset=50')).json();
+      expect(body.items).toHaveLength(0);
+      expect(body.hasMore).toBe(false);
+      expect(body.offset).toBe(50);
+    });
+
+    it('reports hasMore false when exactly limit rows remain', async () => {
+      const { token, appId } = await seedSeven();
+      const body = (await get(token, appId, 'limit=7')).json();
+      expect(body.items).toHaveLength(7);
+      expect(body.hasMore).toBe(false);
+    });
+
+    it('defaults offset to 0', async () => {
+      const { token, appId } = await seed();
+      const body = (await get(token, appId, '')).json();
+      expect(body.offset).toBe(0);
+      expect(body.hasMore).toBe(false);
+    });
+
+    it.each(['-1', '10001', 'abc', '1.5', '', '1&offset=2'])('400s offset=%s', async (bad) => {
+      const { token, appId } = await seed();
+      expect((await get(token, appId, `offset=${bad}`)).statusCode).toBe(400);
+    });
+
+    it('accepts the maximum offset of 10000', async () => {
+      const { token, appId } = await seed();
+      expect((await get(token, appId, 'offset=10000')).statusCode).toBe(200);
+    });
+
+    it('orders equal rank keys the same way on every call and every page', async () => {
+      const { token, appId } = await seed();
+      for (let i = 0; i < 3; i++) {
+        await addSignature(
+          appId,
+          { hash: `tie-${i}-${Date.now()}-${Math.random().toString(36).slice(2)}` },
+          { count: 10, totalMs: 1000n, maxMs: 300, hist: [0, 0, 10, 0, 0, 0, 0, 0] },
+        );
+      }
+      const full = (await get(token, appId, 'limit=10')).json().items.map((i: { hash: string }) => i.hash);
+      const again = (await get(token, appId, 'limit=10')).json().items.map((i: { hash: string }) => i.hash);
+      expect(again).toEqual(full);
+      const paged: string[] = [];
+      for (let off = 0; off < 4; off++) {
+        const b = (await get(token, appId, `limit=1&offset=${off}`)).json();
+        paged.push(b.items[0].hash);
+      }
+      expect(paged).toEqual(full);
+    });
   });
 
   it('400s a window whose from is after its to', async () => {
