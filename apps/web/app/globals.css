@@ -2,36 +2,58 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * Mist — soft periwinkle/lilac haze with frosted-glass surfaces.
+ * Hex values mirror src/mist-tokens.ts (checked by src/mist-css.test.ts);
+ * every text colour is held to WCAG AA by src/contrast.test.ts.
+ */
 :root {
-  --radius: 0.5rem;
-  --background: oklch(1 0 0);                 /* white */
-  --foreground: oklch(0.21 0.006 285.885);    /* zinc-900 */
-  --muted: oklch(0.967 0.001 286.375);        /* zinc-100 */
-  --muted-foreground: oklch(0.552 0.016 285.938); /* zinc-500 */
-  --border: oklch(0.92 0.004 286.32);         /* zinc-200 */
-  --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.511 0.262 276.966);         /* indigo-600 */
-  --primary: oklch(0.511 0.262 276.966);      /* indigo-600 */
-  --primary-foreground: oklch(0.985 0 0);
-  --accent: oklch(0.962 0.018 272.314);       /* indigo-50 */
-  --accent-foreground: oklch(0.398 0.195 277.366); /* indigo-800 */
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.21 0.006 285.885);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.21 0.006 285.885);
-  --secondary: oklch(0.967 0.001 286.375);
-  --secondary-foreground: oklch(0.21 0.006 285.885);
+  --radius: 0.75rem;
+  --radius-pill: 9999px;
+
+  --background: #F7F8FC;             /* base */
+  --haze-blue: #DCE6FF;
+  --haze-lilac: #EADFFB;
+  --haze-sky: #E3EEFF;
+
+  --foreground: #1E2235;             /* ink */
+  --muted-foreground: #5A607A;       /* body copy on haze */
+  --caption: #686E8A;                /* small captions */
+  --accent-text: #5B63B8;            /* periwinkle for text: eyebrows, links, serif accents */
+
+  --muted: #EEF0F7;
+  --border: #E3E6F3;
+  --input: #DDE2F2;
+  --ring: #5B63B8;
+
+  --primary: #1E2235;                /* pill buttons are ink */
+  --primary-foreground: #FFFFFF;
+  --accent: #EEF0FF;                 /* periwinkle tint (active nav, chips) */
+  --accent-foreground: #5B63B8;
+  --card: #FFFFFF;
+  --card-foreground: #1E2235;
+  --popover: #FFFFFF;
+  --popover-foreground: #1E2235;
+  --secondary: #EEF0F7;
+  --secondary-foreground: #1E2235;
   --destructive: oklch(0.577 0.245 27.325);
-  --sidebar: oklch(0.985 0 0);                /* zinc-50 */
+  --sidebar: rgba(255, 255, 255, 0.9);
   --warning-bg: oklch(0.987 0.022 95.277);    /* amber-50 */
   --warning-fg: oklch(0.473 0.137 46.201);    /* amber-800 */
-  --chart-1: oklch(0.511 0.262 276.966);      /* indigo-600 */
-  --chart-2: oklch(0.705 0.015 286.067);      /* zinc-400 */
+
+  --chart-1: #7C83D6;                /* bars and strokes only — never text */
+  --chart-2: #B9BDDB;                /* muted lilac second series */
+
+  --glass: rgba(255, 255, 255, 0.7);
+  --glass-strong: rgba(255, 255, 255, 0.9);
+  --glass-border: #E3E6F3;
+  --glass-shadow: 0 24px 48px -12px rgba(80, 90, 160, 0.14);
 }
 
 @theme inline {
   --font-sans: var(--font-inter);
   --font-mono: var(--font-jetbrains-mono);
+  --font-serif: var(--font-instrument-serif);
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
@@ -39,6 +61,8 @@
   --color-foreground: var(--foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-caption: var(--caption);
+  --color-accent-text: var(--accent-text);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -62,5 +86,31 @@
 
 @layer base {
   * { @apply border-border; }
-  body { @apply bg-background text-foreground font-sans antialiased; }
+  body {
+    @apply text-foreground font-sans antialiased;
+    background:
+      radial-gradient(900px 480px at 85% -5%, var(--haze-blue) 0%, transparent 60%),
+      radial-gradient(760px 520px at -10% 35%, var(--haze-lilac) 0%, transparent 55%),
+      radial-gradient(760px 560px at 100% 100%, var(--haze-sky) 0%, transparent 60%),
+      var(--background);
+    background-attachment: fixed;
+  }
+}
+
+@layer components {
+  .glass,
+  .glass-strong {
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    backdrop-filter: blur(14px) saturate(140%);
+  }
+  .glass { background: var(--glass); }
+  .glass-strong { background: var(--glass-strong); }
+}
+
+/* Without blur, translucent white over the haze reads as muddy: go solid. */
+@supports not (backdrop-filter: blur(1px)) {
+  .glass { background: #FDFDFF; }
+  .glass-strong { background: #FFFFFF; }
 }
