@@ -47,3 +47,16 @@ describe('dashboard wears Mist', () => {
     }
   });
 });
+
+describe('Mist consistency regressions (final review)', () => {
+  it('LogoutButton uses Mist styling, not the C1 slate square', () => {
+    const src = readFileSync(path.resolve(__dirname, '../app/_components/LogoutButton.tsx'), 'utf8');
+    expect(src).not.toMatch(/slate|rounded-md/);
+    expect(src).toMatch(/rounded-full/);
+  });
+
+  it('the hero copy button keeps a descriptive accessible name', () => {
+    const src = readFileSync(path.resolve(__dirname, '../app/page.tsx'), 'utf8');
+    expect(src).not.toMatch(/label="Copy"/);
+  });
+});

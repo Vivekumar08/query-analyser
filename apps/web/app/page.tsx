@@ -65,7 +65,6 @@ export default function Page() {
               <code className="truncate font-mono text-[13.5px]">{INSTALL}</code>
               <CopyButton
                 text={INSTALL}
-                label="Copy"
                 className="shrink-0 rounded-full px-3 py-1 text-xs font-medium text-accent-text hover:bg-accent"
               />
             </div>
