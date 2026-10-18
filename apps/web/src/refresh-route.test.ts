@@ -37,33 +37,61 @@ function successFetchMock() {
 }
 
 describe('GET /api/auth/refresh', () => {
-  it('redirects to /login when the next param already carries r=1, without calling the upstream API', async () => {
-    // EXACTLY ONCE. The marker lives inside `next` (written there by a prior
-    // successful refresh's retry redirect), not on this request's own query
-    // string — a page that still has no session redirects here with a plain
-    // `next`, never with its own `r=1`. Reading the marker from the wrong
-    // place made this guard dead code and the whole flow an unbounded
-    // rotation loop.
-    const fn = successFetchMock();
-    globalThis.fetch = fn as unknown as typeof globalThis.fetch;
-    cookieStore.set('qa_refresh', 'sometoken');
+  describe('the one-hop loop guard (qa_refresh_attempt cookie)', () => {
+    it('on a second hop (marker present): redirects to /login, clears the marker, and does not call the API', async () => {
+      // EXACTLY ONCE. The marker is set by the previous successful rotation;
+      // arriving with it means the retried page still had no usable session.
+      // Rotating again would loop, burning a real refresh token per bounce.
+      const fn = successFetchMock();
+      globalThis.fetch = fn as unknown as typeof globalThis.fetch;
+      cookieStore.set('qa_refresh', 'sometoken');
+      cookieStore.set('qa_refresh_attempt', '1');
 
-    const res = await GET(req('/api/auth/refresh?next=%2Fdashboard%3Fr%3D1'));
-    expect(res.status).toBe(307);
-    expect(res.headers.get('location')).toBe('https://web.example.com/login');
-    expect(fn).not.toHaveBeenCalled();
-  });
+      const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
+      expect(res.status).toBe(307);
+      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+      expect(fn).not.toHaveBeenCalled();
+      const marker = res.headers.getSetCookie().find((c) => c.startsWith('qa_refresh_attempt='));
+      expect(marker).toBeDefined();
+      expect(marker).toMatch(/^qa_refresh_attempt=;/);
+      expect(marker).toContain('Path=/api/auth');
+      expect(marker).toContain('Max-Age=0');
+    });
 
-  it('does NOT short-circuit on r=1 present only on this request\'s own query string', async () => {
-    // Regression guard for the old (dead) check: `r=1` appearing on the
-    // refresh route's own URL, rather than inside `next`, must not stop the
-    // refresh — no real caller ever produces that shape, but the fix must
-    // not accidentally swallow a legitimate `next` whose own query happens
-    // to contain other params.
-    cookieStore.set('qa_refresh', 'sometoken');
-    globalThis.fetch = successFetchMock() as unknown as typeof globalThis.fetch;
-    const res = await GET(req('/api/auth/refresh?next=%2Fdashboard&r=1'));
-    expect(res.headers.get('location')).toBe('https://web.example.com/dashboard?r=1');
+    it('on a first hop (no marker): rotates and sets the marker, HttpOnly, scoped to /api/auth, 30s', async () => {
+      cookieStore.set('qa_refresh', 'sometoken');
+      globalThis.fetch = successFetchMock() as unknown as typeof globalThis.fetch;
+
+      const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
+      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard');
+      const marker = res.headers.getSetCookie().find((c) => c.startsWith('qa_refresh_attempt='));
+      expect(marker).toBeDefined();
+      expect(marker).toMatch(/^qa_refresh_attempt=1;/);
+      expect(marker).toContain('Path=/api/auth');
+      expect(marker).toContain('Max-Age=30');
+      expect(marker).toContain('HttpOnly');
+      expect(marker?.toLowerCase()).toContain('samesite=lax');
+    });
+
+    it('puts no marker in the redirect URL (nothing for history or a bookmark to replay)', async () => {
+      cookieStore.set('qa_refresh', 'sometoken');
+      globalThis.fetch = successFetchMock() as unknown as typeof globalThis.fetch;
+      const res = await GET(req('/api/auth/refresh?next=%2Fdashboard%3Fr%3D1'));
+      // A stale `r=1` from an old bookmark is just an ordinary query param now.
+      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard?r=1');
+      const res2 = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
+      expect(res2.headers.get('location')).toBe('https://web.example.com/dashboard');
+    });
+
+    it('does not set the marker when the refresh fails', async () => {
+      cookieStore.set('qa_refresh', 'sometoken');
+      globalThis.fetch = vi.fn(async (_input?: RequestInfo | URL, _init?: RequestInit) => new Response(
+        JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof globalThis.fetch;
+      const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
+      expect(res.headers.get('location')).toBe('https://web.example.com/login');
+      expect(res.headers.getSetCookie().some((c) => c.startsWith('qa_refresh_attempt=1'))).toBe(false);
+    });
   });
 
   it('redirects to /login when the refresh cookie is missing', async () => {
@@ -83,14 +111,14 @@ describe('GET /api/auth/refresh', () => {
       const res = await GET(req('/api/auth/refresh?next=%2F%2Fevil.com'));
       const location = res.headers.get('location') ?? '';
       expect(location).not.toContain('evil.com');
-      expect(location).toBe('https://web.example.com/?r=1');
+      expect(location).toBe('https://web.example.com/');
     });
 
     it('rejects an absolute next (https://evil.com) and falls back to /', async () => {
       const res = await GET(req('/api/auth/refresh?next=https%3A%2F%2Fevil.com'));
       const location = res.headers.get('location') ?? '';
       expect(location).not.toContain('evil.com');
-      expect(location).toBe('https://web.example.com/?r=1');
+      expect(location).toBe('https://web.example.com/');
     });
 
     it('rejects a backslash-prefixed next (/\\evil.com) and falls back to /', async () => {
@@ -101,17 +129,33 @@ describe('GET /api/auth/refresh', () => {
       const res = await GET(req('/api/auth/refresh?next=%2F%5Cevil.com'));
       const location = res.headers.get('location') ?? '';
       expect(location).not.toContain('evil.com');
-      expect(location).toBe('https://web.example.com/?r=1');
+      expect(location).toBe('https://web.example.com/');
+    });
+
+    it.each([
+      '/.//evil.com',
+      '/..//evil.com',
+      '/a/..//evil.com',
+      '/%2e//evil.com',
+      '/%2e%2e//evil.com',
+      '/./\\evil.com',
+    ])('rejects the dot-segment bypass %s and stays on origin', async (raw) => {
+      // These resolve SAME-origin with a pathname of `//evil.com`; re-parsing
+      // that pathname as a string would make it protocol-relative.
+      const res = await GET(req(`/api/auth/refresh?next=${encodeURIComponent(raw)}`));
+      const location = res.headers.get('location') ?? '';
+      expect(new URL(location).origin).toBe('https://web.example.com');
+      expect(location).toBe('https://web.example.com/');
     });
 
     it('accepts a same-origin absolute path', async () => {
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard?r=1');
+      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard');
     });
 
     it('preserves an existing query string on next when building the retry URL', async () => {
       const res = await GET(req('/api/auth/refresh?next=%2Fdashboard%3Ffoo%3Dbar'));
-      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard?foo=bar&r=1');
+      expect(res.headers.get('location')).toBe('https://web.example.com/dashboard?foo=bar');
     });
   });
 

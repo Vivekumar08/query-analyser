@@ -58,9 +58,18 @@ export async function getSession(): Promise<Session | null> {
  * Redirecting straight to `/login` from here would log out a valid session
  * every 15 minutes.
  *
- * Takes the current path as a parameter rather than reading `headers()`,
- * because every caller is a page that already knows its own path — there is
- * no need to couple this gate to a request API it does not otherwise need.
+ * Bounded to ONE refresh per navigation by the refresh handler, not by the
+ * caller: on a successful rotation it sets a short-lived HttpOnly marker
+ * cookie (`qa_refresh_attempt`, Path=/api/auth, 30s). If the retried page
+ * still has no usable session and lands back here, the handler sees the
+ * marker, clears it and sends the visitor to `/login` instead of rotating
+ * again. Nothing is written into the page URL, so the bound holds whatever
+ * `currentPath` a caller passes (with or without its query string), and
+ * nothing sticks in history or bookmarks to log a valid user out on reload.
+ *
+ * `currentPath` is where to return after the refresh. Pass the path the
+ * visitor asked for, including its query string if it matters to the page;
+ * the handler validates it with `safeNext`, so it is never an open redirect.
  */
 export async function requireSession(currentPath: string): Promise<Session> {
   const session = await getSession();

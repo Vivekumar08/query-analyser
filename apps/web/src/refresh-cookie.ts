@@ -72,3 +72,28 @@ export function forwardRefreshCookie(from: Response, to: Response): void {
     }
   }
 }
+
+/**
+ * One-hop loop guard (Ruling B13). The refresh handler sets this when it
+ * rotates the pair; if it is already present when the handler is reached
+ * again, the retried page STILL had no usable session, so the handler stops
+ * and sends the visitor to /login instead of rotating again.
+ *
+ * A cookie rather than a URL marker: a URL marker only reaches the handler if
+ * every caller of requireSession() passes its query string, and once it does
+ * it sticks in the address bar, history and bookmarks — a reload 15 minutes
+ * later would then log out a perfectly valid session. A cookie scoped to the
+ * handler's own path and dying in 30s is tied to exactly one hop.
+ */
+export const REFRESH_ATTEMPT_COOKIE = 'qa_refresh_attempt';
+export const REFRESH_ATTEMPT_MAX_AGE_SECONDS = 30;
+
+export function refreshAttemptCookieOptions(isProd: boolean, maxAge = REFRESH_ATTEMPT_MAX_AGE_SECONDS) {
+  return {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: 'lax' as const,
+    path: REFRESH_COOKIE_PATH,
+    maxAge,
+  };
+}

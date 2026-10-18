@@ -7,11 +7,13 @@ export default async function LoginPage({
 }: { searchParams: Promise<{ next?: string }> }) {
   const { next } = await searchParams;
   // A Server Component has no request origin to resolve against. The dummy
-  // base is safe here because safeNext only ever returns pathname + search
-  // (or the fallback) — an absolute URL like https://evil.com resolves to a
-  // DIFFERENT origin than the dummy base and is rejected, while a path like
-  // /dashboard?x=1 resolves against it and comes back as a bare path. Do not
-  // "simplify" this to a prefix check — that's the exact bug this replaced.
+  // base is safe here because safeNext only ever returns a single-slash path
+  // (pathname + search) or the fallback: anything resolving to another origin,
+  // containing a backslash, or whose resolved pathname starts with `//`
+  // (dot-segment tricks like /.//evil.com) is rejected. The result goes
+  // straight to AuthForm's router.push, which re-parses it — so it must be
+  // a value that re-parses on THIS origin, which is exactly what safeNext
+  // guarantees. Do not "simplify" this to a prefix check.
   const target = safeNext(next, 'https://x.invalid', '/dashboard');
 
   return (
