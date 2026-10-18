@@ -4,7 +4,7 @@ import { bucketOf, encryptSample, importSamplePublicKey } from '@query-analyser/
 import type { EncryptedSample, IngestItem, IngestPayload } from './types.js';
 import { Aggregator, type AggregatedItem } from './aggregator.js';
 import { installHooks, INSTALLED, type MongooseSchemaLike, type HookContext, type GetHookContext } from './hooks.js';
-import { createTransport } from './transport.js';
+import { createTransport, planChunks, MAX_CHUNK_BYTES } from './transport.js';
 
 // Minor fix 7: hand-typed and previously could drift from package.json.
 // `__SDK_VERSION__` is a build-time constant substituted both by tsup's
@@ -112,7 +112,15 @@ export interface InitOptions {
 const MAX_REPORTED_SAMPLE_ERRORS = 16;
 // Total `ct` characters of all envelopes in one flush (C5-2): ~1 MiB of
 // incompressible base64 keeps the body well under the ingest API's 2 MiB limit.
-const MAX_ENVELOPE_CT_CHARS_PER_FLUSH = 1_048_576;
+// C5-3 amends C5-2: the budget is charged each envelope's full JSON length
+// (`,"encryptedSample":{"v":1,"epk":…,"iv":…,"ct":…}`), not just `ct`. The
+// body size itself is bounded separately by splitting into chunks.
+const MAX_ENVELOPE_JSON_CHARS_PER_FLUSH = 1_048_576;
+const ENVELOPE_KEY_JSON = ',"encryptedSample":';
+// Everything but `ct` in an envelope: a P-256 point (88 base64 chars), a
+// 12-byte IV (16), the keys and punctuation.
+const ENVELOPE_FIXED_JSON_CHARS =
+  ENVELOPE_KEY_JSON.length + JSON.stringify({ v: 1, epk: 'x'.repeat(88), iv: 'x'.repeat(16), ct: '' }).length;
 
 /**
  * The wire form of a buffered item: exactly the IngestItem keys, in the
@@ -362,17 +370,17 @@ export function init(options: InitOptions): Analyser {
     if (sampleEncryption !== 'on' || sampleKey === undefined) return withoutSampleText(items);
     const envelopes = new Array<EncryptedSample | null>(items.length).fill(null);
     const slowestFirst = items.map((_, i) => i).sort((a, b) => items[b]!.maxMs - items[a]!.maxMs);
-    let budget = MAX_ENVELOPE_CT_CHARS_PER_FLUSH;
+    let budget = MAX_ENVELOPE_JSON_CHARS_PER_FLUSH;
     for (const i of slowestFirst) {
       const text = items[i]!.sampleText;
       if (text === undefined) continue;
-      // base64(plaintext bytes + 16-byte GCM tag): known before encrypting.
+      // ct = base64(plaintext bytes + 16-byte GCM tag): known before encrypting.
       const ctChars = Math.ceil((Buffer.byteLength(text, 'utf8') + 16) / 3) * 4;
-      if (ctChars > budget) continue;
+      if (ctChars + ENVELOPE_FIXED_JSON_CHARS > budget) continue;
       const envelope = await encryptSampleText(sampleKey, text);
       if (envelope) {
         envelopes[i] = envelope;
-        budget -= envelope.ct.length;
+        budget -= ENVELOPE_KEY_JSON.length + JSON.stringify(envelope).length;
       }
     }
     return items.map((item, i) => ({ ...toWireItem(item), encryptedSample: envelopes[i] ?? null }));
@@ -485,7 +493,7 @@ export function init(options: InitOptions): Analyser {
       const { items, dropped } = aggregator.swap();
       if (items.length === 0 && dropped === 0) return;
 
-      const payload: IngestPayload = {
+      const base: Omit<IngestPayload, 'items'> = {
         app: options.app,
         // Critical 2: `??` only falls through on null/undefined, so
         // `NODE_ENV=''` (a real thing some process managers set) sailed
@@ -498,18 +506,39 @@ export function init(options: InitOptions): Analyser {
         bucket: bucketOf(new Date()),
         thresholdMs,
         dropped,
-        // No sampleKey: stay fully synchronous up to transport.send(), as
-        // before this feature.
-        items: sampleKey === undefined ? withoutSampleText(items) : await toEncryptedWireItems(items),
       };
+      // No sampleKey: stay fully synchronous up to transport.send(), as
+      // before this feature.
+      const wire = sampleKey === undefined ? withoutSampleText(items) : await toEncryptedWireItems(items);
 
-      const result = await transport.send(payload);
-      if (result.status === 'retry') {
-        backoffUntil = Date.now() + result.afterMs;
-        aggregator.merge(items);
-      } else if (result.status === 'disabled') {
-        disabled = true;
-        onError(new Error(result.reason));
+      // C5-3: the ingest API rejects bodies over 2 MiB (decompressed), and a
+      // rejected body is dropped whole. So one flush is POSTed as chunks of
+      // at most MAX_CHUNK_BYTES each; a small batch is still exactly one
+      // POST with the same payload as before.
+      const { chunks, oversized } = planChunks(base, wire);
+      if (oversized.length > 0) {
+        reportSafely(new Error(
+          `query-analyser: dropped ${oversized.length} item(s) too large for one ingest request (over ${MAX_CHUNK_BYTES} bytes of JSON)`,
+        ));
+      }
+      for (let c = 0; c < chunks.length; c++) {
+        const chunk = chunks[c]!;
+        // The drop count rides on the first chunk only, so it isn't counted twice.
+        const payload: IngestPayload = { ...base, dropped: c === 0 ? dropped : 0, items: chunk.map((i) => wire[i]!) };
+        const result = await transport.send(payload);
+        if (result.status === 'retry') {
+          // This chunk and every unsent one go back into the buffer (as the
+          // buffered items, sample text included) for the next flush; the
+          // chunks already accepted are not re-sent.
+          backoffUntil = Date.now() + result.afterMs;
+          aggregator.merge(chunks.slice(c).flat().map((i) => items[i]!));
+          break;
+        }
+        if (result.status === 'disabled') {
+          disabled = true;
+          onError(new Error(result.reason));
+          break;
+        }
       }
     } catch (err) {
       onError(err instanceof Error ? err : new Error(String(err)));

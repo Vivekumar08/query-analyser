@@ -152,4 +152,17 @@ describe('serializeSample', () => {
   it('writes an unknown bson type as a placeholder without stringifying it', () => {
     expect(parse({ c: { _bsontype: 'Code', code: 'function () {}' } })).toEqual({ c: '<Code>' });
   });
+
+  it('writes a typed array as binary rather than walking its indices', () => {
+    expect(parse({ f: new Float32Array([1]) })).toEqual({ f: { $binary: { base64: 'AACAPw==', subType: '00' } } });
+    expect(parse({ ab: new Uint8Array([104, 105]).buffer })).toEqual({ ab: { $binary: { base64: 'aGk=', subType: '00' } } });
+  });
+
+  it('rejects a 20M-element Float64Array fast, without encoding or walking it', () => {
+    const huge = new Float64Array(20_000_000);
+    const t0 = performance.now();
+    expect(serializeSample({ filter: { v: huge } })).toBeNull();
+    expect(performance.now() - t0).toBeLessThan(100);
+  });
 });
+

@@ -6,6 +6,7 @@ import mongoose from 'mongoose';
 import { generateSampleKeyPair, decryptSample } from '@query-analyser/contract/runtime';
 import { init, shutdown } from './index.js';
 import { buildSignature, type SignatureResult } from './signature.js';
+import { MAX_CHUNK_BYTES } from './transport.js';
 
 afterEach(async () => { await shutdown(); });
 
@@ -570,5 +571,107 @@ describe('encrypted samples', () => {
       expect(() => init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError: () => {}, sampleKey })).not.toThrow();
       await shutdown();
     }
+  });
+});
+
+describe('chunked flushes', () => {
+  // A realistic, wide signature: long key names make each item ~400 B.
+  const wideSig = (i: number) => buildSignature({
+    model: 'Order', operation: 'find',
+    filter: Object.fromEntries(Array.from({ length: 8 }, (_, k) => [`customer_profile_field_${k}_${i}`, 1])),
+  });
+  type Sent = { dropped: number; items: { hash: string; encryptedSample?: unknown }[] };
+  const allBodies = (fetchImpl: { mock: { calls: unknown[][] } }) =>
+    fetchImpl.mock.calls.map((_, n) => bodyText(fetchImpl, n));
+
+  async function flushMany(sampleKey: string | undefined, count: number) {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {}, sampleKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const hashes: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const sig = wideSig(i);
+      hashes.push(sig.hash);
+      agg.add(sig, 150, { filter: { email: '<string>' } }, { filter: { email: `user${i}@secret.test`, n: i } });
+    }
+    await a.flush();
+    return { fetchImpl, hashes };
+  }
+
+  for (const withKey of [true, false]) {
+    it(`5000 signatures ${withKey ? 'with' : 'without'} a key: every POST body is within the chunk limit and every item is delivered once`, async () => {
+      const sampleKey = withKey ? (await generateSampleKeyPair()).publicKey : undefined;
+      const { fetchImpl, hashes } = await flushMany(sampleKey, 5000);
+      const bodies = allBodies(fetchImpl);
+      expect(bodies.length).toBeGreaterThan(1);
+      for (const b of bodies) expect(Buffer.byteLength(b)).toBeLessThanOrEqual(MAX_CHUNK_BYTES);
+      const delivered = bodies.flatMap((b) => (JSON.parse(b) as Sent).items.map((i) => i.hash));
+      expect(delivered.length).toBe(5000);
+      expect(new Set(delivered)).toEqual(new Set(hashes));
+      if (withKey) {
+        const envelopes = bodies.flatMap((b) => (JSON.parse(b) as Sent).items.filter((i) => i.encryptedSample));
+        expect(envelopes.length).toBeGreaterThan(0);
+      } else {
+        for (const b of bodies) expect(b).not.toContain('encryptedSample');
+      }
+    }, 60_000);
+  }
+
+  it('retries only the failed chunk: chunk 1 is never sent twice', async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn(async (_u: Parameters<typeof fetch>[0], _i?: Parameters<typeof fetch>[1]) => {
+      calls++;
+      return calls === 2 ? new Response('unavailable', { status: 503 }) : new Response('{}', { status: 202 });
+    });
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {} });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const hashes: string[] = [];
+    for (let i = 0; i < 5000; i++) {
+      const sig = wideSig(i);
+      hashes.push(sig.hash);
+      agg.add(sig, 150, { filter: { email: '<string>' } });
+    }
+    await a.flush();
+    const sentInFlush = fetchImpl.mock.calls.length;
+    expect(sentInFlush).toBe(2); // chunk 1 ok, chunk 2 failed -> stop and back off
+
+    await a.shutdown();          // resets backoff and drains the merged-back remainder
+    const bodies = allBodies(fetchImpl);
+    const okBodies = bodies.filter((_, n) => n !== 1);
+    const delivered = okBodies.flatMap((b) => (JSON.parse(b) as Sent).items.map((i) => i.hash));
+    expect(delivered.length).toBe(5000);
+    expect(new Set(delivered)).toEqual(new Set(hashes));
+  }, 60_000);
+
+  it('without a key, a small batch is exactly one POST with the same payload as before', async () => {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, env: 'test' });
+    const sig = wideSig(1);
+    (a as unknown as Seedable)._aggregator.add(sig, 150, { filter: { a: '<number>' } });
+    await a.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const text = bodyText(fetchImpl);
+    const sent = JSON.parse(text) as Record<string, unknown> & { items: Record<string, unknown>[] };
+    expect(Object.keys(sent)).toEqual(['app', 'env', 'host', 'sdkVersion', 'bucket', 'thresholdMs', 'dropped', 'items']);
+    expect(sent.items).toHaveLength(1);
+    expect(Object.keys(sent.items[0]!)).toEqual(WIRE_ITEM_KEYS);
+    expect(sent.items[0]).toMatchObject({ hash: sig.hash, signature: sig.signature, count: 1, maxMs: 150, sample: { filter: { a: '<number>' } } });
+    expect(text).toBe(JSON.stringify(sent));
+  });
+
+  it('drops (and reports) a single item too big for any chunk, delivering the rest', async () => {
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const small = wideSig(1);
+    agg.add(small, 150, null);
+    agg.add(wideSig(2), 150, { blob: 'x'.repeat(MAX_CHUNK_BYTES) });
+    await a.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(bodyText(fetchImpl)) as Sent;
+    expect(sent.items.map((i) => i.hash)).toEqual([small.hash]);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]![0] as Error).message).toMatch(/too large/);
   });
 });

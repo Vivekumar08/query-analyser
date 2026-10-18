@@ -1,5 +1,5 @@
 import { gzipSync } from 'node:zlib';
-import type { IngestPayload } from './types.js';
+import type { IngestItem, IngestPayload } from './types.js';
 
 export type SendResult =
   | { status: 'ok' }
@@ -19,6 +19,60 @@ export interface Transport {
 }
 
 const GZIP_THRESHOLD_BYTES = 1024;
+
+/**
+ * Largest serialised (pre-gzip) JSON body one POST may carry. The ingest API
+ * limits the *decompressed* body to 2 MiB; 1.5 MiB leaves headroom.
+ */
+export const MAX_CHUNK_BYTES = 1_572_864;
+
+/**
+ * Splits one flush's items into POST-sized chunks (greedy, in order), each of
+ * whose JSON body `{...base, items}` is at most `maxBytes`. Item sizes are
+ * measured once with JSON.stringify, and a body is exactly the base payload
+ * plus the items joined by commas, so the bound is exact.
+ *
+ * An item that cannot fit even alone first loses its `encryptedSample` (set
+ * to `null` in place); if it still does not fit it is listed in `oversized`
+ * and left out. An empty batch is one empty chunk, so a drop count is still
+ * reported.
+ */
+export function planChunks(
+  base: Omit<IngestPayload, 'items'>,
+  items: IngestItem[],
+  maxBytes: number = MAX_CHUNK_BYTES,
+): { chunks: number[][]; oversized: number[] } {
+  const baseBytes = Buffer.byteLength(JSON.stringify({ ...base, items: [] }));
+  const sizeOf = (item: IngestItem) => Buffer.byteLength(JSON.stringify(item));
+  const chunks: number[][] = [];
+  const oversized: number[] = [];
+  let current: number[] = [];
+  let currentBytes = baseBytes;
+
+  items.forEach((item, i) => {
+    let size = sizeOf(item);
+    if (baseBytes + size > maxBytes && item.encryptedSample) {
+      item.encryptedSample = null;
+      size = sizeOf(item);
+    }
+    if (baseBytes + size > maxBytes) {
+      oversized.push(i);
+      return;
+    }
+    // A comma separates this item from the previous one in the same chunk.
+    const added = current.length === 0 ? size : size + 1;
+    if (currentBytes + added > maxBytes) {
+      chunks.push(current);
+      current = [i];
+      currentBytes = baseBytes + size;
+    } else {
+      current.push(i);
+      currentBytes += added;
+    }
+  });
+  if (current.length > 0 || chunks.length === 0) chunks.push(current);
+  return { chunks, oversized };
+}
 const DEFAULT_RETRY_MS = 5_000;
 const MAX_RETRY_MS = 60_000;
 const JITTER_RATIO = 0.2;
