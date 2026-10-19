@@ -15,6 +15,15 @@ const resetSchema = z.object({
   token: z.string().min(1).max(200),
   password: z.string().min(12).max(200),
 });
+// zod strips unknown keys, so `{ name, email, isPlatformAdmin }` only ever
+// updates the name.
+const nameSchema = z.object({ name: z.string().trim().min(1).max(100) });
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(200),
+  newPassword: z.string().min(12).max(200),
+});
+
+const meSelect = { id: true, email: true, name: true, isPlatformAdmin: true, emailVerifiedAt: true } as const;
 
 // Memoised dummy hash used to equalise login timing between "unknown email"
 // and "wrong password" — both must pay the same argon2id cost, or repeated
@@ -115,13 +124,52 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get('/v1/me', { preHandler: [app.authenticate] }, async (req, reply) => {
-    const user = await app.prisma.user.findUnique({
-      where: { id: req.user.id },
-      select: { id: true, email: true, name: true, isPlatformAdmin: true, emailVerifiedAt: true },
-    });
+    const user = await app.prisma.user.findUnique({ where: { id: req.user.id }, select: meSelect });
     if (!user) return reply.code(401).send({ error: 'unauthorized' });
     return user;
   });
+
+  app.patch('/v1/me', { preHandler: [app.authenticate] }, async (req, reply) => {
+    const parsed = nameSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
+    const updated = await app.prisma.user.updateMany({ where: { id: req.user.id }, data: { name: parsed.data.name } });
+    if (updated.count === 0) return reply.code(401).send({ error: 'unauthorized' });
+    return app.prisma.user.findUniqueOrThrow({ where: { id: req.user.id }, select: meSelect });
+  });
+
+  app.post(
+    '/v1/me/password',
+    { preHandler: [app.authenticate], config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const parsed = changePasswordSchema.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
+      const { currentPassword, newPassword } = parsed.data;
+      // Checked before argon2: costs nothing, and says nothing about whether
+      // currentPassword is right.
+      if (newPassword === currentPassword) {
+        return reply.code(400).send({ error: 'new password must differ from the current one' });
+      }
+
+      const user = await app.prisma.user.findUnique({ where: { id: req.user.id } });
+      // Same response, same argon2 cost, whether the account still exists or
+      // not (a deleted user holding a still-valid access token).
+      const ok = await verifyPassword(user?.passwordHash ?? (await getDummyHash()), currentPassword);
+      if (!user || !ok) return reply.code(403).send({ error: 'wrong-password' });
+
+      // Store the new hash and revoke every refresh token in one transaction:
+      // no window where the new password is live but old sessions can still
+      // refresh. The fresh session is issued only after this commits, so it is
+      // not caught by the revocation.
+      const passwordHash = await hashPassword(newPassword);
+      await app.prisma.$transaction([
+        app.prisma.user.update({ where: { id: user.id }, data: { passwordHash } }),
+        app.prisma.refreshToken.updateMany({ where: { userId: user.id, consumedAt: null }, data: { consumedAt: new Date() } }),
+      ]);
+
+      const accessToken = await issue(reply, user.id);
+      return reply.send({ accessToken, user: { id: user.id, email: user.email, name: user.name, isPlatformAdmin: user.isPlatformAdmin } });
+    },
+  );
 
   app.post(
     '/v1/auth/verify/request',
