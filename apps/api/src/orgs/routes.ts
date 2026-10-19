@@ -7,6 +7,9 @@ import { Prisma } from '../generated/prisma/client.js';
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
 const createSchema = z.object({ name: z.string().min(1).max(100) });
 const roleSchema = z.object({ role: z.enum(ROLES) });
+// Slugs that collide with static `/dashboard/*` routes in the web app. They
+// get the random suffix, exactly as a taken slug does.
+const RESERVED_SLUGS = new Set(['account', 'new']);
 
 export function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'org';
@@ -27,7 +30,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
 
     const base = slugify(parsed.data.name);
-    const taken = await app.prisma.organization.findUnique({ where: { slug: base } });
+    const taken = RESERVED_SLUGS.has(base) || (await app.prisma.organization.findUnique({ where: { slug: base } }));
     const slug = taken ? `${base}-${randomBytes(2).toString('hex')}` : base;
 
     // The findUnique-then-create above is itself a check-then-act: two

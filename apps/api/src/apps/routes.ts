@@ -14,7 +14,7 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   app.get('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('VIEWER')] }, async (req) =>
     app.prisma.app.findMany({ where: { orgId: req.membership.orgId }, select: appSelect, orderBy: { createdAt: 'asc' } }));
 
-  app.post('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('MEMBER')] }, async (req, reply) => {
+  app.post('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req, reply) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
     const exists = await app.prisma.app.findUnique({ where: { orgId_name_env: { orgId: req.membership.orgId, ...parsed.data } } });

@@ -37,6 +37,15 @@ describe('orgs', () => {
     expect(list.json()).toHaveLength(1);
   });
 
+  it('never hands out a reserved slug', async () => {
+    const u = await user('o@x.io');
+    for (const [name, base] of [['Account', 'account'], ['New', 'new'], ['new!', 'new']] as const) {
+      const res = await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(u.token), payload: { name } });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().slug).toMatch(new RegExp(`^${base}-[a-z0-9]{4}$`));
+    }
+  });
+
   it('suffixes a colliding slug', async () => {
     const u = await user('o@x.io');
     const first = await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(u.token), payload: { name: 'Acme' } });
