@@ -23,6 +23,12 @@ describe('proxy matcher', () => {
       expect(unstable_doesMiddlewareMatch({ config, nextConfig: {}, url })).toBe(false);
     }
   });
+
+  it('does not run on the icon metadata files (browsers fetch them signed out)', () => {
+    for (const url of ['/icon.svg', '/apple-icon.png']) {
+      expect(unstable_doesMiddlewareMatch({ config, nextConfig: {}, url })).toBe(false);
+    }
+  });
 });
 
 describe('proxy redirect', () => {

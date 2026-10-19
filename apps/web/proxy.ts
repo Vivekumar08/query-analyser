@@ -44,6 +44,6 @@ export const config = {
     // Everything except the public pages, the auth route handlers, Next's own
     // assets and metadata files. The negative lookahead is the documented
     // pattern; without it the proxy runs on CSS and JS too and blocks them.
-    '/((?!api|_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|login|signup|verify|reset-password|forgot-password|$).*)',
+    '/((?!api|_next/static|_next/image|favicon.ico|icon.svg|apple-icon.png|robots.txt|sitemap.xml|login|signup|verify|reset-password|forgot-password|$).*)',
   ],
 };

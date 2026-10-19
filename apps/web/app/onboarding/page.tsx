@@ -1,4 +1,4 @@
-import Link from 'next/link';
+import { Wordmark } from '@/components/brand/Logo';
 import { redirect } from 'next/navigation';
 import { requireSession } from '@/src/auth';
 import { getApp, listApps, listOrgs } from '@/src/dashboard-api';
@@ -36,9 +36,7 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
 
   return (
     <main className="mx-auto grid min-h-screen max-w-4xl gap-10 px-6 py-16 md:grid-cols-[220px_1fr]">
-      <Link href="/" className="text-[15px] font-semibold tracking-tight md:col-span-2">
-        <span className="text-accent-text">◐</span> query·analyser
-      </Link>
+      <Wordmark className="md:col-span-2 justify-self-start" />
       <OnboardingFlow key={`${start.step}:${start.app?.id ?? ''}`} start={start} email={session.user.email} />
     </main>
   );
