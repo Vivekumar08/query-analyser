@@ -1,9 +1,10 @@
 import { getShellContext } from '@/src/shell-context';
 import { AppSwitcher } from '@/components/dashboard/AppSwitcher';
-import { groupForSwitcher } from '@/components/dashboard/switcher';
+import { groupForSwitcher, orgsForSwitcher } from '@/components/dashboard/switcher';
 import { MobileNav } from '@/components/dashboard/MobileNav';
 import { RememberApp } from '@/components/dashboard/RememberApp';
-import { Sidebar, SidebarNav } from '@/components/dashboard/Sidebar';
+import { Sidebar, SidebarAccount, SidebarNav } from '@/components/dashboard/Sidebar';
+import { isAdminRole } from '@/src/dashboard-types';
 import { LogoutButton } from '@/app/_components/LogoutButton';
 
 export default async function AppShell({
@@ -20,14 +21,15 @@ export default async function AppShell({
   const switcher = (
     <AppSwitcher
       groups={groups}
+      orgs={orgsForSwitcher(orgs, org)}
       currentLabel={{ org: currentOrg.name, app: appData.name }}
-      newAppHref={`/onboarding?org=${encodeURIComponent(org)}`}
+      newAppHref={isAdminRole(currentOrg.role) ? `/onboarding?org=${encodeURIComponent(org)}` : null}
     />
   );
   const nav = <SidebarNav base={base} />;
   const footer = (
     <div className="flex flex-col gap-2 text-sm">
-      <span className="truncate text-muted-foreground">{session.user.email}</span>
+      <SidebarAccount name={session.user.name} email={session.user.email} />
       <LogoutButton />
     </div>
   );
