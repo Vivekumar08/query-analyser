@@ -2,9 +2,9 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { requireSession } from '@/src/auth';
 import { listApps, listOrgs } from '@/src/dashboard-api';
-import { LAST_APP_COOKIE, appPath, readLastApp, resolveLanding } from '@/src/landing';
+import { LAST_APP_COOKIE, appPath, orgPath, readLastApp, resolveLanding } from '@/src/landing';
 
-/** Where a signed-in visitor belongs: their last app, their first app, or onboarding. */
+/** Where a signed-in visitor belongs: their last app, their first app, their first org, or onboarding. */
 export default async function DashboardIndex() {
   const session = await requireSession('/dashboard');
   // Every org/app read requires a verified email (403 otherwise), so an
@@ -37,5 +37,6 @@ export default async function DashboardIndex() {
     orgs: withApps,
     lastApp: readLastApp((await cookies()).get(LAST_APP_COOKIE)?.value),
   });
-  redirect(landing.kind === 'onboarding' ? '/onboarding' : appPath(landing.org, landing.app));
+  if (landing.kind === 'onboarding') redirect('/onboarding');
+  redirect(landing.kind === 'org' ? orgPath(landing.org) : appPath(landing.org, landing.app));
 }
