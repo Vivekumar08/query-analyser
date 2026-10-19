@@ -132,4 +132,18 @@ describe('compassCommand (real values from a decrypted EJSON sample)', () => {
     expect(parseRealSample('[1,2]')).toBeNull();
     expect(parseRealSample('null')).toBeNull();
   });
+
+  it('a field named __proto__ is quoted and kept, not dropped as a prototype setter', () => {
+    const cmd = compassCommand('users', parseRealSample('{"filter":{"__proto__":1,"a":2}}')!, { placeholder: false });
+    expect(cmd).toBe('db.getCollection("users").find({ "__proto__": 1, a: 2 }).explain("executionStats")');
+  });
+
+  it('a __proto__ sort field survives the string-sort conversion', () => {
+    const cmd = compassCommand('users', parseRealSample(JSON.stringify({ filter: {}, sort: '-__proto__ a' }))!, { placeholder: false });
+    expect(cmd).toContain('.sort({ "__proto__": -1, a: 1 })');
+  });
+
+  it('placeholder mode quotes a __proto__ key too', () => {
+    expect(placeholderize(JSON.parse('{"__proto__":"<string>","a":"<number>"}'))).toBe('{ "__proto__": <__proto__>, a: <number> }');
+  });
 });

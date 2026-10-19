@@ -36,7 +36,9 @@ export function defaultCollection(model: string): string {
   return `${m}s`;
 }
 
-const key = (k: string) => (IDENT.test(k) ? k : JSON.stringify(k));
+// `__proto__` is a valid identifier, but unquoted in an object literal it is
+// the prototype setter: mongosh would silently drop that condition.
+const key = (k: string) => (IDENT.test(k) && k !== '__proto__' ? k : JSON.stringify(k));
 
 function renderObject(entries: [string, string][]): string {
   return entries.length === 0 ? '{}' : `{ ${entries.map(([k, v]) => `${key(k)}: ${v}`).join(', ')} }`;
@@ -119,7 +121,8 @@ function renderReal(v: unknown): string {
 
 /** mongoose's string sort (`"-createdAt name"`) as a sort document. */
 function sortDocument(sort: string): Record<string, 1 | -1> {
-  const out: Record<string, 1 | -1> = {};
+  // Null prototype: on a plain object, out['__proto__'] = -1 hits the setter and the field is lost.
+  const out: Record<string, 1 | -1> = Object.create(null);
   for (const part of sort.trim().split(/\s+/).filter(Boolean)) {
     if (part.startsWith('-')) out[part.slice(1)] = -1;
     else out[part.replace(/^\+/, '')] = 1;
