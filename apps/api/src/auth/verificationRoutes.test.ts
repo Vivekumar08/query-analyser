@@ -193,3 +193,25 @@ describe('account enumeration', () => {
     app.mailDelayMs = 0;
   });
 });
+
+describe('Mist emails', () => {
+  it('verify and reset mails carry the designed html with the link and the real expiry', async () => {
+    const email = `mist-${Date.now()}@x.io`;
+    const before = app.sentMail.length;
+    await signup(email);
+    await waitForMail(app, before + 1);
+    const verify = app.sentMail.at(-1)!;
+    expect(verify.subject).toBe('Confirm your email');
+    expect(verify.html).toContain('query·analyser');
+    expect(verify.html).toMatch(/href="[^"]*\/verify\?token=[A-Za-z0-9_-]+"/);
+    expect(verify.html).toContain('expires in 24 hours');
+
+    await app.inject({ method: 'POST', url: '/v1/auth/password/request', payload: { email } });
+    await waitForMail(app, before + 2);
+    const reset = app.sentMail.at(-1)!;
+    expect(reset.subject).toBe('Reset your password');
+    expect(reset.html).toMatch(/href="[^"]*\/reset-password\?token=[A-Za-z0-9_-]+"/);
+    expect(reset.html).toContain('expires in 1 hour');
+    expect(reset.text).toContain('Your password stays the same');
+  });
+});

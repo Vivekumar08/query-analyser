@@ -1,6 +1,6 @@
 {
   "name": "@vivekumar08/query-analyser",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Find your slow MongoDB queries. One line of setup.",
   "license": "MIT",
   "type": "module",
