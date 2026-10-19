@@ -174,6 +174,18 @@ async function orgWithOwner(name = 'A') {
 }
 
 describe('invite email', () => {
+  it('sends the Mist email naming the inviter and the role', async () => {
+    const { o, org } = await orgWithOwner('Acme');
+    await app.prisma.user.update({ where: { id: o.id }, data: { name: 'Grace <Hopper>' } });
+    const res = await app.inject({ method: 'POST', remoteAddress: ip(), url: `/v1/orgs/${org.id}/invites`, headers: o.h, payload: { email: 'n@x.io', role: 'ADMIN' } });
+    expect(res.statusCode).toBe(201);
+    const mail = app.sentMail.at(-1)!;
+    expect(mail.html).toContain('query·analyser');
+    expect(mail.html).toContain('Grace &lt;Hopper&gt;');
+    expect(mail.html).not.toContain('Grace <Hopper>');
+    expect(mail.text).toContain('Grace <Hopper> invited you as Admin');
+  });
+
   it('mails the invitee one link carrying the returned token', async () => {
     const { o, org } = await orgWithOwner('Acme');
     const before = app.sentMail.length;

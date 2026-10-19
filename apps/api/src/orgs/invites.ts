@@ -3,9 +3,9 @@ import { z } from 'zod';
 import { createHash, randomBytes } from 'node:crypto';
 import { requireRole } from './rbac.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { inviteEmail } from '../mail/templates.js';
 
 const INVITE_TTL_MS = 7 * 24 * 3600 * 1000;
-const INVITE_TTL_DAYS = Math.round(INVITE_TTL_MS / (24 * 3600 * 1000));
 // Every invite now sends mail from the product's sender, so creation is
 // throttled like the other mail-sending routes (auth/routes.ts), and an org
 // can hold at most this many distinct pending invitees (Ruling C9-1).
@@ -13,13 +13,6 @@ const MAX_PENDING_INVITES = 50;
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
 const createSchema = z.object({ email: z.string().email().max(200), role: z.enum(ROLES) });
 const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
-
-// The org name is user-controlled and lands in an HTML body and a mail
-// header, so escape it for the former and flatten it for the latter (a CR/LF
-// in a subject is a header-injection vector even if nodemailer folds it).
-const escapeHtml = (s: string) =>
-  s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
-const oneLine = (s: string) => s.replace(/[\r\n]+/g, ' ');
 
 // Sentinel thrown inside the acceptance transaction when the invite was
 // consumed (or expired) between the pre-transaction read and the atomic
@@ -76,11 +69,18 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
     link.searchParams.set('token', token);
     const href = link.toString();
     try {
+      // The org and inviter names are user-controlled; the template escapes
+      // them for the html and flattens them for the subject header.
+      const inviter = await app.prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true, email: true } });
       await app.mailer.send({
         to: invite.email,
-        subject: oneLine(`You're invited to ${org.name} on Query Analyser`),
-        text: `You've been invited to join ${oneLine(org.name)} on Query Analyser.\n\nAccept the invite:\n\n${href}\n\nThis link expires in ${INVITE_TTL_DAYS} days.`,
-        html: `<p>You've been invited to join <strong>${escapeHtml(org.name)}</strong> on Query Analyser.</p><p><a href="${escapeHtml(href)}">Accept the invite</a></p><p>Or paste this link into your browser:<br>${escapeHtml(href)}</p><p>This link expires in ${INVITE_TTL_DAYS} days.</p>`,
+        ...inviteEmail({
+          href,
+          orgName: org.name,
+          inviterName: inviter?.name?.trim() || inviter?.email || 'A teammate',
+          role: invite.role,
+          ttlMs: INVITE_TTL_MS,
+        }),
       });
     } catch (err) {
       req.log.error({ err: err instanceof Error ? err.name : 'unknown' }, 'invite mail failed');

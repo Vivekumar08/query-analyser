@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { hashPassword, verifyPassword } from './password.js';
 import { issueRefreshToken, rotateRefreshToken, consumeRefreshToken, REFRESH_TTL_MS } from './tokens.js';
-import { issueVerificationToken, consumeVerificationToken } from './verification.js';
+import { issueVerificationToken, consumeVerificationToken, VERIFY_TTL_MS, RESET_TTL_MS } from './verification.js';
+import { verifyEmail, resetPasswordEmail } from '../mail/templates.js';
 
 const COOKIE = 'qa_refresh';
 
@@ -37,8 +38,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return accessToken;
   };
 
-  const verifyLink = (token: string) => `${app.config.WEB_ORIGIN}/verify?token=${token}`;
-  const resetLink = (token: string) => `${app.config.WEB_ORIGIN}/reset-password?token=${token}`;
+  const link = (path: string, token: string) => {
+    const url = new URL(path, app.config.WEB_ORIGIN);
+    url.searchParams.set('token', token);
+    return url.toString();
+  };
+  const verifyMail = (to: string, token: string) =>
+    ({ to, ...verifyEmail({ href: link('/verify', token), email: to, ttlMs: VERIFY_TTL_MS }) });
+  const resetMail = (to: string, token: string) =>
+    ({ to, ...resetPasswordEmail({ href: link('/reset-password', token), email: to, ttlMs: RESET_TTL_MS }) });
 
   // The limiter keys on IP only, so a shared egress address (an office, a
   // university, CGNAT) must not get locked out by a normal team signing up
@@ -63,11 +71,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     // token issuance is a DB write and is wrapped defensively all the same.
     try {
       const { token } = await issueVerificationToken(app.prisma, user.id, 'VERIFY');
-      await app.mailer.send({
-        to: email.toLowerCase(),
-        subject: 'Confirm your email',
-        text: `Confirm your email to finish setting up your account:\n\n${verifyLink(token)}\n\nThis link expires in 24 hours.`,
-      });
+      await app.mailer.send(verifyMail(email.toLowerCase(), token));
     } catch (err) {
       req.log.error({ err: err instanceof Error ? err.name : 'unknown' }, 'verification mail failed');
     }
@@ -131,11 +135,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       if (user.emailVerifiedAt) return reply.code(202).send({ status: 'already verified' });
 
       const { token } = await issueVerificationToken(app.prisma, user.id, 'VERIFY');
-      await app.mailer.send({
-        to: user.email,
-        subject: 'Confirm your email',
-        text: `Confirm your email to finish setting up your account:\n\n${verifyLink(token)}\n\nThis link expires in 24 hours.`,
-      });
+      await app.mailer.send(verifyMail(user.email, token));
       return reply.code(202).send({ status: 'sent' });
     },
   );
@@ -178,11 +178,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         if (!user) return;
 
         const { token } = await issueVerificationToken(app.prisma, user.id, 'RESET');
-        await app.mailer.send({
-          to: user.email,
-          subject: 'Reset your password',
-          text: `Reset your password:\n\n${resetLink(token)}\n\nThis link expires in 1 hour. If you did not ask for this, ignore it.`,
-        });
+        await app.mailer.send(resetMail(user.email, token));
       } catch (err) {
         req.log.error({ err: err instanceof Error ? err.name : 'unknown' }, 'password reset mail failed');
       }
