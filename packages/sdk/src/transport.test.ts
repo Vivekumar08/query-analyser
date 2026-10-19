@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { gunzipSync } from 'node:zlib';
-import { createTransport } from './transport.js';
+import { createTransport, planChunks, MAX_CHUNK_BYTES } from './transport.js';
 import type { IngestPayload } from './types.js';
 
 const payload: IngestPayload = {
@@ -204,5 +204,56 @@ describe('transport', () => {
     }
     expect(last).toBeLessThanOrEqual(60_000);
     expect(last).toBeGreaterThanOrEqual(48_000);
+  });
+});
+
+describe('planChunks', () => {
+  const { items: _items, ...base } = payload;
+  const item = (i: number, extra: Record<string, unknown> = {}) => ({ ...payload.items[0]!, hash: String(i).padStart(16, '0'), ...extra });
+  const bodySize = (chunk: number[], items: IngestPayload['items']) =>
+    Buffer.byteLength(JSON.stringify({ ...base, items: chunk.map((i) => items[i]) }));
+
+  it('caps each chunk at 1.5 MiB of JSON', () => {
+    expect(MAX_CHUNK_BYTES).toBe(1_572_864);
+  });
+
+  it('keeps a small batch in one chunk', () => {
+    const items = [item(1), item(2)];
+    expect(planChunks(base, items)).toEqual({ chunks: [[0, 1]], oversized: [] });
+  });
+
+  it('plans one empty chunk for an empty batch (a drop count still gets reported)', () => {
+    expect(planChunks(base, [])).toEqual({ chunks: [[]], oversized: [] });
+  });
+
+  it('splits so every chunk body is within the limit, exactly, and keeps every item once', () => {
+    const items = Array.from({ length: 300 }, (_, i) => item(i));
+    const max = 20_000;
+    const { chunks, oversized } = planChunks(base, items, max);
+    expect(oversized).toEqual([]);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.flat()).toEqual(items.map((_, i) => i));
+    for (const c of chunks) expect(bodySize(c, items)).toBeLessThanOrEqual(max);
+    // Greedy: adding the next item to any chunk but the last would overflow it.
+    for (let c = 0; c < chunks.length - 1; c++) {
+      const next = chunks[c + 1]![0]!;
+      expect(bodySize([...chunks[c]!, next], items)).toBeGreaterThan(max);
+    }
+  });
+
+  it('drops an over-limit item\'s encryptedSample first, and the item only if still too big', () => {
+    const env = { v: 1 as const, epk: 'E'.repeat(88), iv: 'I'.repeat(16), ct: 'C'.repeat(3_000) };
+    const items = [
+      item(0),
+      item(1, { encryptedSample: env }),            // fits only without its envelope
+      item(2, { sample: { s: 'x'.repeat(5_000) } }), // too big even bare
+      item(3),
+    ];
+    const max = Buffer.byteLength(JSON.stringify({ ...base, items: [item(1, { encryptedSample: null })] })) + 100;
+    const { chunks, oversized } = planChunks(base, items, max);
+    expect(oversized).toEqual([2]);
+    expect(items[1]!.encryptedSample).toBeNull();
+    expect(chunks.flat()).toEqual([0, 1, 3]);
+    for (const c of chunks) expect(bodySize(c, items)).toBeLessThanOrEqual(max);
   });
 });

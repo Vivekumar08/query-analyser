@@ -90,6 +90,60 @@ describe('Aggregator', () => {
     expect(agg.swap().items[0]!.sample).toEqual({ tag: 'slow-900' });
   });
 
+  it('keeps the serialised real sample of the slowest occurrence alongside the redacted one', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 120, { tag: '<string>' }, { filter: { tag: 'a' } });
+    agg.add(sigA, 900, { tag: '<string>' }, { filter: { tag: 'b' } });
+    agg.add(sigA, 200, { tag: '<string>' }, { filter: { tag: 'c' } });
+    expect(agg.swap().items[0]!.sampleText).toBe('{"filter":{"tag":"b"}}');
+  });
+
+  it('holds a bounded string, never the query object, so later mutation cannot change it', () => {
+    const agg = new Aggregator(10);
+    const stage = { $match: { region: 'IN' } };
+    const raw = { pipeline: [stage] };
+    agg.add(sigA, 500, null, raw);
+    stage.$match.region = 'MUTATED';
+    const item = agg.swap().items[0]!;
+    expect(typeof item.sampleText).toBe('string');
+    expect(item.sampleText).toBe('{"pipeline":[{"$match":{"region":"IN"}}]}');
+    expect(Object.values(item)).not.toContain(raw);
+  });
+
+  it('serialises only when an occurrence becomes the new slowest', () => {
+    const agg = new Aggregator(10);
+    let reads = 0;
+    const counted = (tag: string) => ({ get filter() { reads++; return { tag }; } });
+    agg.add(sigA, 900, null, counted('slow'));
+    agg.add(sigA, 100, null, counted('fast-1'));
+    agg.add(sigA, 200, null, counted('fast-2'));
+    expect(reads).toBe(1);
+    expect(agg.swap().items[0]!.sampleText).toBe('{"filter":{"tag":"slow"}}');
+  });
+
+  it('holds no sample text when nothing was captured, or when it is over the cap', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 120, { tag: '<string>' });
+    agg.add(sigB, 120, null, { filter: { big: 'x'.repeat(20_000) } });
+    for (const item of agg.swap().items) expect('sampleText' in item).toBe(false);
+  });
+
+  it('drops a stale sample text when a slower occurrence arrives without one', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 120, null, { filter: { tag: 'a' } });
+    agg.add(sigA, 900, null);
+    expect('sampleText' in agg.swap().items[0]!).toBe(false);
+  });
+
+  it('carries the sample text of the slower side through a merge', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 900, null, { filter: { tag: 'returned' } });
+    const returned = agg.swap().items;
+    agg.add(sigA, 100, null, { filter: { tag: 'new' } });
+    agg.merge(returned);
+    expect(agg.swap().items[0]!.sampleText).toBe('{"filter":{"tag":"returned"}}');
+  });
+
   it('merges a returned batch back, summing counts and adding histograms elementwise', () => {
     const agg = new Aggregator(10);
     agg.add(sigA, 120, null);

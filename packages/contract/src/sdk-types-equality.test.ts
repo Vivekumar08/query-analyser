@@ -1,7 +1,7 @@
 /**
  * The published SDK cannot import types from this (private, unpublished)
  * package — see `packages/sdk/src/types.ts` for why. Instead it carries its
- * own structural copy of the four wire shapes it needs. This file is the
+ * own structural copy of the wire shapes it needs. This file is the
  * guard against that copy silently drifting from the contract's definitions:
  * it is a compile-time-only check that the two sets of types are structurally
  * identical. It runs via this package's `typecheck` script (`tsc --noEmit`)
@@ -12,13 +12,21 @@
  * `test`) for this check to mean anything — a drifted type would otherwise
  * compile and ship with neither gate firing.
  */
-import type { OpClass, FilterShapeItem, SortKey, IngestItem, IngestPayload } from './runtime.js';
+import type {
+  OpClass,
+  FilterShapeItem,
+  SortKey,
+  IngestItem,
+  IngestPayload,
+  EncryptedSample,
+} from './runtime.js';
 import type {
   OpClass as SdkOpClass,
   FilterShapeItem as SdkFilterShapeItem,
   SortKey as SdkSortKey,
   IngestItem as SdkIngestItem,
   IngestPayload as SdkIngestPayload,
+  EncryptedSample as SdkEncryptedSample,
 } from '../../sdk/src/types.js';
 import { describe, it, expect } from 'vitest';
 
@@ -34,6 +42,11 @@ type _FilterShapeItem = AssertTrue<Equal<FilterShapeItem, SdkFilterShapeItem>>;
 type _SortKey = AssertTrue<Equal<SortKey, SdkSortKey>>;
 type _IngestItem = AssertTrue<Equal<IngestItem, SdkIngestItem>>;
 type _IngestPayload = AssertTrue<Equal<IngestPayload, SdkIngestPayload>>;
+type _EncryptedSample = AssertTrue<Equal<EncryptedSample, SdkEncryptedSample>>;
+// The optional envelope field must exist on the item (and so on the SDK copy).
+type _ItemCarriesEnvelope = AssertTrue<
+  Equal<IngestItem['encryptedSample'], EncryptedSample | null | undefined>
+>;
 
 describe('SDK wire-type copy stays identical to the contract', () => {
   it('compiles (the real assertion is the type-level check above)', () => {
