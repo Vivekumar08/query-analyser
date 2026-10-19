@@ -19,25 +19,33 @@ const lockUser = (tx: Prisma.TransactionClient, userId: string) =>
  *
  * With `expectedHash`, the write is a compare-and-swap: if the stored hash is
  * no longer the one the caller verified against (another change won the
- * race), nothing is written or revoked and this returns false.
+ * race), nothing is written, revoked or issued and this returns null.
+ *
+ * With `issueSession`, the caller's new refresh token is issued inside the
+ * same transaction, after the revocation and while the lock is still held.
+ * Issued after the commit instead, a later password writer (a reset confirm)
+ * could revoke everything in between and this stale token would land live.
  */
 async function replacePassword(
   prisma: PrismaClient,
   userId: string,
   passwordHash: string,
-  expectedHash?: string,
-): Promise<boolean> {
+  opts: { expectedHash?: string; issueSession?: boolean; beforeCommit?: (tx: Prisma.TransactionClient) => Promise<void> } = {},
+): Promise<{ refreshToken: string | null } | null> {
+  const { expectedHash, issueSession = false, beforeCommit } = opts;
   return prisma.$transaction(async (tx) => {
     await lockUser(tx, userId);
     const updated = await tx.user.updateMany({
       where: { id: userId, ...(expectedHash === undefined ? {} : { passwordHash: expectedHash }) },
       data: { passwordHash },
     });
-    if (updated.count === 0) return false;
+    if (updated.count === 0) return null;
     const now = new Date();
     await tx.refreshToken.updateMany({ where: { userId, consumedAt: null }, data: { consumedAt: now } });
     await tx.verificationToken.updateMany({ where: { userId, purpose: 'RESET', consumedAt: null }, data: { consumedAt: now } });
-    return true;
+    const refreshToken = issueSession ? (await issueRefreshToken(tx, userId)).token : null;
+    await beforeCommit?.(tx);
+    return { refreshToken };
   });
 }
 
@@ -76,6 +84,10 @@ const getDummyHash = async () => (dummyHash ??= await hashPassword('dummy-passwo
 export interface AuthRouteHooks {
   afterLoginVerify?: () => Promise<void>;
   afterPasswordVerify?: () => Promise<void>;
+  /** Last thing inside the password change's transaction, with the User lock held. */
+  beforePasswordCommit?: (tx: Prisma.TransactionClient) => Promise<void>;
+  /** Right after the password change's transaction has committed. */
+  afterPasswordCommit?: () => Promise<void>;
 }
 
 export async function authRoutes(app: FastifyInstance, opts: { hooks?: AuthRouteHooks } = {}): Promise<void> {
@@ -222,14 +234,16 @@ export async function authRoutes(app: FastifyInstance, opts: { hooks?: AuthRoute
 
       // Compare-and-swap on the hash just verified: a concurrent change that
       // committed first wins, and this one writes, revokes and issues nothing.
-      if (!(await replacePassword(app.prisma, user.id, await hashPassword(newPassword), user.passwordHash))) {
-        return reply.code(409).send({ error: 'password-changed' });
-      }
+      const changed = await replacePassword(app.prisma, user.id, await hashPassword(newPassword), {
+        expectedHash: user.passwordHash,
+        issueSession: true,
+        beforeCommit: hooks.beforePasswordCommit,
+      });
+      if (!changed?.refreshToken) return reply.code(409).send({ error: 'password-changed' });
+      await hooks.afterPasswordCommit?.();
 
-      // The fresh session is issued only after the revocation commits, so it
-      // is not caught by it.
-
-      const accessToken = await issue(reply, user.id);
+      setRefresh(reply, changed.refreshToken);
+      const accessToken = await reply.jwtSign({ sub: user.id });
       return reply.send({ accessToken, user: { id: user.id, email: user.email, name: user.name, isPlatformAdmin: user.isPlatformAdmin } });
     },
   );

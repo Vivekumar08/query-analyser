@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { rotateRefreshToken } from './tokens.js';
 import { issueVerificationToken } from './verification.js';
 import type { AuthRouteHooks } from './routes.js';
+import type { Prisma } from '../generated/prisma/client.js';
 
 // Test seams inside the auth routes. Tests set them; afterEach clears them.
 const hooks: AuthRouteHooks = {};
@@ -13,22 +14,24 @@ const hooks: AuthRouteHooks = {};
 let app: FastifyInstance;
 beforeAll(async () => { app = await buildApp({ logger: false, authHooks: hooks }); });
 beforeEach(async () => { await resetDb(app.prisma); });
-afterEach(() => { delete hooks.afterLoginVerify; delete hooks.afterPasswordVerify; });
+afterEach(() => { for (const k of Object.keys(hooks)) delete hooks[k as keyof AuthRouteHooks]; });
 afterAll(async () => { await app.close(); });
 
 /**
- * Resolves once `pending` has settled, or once some backend in this database
- * is waiting on a lock (i.e. `pending` is blocked behind a lock the caller
- * holds). A signal, not a timeout: no wall-clock guess about how long argon2
- * takes on this machine.
+ * Resolves once `pending` has settled, or once some backend is waiting on a
+ * lock held by `holder`'s backend (i.e. `pending` is blocked behind it). A
+ * signal, not a timeout: no wall-clock guess about how long argon2 takes on
+ * this machine, and no false "blocked" from an unrelated lock waiter.
  */
-async function settledOrBlocked(pending: Promise<unknown>): Promise<'settled' | 'blocked'> {
+async function settledOrBlocked(pending: Promise<unknown>, holder: Prisma.TransactionClient): Promise<'settled' | 'blocked'> {
+  const [me] = await holder.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+  const pid = me!.pid;
   let settled = false;
   pending.then(() => { settled = true; }, () => { settled = true; });
   const deadline = Date.now() + 30_000;
   while (!settled) {
     const [row] = await app.prisma.$queryRaw<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`;
     if (row!.n > 0) return 'blocked';
     if (Date.now() > deadline) throw new Error('neither settled nor blocked');
     await new Promise((r) => setTimeout(r, 5));
@@ -188,9 +191,9 @@ describe('POST /v1/me/password', () => {
     // the change has either finished (no lock: the bug) or is blocked behind
     // the rotation's User row lock (the fix).
     const rotated = await rotateRefreshToken(app.prisma, u.cookie, {
-      afterConsume: async () => {
+      afterConsume: async (tx) => {
         change = changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
-        await settledOrBlocked(change);
+        await settledOrBlocked(change, tx);
       },
     });
     const res = await change!;
@@ -239,7 +242,7 @@ describe('POST /v1/me/password', () => {
     await app.prisma.$transaction(async (tx) => {
       await tx.verificationToken.updateMany({ where: { userId: u.id, purpose: 'RESET', consumedAt: null }, data: { consumedAt: new Date() } });
       change = changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
-      expect(await settledOrBlocked(change)).toBe('blocked');
+      expect(await settledOrBlocked(change, tx)).toBe('blocked');
       await tx.verificationToken.create({
         data: { userId: u.id, purpose: 'RESET', tokenHash: randomBytes(32).toString('hex'), expiresAt: new Date(Date.now() + 3600_000) },
       });
@@ -268,6 +271,23 @@ describe('POST /v1/me/password', () => {
     expect((await refresh(cookieOf(second!))).statusCode).toBe(200);
     expect((await login('a@x.io', 'the-other-new-password-2')).statusCode).toBe(200);
     expect((await login('a@x.io', NEW_PASSWORD)).statusCode).toBe(401);
+  });
+
+  it('leaves no live session behind when a reset confirm lands right after the change commits', async () => {
+    const u = await user('a@x.io');
+    // Whoever holds the old password changes it; the account's owner then
+    // completes a reset in the moment right after that change commits.
+    hooks.afterPasswordCommit = async () => {
+      delete hooks.afterPasswordCommit;
+      const link = await issueVerificationToken(app.prisma, u.id, 'RESET');
+      const confirm = await app.inject({ method: 'POST', url: '/v1/auth/password/confirm', payload: { token: link.token, password: 'the-owners-new-password-3' } });
+      expect(confirm.statusCode).toBe(200);
+    };
+    const res = await changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+    expect(res.statusCode).toBe(200);
+    // The reset revoked every session, including the one the change issued.
+    expect(await app.prisma.refreshToken.count({ where: { userId: u.id, consumedAt: null } })).toBe(0);
+    expect((await refresh(cookieOf(res))).statusCode).toBe(401);
   });
 
   it('rate-limits to 10 a minute', async () => {
@@ -304,6 +324,27 @@ describe('POST /v1/auth/login vs a password change', () => {
     expect(res.cookies.find((c) => c.name === 'qa_refresh')).toBeUndefined();
     // only the change's own session is live
     expect(await app.prisma.refreshToken.count({ where: { userId: u.id, consumedAt: null } })).toBe(1);
+  });
+
+  it('issues nothing to a login that runs while the change is written but not yet committed', async () => {
+    const u = await user('a@x.io');
+    // The change has written the new hash and revoked every session but not
+    // committed. The login reads the hash in that moment: without the User
+    // lock it would see the old, committed one and mint a session that
+    // outlives the change.
+    let raced: Promise<{ statusCode: number; cookies: { name: string; value: string }[] }> | undefined;
+    hooks.beforePasswordCommit = async (tx) => {
+      delete hooks.beforePasswordCommit;
+      raced = login('a@x.io', PASSWORD);
+      await settledOrBlocked(raced, tx);
+    };
+    const change = await changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+    expect(change.statusCode).toBe(200);
+    const res = await raced!;
+    expect(res.statusCode).toBe(401);
+    expect(res.cookies.find((c) => c.name === 'qa_refresh')).toBeUndefined();
+    expect(await app.prisma.refreshToken.count({ where: { userId: u.id, consumedAt: null } })).toBe(1);
+    expect((await refresh(cookieOf(change))).statusCode).toBe(200);
   });
 });
 

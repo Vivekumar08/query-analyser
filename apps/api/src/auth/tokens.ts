@@ -26,7 +26,7 @@ export async function rotateRefreshToken(
   prisma: PrismaClient,
   token: string,
   /** @internal Test seam: runs between the consume and the successor insert. Never passed by a route. */
-  opts: { afterConsume?: () => Promise<void> } = {},
+  opts: { afterConsume?: (tx: Prisma.TransactionClient) => Promise<void> } = {},
 ): Promise<RotateResult> {
   const row = await prisma.refreshToken.findUnique({ where: { tokenHash: hashToken(token) } });
   if (!row) return 'invalid';
@@ -61,7 +61,7 @@ export async function rotateRefreshToken(
     // Atomic consume: only one concurrent caller wins.
     const consumed = await tx.refreshToken.updateMany({ where: { id: row.id, consumedAt: null }, data: { consumedAt: new Date() } });
     if (consumed.count === 0) return 'reused' as const;
-    await opts.afterConsume?.();
+    await opts.afterConsume?.(tx);
 
     const next = await issueRefreshToken(tx, row.userId, row.familyId);
     return { userId: row.userId, token: next.token, expiresAt: next.expiresAt };
