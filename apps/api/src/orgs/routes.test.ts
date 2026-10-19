@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import type { FastifyInstance } from 'fastify';
+import type { Prisma } from '../generated/prisma/client.js';
 
 let app: FastifyInstance;
 beforeAll(async () => { app = await buildApp({ logger: false }); });
@@ -185,5 +186,132 @@ describe('orgs', () => {
     const res = await app.inject({ method: 'PATCH', url: `/v1/orgs/${orgA.id}/members/${mb.id}`, headers: as(a.token), payload: { role: 'VIEWER' } });
     expect(res.statusCode).toBe(404);
     expect((await app.prisma.membership.findUniqueOrThrow({ where: { id: mb.id } })).role).toBe('OWNER');
+  });
+});
+
+/**
+ * Resolves once `pending` has settled, or once some backend is waiting on a
+ * lock held by `holder`'s backend. A signal, not a timeout (mirrors the
+ * helper in auth/me.test.ts).
+ */
+async function settledOrBlocked(pending: Promise<unknown>, holder: Prisma.TransactionClient): Promise<'settled' | 'blocked'> {
+  const [me] = await holder.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+  const pid = me!.pid;
+  let settled = false;
+  pending.then(() => { settled = true; }, () => { settled = true; });
+  const deadline = Date.now() + 30_000;
+  while (!settled) {
+    const [row] = await app.prisma.$queryRaw<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`;
+    if (row!.n > 0) return 'blocked';
+    if (Date.now() > deadline) throw new Error('neither settled nor blocked');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return 'settled';
+}
+
+describe('leave', () => {
+  const leave = (orgId: string, token: string) =>
+    app.inject({ method: 'DELETE', url: `/v1/orgs/${orgId}/membership`, headers: as(token) });
+
+  async function orgOwnedBy(token: string) {
+    return (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(token), payload: { name: 'A' } })).json() as { id: string };
+  }
+
+  it('a MEMBER or VIEWER leaves: 204, membership gone, the org then 404s for them', async () => {
+    const a = await user('a@x.io');
+    const org = await orgOwnedBy(a.token);
+    for (const [email, role] of [['m@x.io', 'MEMBER'], ['v@x.io', 'VIEWER']] as const) {
+      const u = await user(email);
+      await app.prisma.membership.create({ data: { userId: u.id, orgId: org.id, role } });
+
+      const res = await leave(org.id, u.token);
+      expect(res.statusCode).toBe(204);
+      expect(res.body).toBe('');
+      expect(await app.prisma.membership.findUnique({ where: { userId_orgId: { userId: u.id, orgId: org.id } } })).toBeNull();
+      expect((await app.inject({ method: 'GET', url: `/v1/orgs/${org.id}`, headers: as(u.token) })).statusCode).toBe(404);
+      expect((await leave(org.id, u.token)).statusCode).toBe(404);
+    }
+    // The owner is untouched.
+    expect(await app.prisma.membership.count({ where: { orgId: org.id } })).toBe(1);
+  });
+
+  it('the only OWNER cannot leave', async () => {
+    const a = await user('a@x.io');
+    const org = await orgOwnedBy(a.token);
+    // Other, non-owner members don't count towards keeping an owner.
+    const b = await user('b@x.io');
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'ADMIN' } });
+
+    const res = await leave(org.id, a.token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: 'organization must keep at least one owner' });
+    const still = await app.prisma.membership.findUnique({ where: { userId_orgId: { userId: a.id, orgId: org.id } } });
+    expect(still?.role).toBe('OWNER');
+  });
+
+  it('an OWNER can leave when another OWNER remains', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'OWNER' } });
+
+    expect((await leave(org.id, a.token)).statusCode).toBe(204);
+    const owners = await app.prisma.membership.findMany({ where: { orgId: org.id, role: 'OWNER' } });
+    expect(owners.map((m) => m.userId)).toEqual([b.id]);
+  });
+
+  it('404s a non-member and a nonexistent org alike', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+
+    const nonMember = await leave(org.id, b.token);
+    const nonexistent = await leave('00000000-0000-0000-0000-000000000000', b.token);
+    expect(nonMember.statusCode).toBe(404);
+    expect(nonexistent.statusCode).toBe(404);
+    expect(nonMember.json()).toEqual(nonexistent.json());
+    expect(await app.prisma.membership.count({ where: { orgId: org.id } })).toBe(1);
+  });
+
+  it('403s leaving a suspended org', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'MEMBER' } });
+    await app.prisma.organization.update({ where: { id: org.id }, data: { suspendedAt: new Date() } });
+
+    const res = await leave(org.id, b.token);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ error: 'organization suspended' });
+    expect(await app.prisma.membership.count({ where: { orgId: org.id } })).toBe(2);
+  });
+
+  it('two OWNERs leaving at once never leave the org ownerless', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'OWNER' } });
+
+    const [ra, rb] = await Promise.all([leave(org.id, a.token), leave(org.id, b.token)]);
+    expect([ra.statusCode, rb.statusCode].sort()).toEqual([204, 409]);
+    expect(await app.prisma.membership.count({ where: { orgId: org.id, role: 'OWNER' } })).toBe(1);
+  });
+
+  it('an OWNER leaving waits on the owner-row lock, then sees the other owner already gone', async () => {
+    // In-process Promise.all doesn't reliably interleave (see the demotion
+    // test above), so pin the lock directly: this transaction plays the
+    // other owner's concurrent leave, holding the OWNER rows.
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'OWNER' } });
+
+    let res: Promise<{ statusCode: number; json: () => unknown }> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${org.id} AND role = 'OWNER'::"Role" ORDER BY id FOR UPDATE`;
+      res = leave(org.id, b.token);
+      expect(await settledOrBlocked(res, tx)).toBe('blocked');
+      await tx.membership.delete({ where: { userId_orgId: { userId: a.id, orgId: org.id } } });
+    });
+    const done = await res!;
+    expect(done.statusCode).toBe(409);
+    expect(done.json()).toEqual({ error: 'organization must keep at least one owner' });
+    expect(await app.prisma.membership.count({ where: { orgId: org.id, role: 'OWNER' } })).toBe(1);
   });
 });

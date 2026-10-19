@@ -156,4 +156,35 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
       throw err;
     }
   });
+
+  // The caller leaves the org. Same last-owner guard and owner-row lock as
+  // member removal, so two owners leaving at once can't both succeed.
+  app.delete('/v1/orgs/:org/membership', { preHandler: [app.authenticate, app.requireVerified, requireRole('VIEWER')] }, async (req, reply) => {
+    const orgId = req.membership.orgId;
+
+    try {
+      const result = await app.prisma.$transaction(async (tx) => {
+        // Re-read inside the transaction: the preHandler's row may be stale.
+        const own = await tx.membership.findUnique({ where: { userId_orgId: { userId: req.user.id, orgId } } });
+        if (!own) return NOT_FOUND;
+
+        if (own.role === 'OWNER') {
+          await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${orgId} AND role = 'OWNER'::"Role" ORDER BY id FOR UPDATE`;
+          const ownerCount = await tx.membership.count({ where: { orgId, role: 'OWNER' } });
+          if (ownerCount <= 1) throw new LastOwnerError();
+        }
+
+        await tx.membership.delete({ where: { id: own.id } });
+        return 'ok' as const;
+      });
+
+      if (result === NOT_FOUND) return reply.code(404).send({ error: 'Not Found' });
+      return reply.code(204).send();
+    } catch (err) {
+      if (err instanceof LastOwnerError) {
+        return reply.code(409).send({ error: 'organization must keep at least one owner' });
+      }
+      throw err;
+    }
+  });
 }
