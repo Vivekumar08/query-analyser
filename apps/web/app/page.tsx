@@ -101,16 +101,20 @@ export default function Page() {
           </section>
         </FadeIn>
 
-        {/* Shapes, never values */}
+        {/* Shapes by default, values only with the key */}
         <FadeIn>
           <section className="grid items-center gap-8 pt-24 md:grid-cols-2">
             <div>
               <Eyebrow>What leaves your app</Eyebrow>
               <SectionHeading>
-                Shapes, <Accent>never values.</Accent>
+                Shapes by default. <Accent>Values only if you hold the key.</Accent>
               </SectionHeading>
               <p className="mt-4 max-w-md text-[15px] leading-relaxed text-muted-foreground">
-                Key names, operator classes, durations and counts. No documents, no IDs, no customer data. Ever.
+                Key names, operator classes, durations and counts. By default, no documents, no IDs, no customer data.
+              </p>
+              <p className="mt-3 max-w-md text-[15px] leading-relaxed text-muted-foreground">
+                Opt in to end-to-end encryption to see real values — encrypted on your server, decrypted only in your
+                browser. We can&apos;t read them.
               </p>
             </div>
             <GlassCard className="p-5 font-mono text-[12.5px] leading-relaxed">

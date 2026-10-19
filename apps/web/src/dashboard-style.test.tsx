@@ -30,8 +30,8 @@ describe('dashboard wears Mist', () => {
     expect(container.querySelector('.bg-chart-1')).not.toBeNull();
   });
 
-  it('no dashboard or onboarding text uses the chart periwinkle', () => {
-    for (const dir of ['components/dashboard', 'components/onboarding']) {
+  it('no dashboard, onboarding or settings text uses the chart periwinkle', () => {
+    for (const dir of ['components/dashboard', 'components/onboarding', 'components/settings']) {
       const abs = path.resolve(__dirname, '..', dir);
       for (const f of readdirSync(abs).filter((x) => x.endsWith('.tsx'))) {
         const src = readFileSync(path.join(abs, f), 'utf8');
@@ -41,7 +41,7 @@ describe('dashboard wears Mist', () => {
   });
 
   it('accent highlights in dashboard/onboarding use periwinkle tokens, not the ink primary', () => {
-    for (const f of ['components/dashboard/QueriesTable.tsx', 'components/onboarding/InstallStep.tsx', 'components/onboarding/OnboardingFlow.tsx']) {
+    for (const f of ['components/dashboard/QueriesTable.tsx', 'components/onboarding/InstallStep.tsx', 'components/onboarding/OnboardingFlow.tsx', 'components/settings/SampleKeySection.tsx', 'components/dashboard/CompassQuery.tsx', 'components/dashboard/RevealValues.tsx']) {
       const src = readFileSync(path.resolve(__dirname, '..', f), 'utf8');
       expect(src, f).not.toMatch(/\b(bg|border|text)-primary\b(?![-/])/);
     }

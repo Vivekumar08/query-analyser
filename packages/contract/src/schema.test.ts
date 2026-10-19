@@ -57,3 +57,41 @@ describe('ingestPayloadSchema', () => {
     expect(() => ingestPayloadSchema.parse({ ...payload, app: '' })).toThrow();
   });
 });
+
+describe('ingest item encryptedSample', () => {
+  const env = { v: 1, epk: 'B'.repeat(88), iv: 'A'.repeat(16), ct: 'C'.repeat(1000) };
+  const withSample = (encryptedSample: unknown) => ({ ...payload, items: [{ ...item, encryptedSample }] });
+
+  it('accepts an item with no encryptedSample at all', () => {
+    const parsed = ingestPayloadSchema.parse(payload);
+    expect('encryptedSample' in parsed.items[0]!).toBe(false);
+  });
+
+  it('accepts a null encryptedSample', () => {
+    expect(ingestPayloadSchema.parse(withSample(null)).items[0]!.encryptedSample).toBeNull();
+  });
+
+  it('accepts a well-formed envelope', () => {
+    expect(ingestPayloadSchema.parse(withSample(env)).items[0]!.encryptedSample).toEqual(env);
+  });
+
+  it('accepts a ct of exactly 24 000 chars', () => {
+    expect(() => ingestPayloadSchema.parse(withSample({ ...env, ct: 'C'.repeat(24_000) }))).not.toThrow();
+  });
+
+  it('rejects a ct over 24 000 chars', () => {
+    expect(() => ingestPayloadSchema.parse(withSample({ ...env, ct: 'C'.repeat(24_001) }))).toThrow();
+  });
+
+  it('rejects an epk over 200 chars', () => {
+    expect(() => ingestPayloadSchema.parse(withSample({ ...env, epk: 'B'.repeat(201) }))).toThrow();
+  });
+
+  it('rejects an iv over 32 chars', () => {
+    expect(() => ingestPayloadSchema.parse(withSample({ ...env, iv: 'A'.repeat(33) }))).toThrow();
+  });
+
+  it('rejects an envelope of another version', () => {
+    expect(() => ingestPayloadSchema.parse(withSample({ ...env, v: 2 }))).toThrow();
+  });
+});

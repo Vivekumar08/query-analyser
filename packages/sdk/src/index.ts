@@ -1,10 +1,10 @@
 import { hostname } from 'node:os';
 import { createRequire } from 'node:module';
-import { bucketOf } from '@query-analyser/contract/runtime';
-import type { IngestPayload } from './types.js';
-import { Aggregator } from './aggregator.js';
+import { bucketOf, encryptSample, importSamplePublicKey } from '@query-analyser/contract/runtime';
+import type { EncryptedSample, IngestItem, IngestPayload } from './types.js';
+import { Aggregator, type AggregatedItem } from './aggregator.js';
 import { installHooks, INSTALLED, type MongooseSchemaLike, type HookContext, type GetHookContext } from './hooks.js';
-import { createTransport } from './transport.js';
+import { createTransport, planChunks, MAX_CHUNK_BYTES } from './transport.js';
 
 // Minor fix 7: hand-typed and previously could drift from package.json.
 // `__SDK_VERSION__` is a build-time constant substituted both by tsup's
@@ -97,6 +97,52 @@ export interface InitOptions {
   mongoose?: MongooseLike;
   fetchImpl?: typeof fetch;
   onError?: (e: Error) => void;
+  /**
+   * Opt-in end-to-end encrypted real-value samples: the app's sample public
+   * key (base64 SPKI, P-256), typically `process.env.QA_SAMPLE_KEY`. When set,
+   * the slowest occurrence of each query shape is also sent encrypted to this
+   * key, so only someone with the app's passphrase can read its values. When
+   * unset (or empty), payloads are exactly as without this option.
+   */
+  sampleKey?: string;
+}
+
+// Distinct encryption-failure causes reported per analyser; past this, new
+// causes are dropped so a pathological stream of errors can't grow memory.
+const MAX_REPORTED_SAMPLE_ERRORS = 16;
+// Total `ct` characters of all envelopes in one flush (C5-2): ~1 MiB of
+// incompressible base64 keeps the body well under the ingest API's 2 MiB limit.
+// C5-3 amends C5-2: the budget is charged each envelope's full JSON length
+// (`,"encryptedSample":{"v":1,"epk":…,"iv":…,"ct":…}`), not just `ct`. The
+// body size itself is bounded separately by splitting into chunks.
+const MAX_ENVELOPE_JSON_CHARS_PER_FLUSH = 1_048_576;
+const ENVELOPE_KEY_JSON = ',"encryptedSample":';
+// Everything but `ct` in an envelope: a P-256 point (88 base64 chars), a
+// 12-byte IV (16), the keys and punctuation.
+const ENVELOPE_FIXED_JSON_CHARS =
+  ENVELOPE_KEY_JSON.length + JSON.stringify({ v: 1, epk: 'x'.repeat(88), iv: 'x'.repeat(16), ct: '' }).length;
+
+/**
+ * The wire form of a buffered item: exactly the IngestItem keys, in the
+ * order the payload has always used (so no-key payloads stay byte-identical).
+ */
+function toWireItem(item: AggregatedItem): IngestItem {
+  return {
+    signature: item.signature,
+    hash: item.hash,
+    model: item.model,
+    operation: item.operation,
+    filterShape: item.filterShape,
+    sortKeys: item.sortKeys,
+    stages: item.stages,
+    count: item.count,
+    totalMs: item.totalMs,
+    maxMs: item.maxMs,
+    lastMs: item.lastMs,
+    lastTs: item.lastTs,
+    hist: item.hist,
+    sample: item.sample,
+  };
 }
 
 export interface Analyser {
@@ -266,8 +312,88 @@ export function init(options: InitOptions): Analyser {
     onError,
   });
 
+  const reportSafely = (e: Error) => { try { onError(e); } catch { /* never throw from reporting */ } };
+
+  // Sample encryption. The key is validated asynchronously (Web Crypto has no
+  // sync import), so it starts 'pending': the hook already captures raw
+  // samples, and the first flush waits for the check before deciding. An
+  // invalid key is reported once and turns encryption off for good — samples
+  // serialised meanwhile are simply discarded, never sent.
+  const sampleKey = typeof options.sampleKey === 'string' && options.sampleKey !== '' ? options.sampleKey : undefined;
+  let sampleEncryption: 'off' | 'pending' | 'on' = sampleKey ? 'pending' : 'off';
+  const sampleKeyCheck: Promise<void> | null = sampleKey
+    ? Promise.resolve()
+      .then(() => importSamplePublicKey(sampleKey))
+      .then(
+        () => { sampleEncryption = 'on'; },
+        () => {
+          sampleEncryption = 'off';
+          reportSafely(new Error(
+            'query-analyser: sampleKey is not a valid sample public key (base64 SPKI, P-256); encrypted samples are off for this process',
+          ));
+        },
+      )
+    : null;
+  const reportedSampleErrors = new Set<string>();
+  const reportSampleError = (err: unknown) => {
+    const cause = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    if (reportedSampleErrors.has(cause) || reportedSampleErrors.size >= MAX_REPORTED_SAMPLE_ERRORS) return;
+    reportedSampleErrors.add(cause);
+    reportSafely(new Error(`query-analyser: could not encrypt a sample (${cause}); sending the item without it`));
+  };
+
+  const encryptSampleText = async (key: string, text: string): Promise<EncryptedSample | null> => {
+    try {
+      return await encryptSample(key, text);
+    } catch (err) {
+      reportSampleError(err);
+      return null;
+    }
+  };
+
+  // Buffered items -> wire items. `sampleText` never goes on the wire.
+  // Without encryption the wire items are exactly what they were before this
+  // feature (same keys, same order — no `encryptedSample` key at all).
+  // Built from an explicit allowlist of wire keys — never a rest spread of
+  // the buffered item — so in-memory-only fields (the plaintext `sampleText`)
+  // can never reach the wire, whatever is added to AggregatedItem later.
+  const withoutSampleText = (items: AggregatedItem[]): IngestItem[] => items.map(toWireItem);
+
+  // Ciphertext does not compress, and the ingest API rejects bodies over
+  // 2 MiB — which would drop the whole batch, timing data included. So the
+  // envelopes in one flush share a fixed budget; the slowest items get
+  // theirs first, and items past the budget send `encryptedSample: null`.
+  // Items are encrypted one at a time so the batch never monopolises the
+  // event loop.
+  const toEncryptedWireItems = async (items: AggregatedItem[]): Promise<IngestItem[]> => {
+    if (sampleKeyCheck) await sampleKeyCheck;
+    if (sampleEncryption !== 'on' || sampleKey === undefined) return withoutSampleText(items);
+    const envelopes = new Array<EncryptedSample | null>(items.length).fill(null);
+    const slowestFirst = items.map((_, i) => i).sort((a, b) => items[b]!.maxMs - items[a]!.maxMs);
+    let budget = MAX_ENVELOPE_JSON_CHARS_PER_FLUSH;
+    for (const i of slowestFirst) {
+      const text = items[i]!.sampleText;
+      if (text === undefined) continue;
+      // ct = base64(plaintext bytes + 16-byte GCM tag): known before encrypting.
+      const ctChars = Math.ceil((Buffer.byteLength(text, 'utf8') + 16) / 3) * 4;
+      if (ctChars + ENVELOPE_FIXED_JSON_CHARS > budget) continue;
+      const envelope = await encryptSampleText(sampleKey, text);
+      if (envelope) {
+        envelopes[i] = envelope;
+        budget -= ENVELOPE_KEY_JSON.length + JSON.stringify(envelope).length;
+      }
+    }
+    return items.map((item, i) => ({ ...toWireItem(item), encryptedSample: envelopes[i] ?? null }));
+  };
+
   let disabled = false;
-  const ctx = { aggregator, thresholdMs, onError, isDisabled: () => disabled };
+  const ctx: HookContext = {
+    aggregator,
+    thresholdMs,
+    onError,
+    isDisabled: () => disabled,
+    captureRawSample: () => sampleEncryption !== 'off',
+  };
   let installedModels = 0;
   let backoffUntil = 0;
   // Fix round 2: was a boolean `flushing` guard. That made a timer-driven
@@ -367,7 +493,7 @@ export function init(options: InitOptions): Analyser {
       const { items, dropped } = aggregator.swap();
       if (items.length === 0 && dropped === 0) return;
 
-      const payload: IngestPayload = {
+      const base: Omit<IngestPayload, 'items'> = {
         app: options.app,
         // Critical 2: `??` only falls through on null/undefined, so
         // `NODE_ENV=''` (a real thing some process managers set) sailed
@@ -380,16 +506,39 @@ export function init(options: InitOptions): Analyser {
         bucket: bucketOf(new Date()),
         thresholdMs,
         dropped,
-        items,
       };
+      // No sampleKey: stay fully synchronous up to transport.send(), as
+      // before this feature.
+      const wire = sampleKey === undefined ? withoutSampleText(items) : await toEncryptedWireItems(items);
 
-      const result = await transport.send(payload);
-      if (result.status === 'retry') {
-        backoffUntil = Date.now() + result.afterMs;
-        aggregator.merge(items);
-      } else if (result.status === 'disabled') {
-        disabled = true;
-        onError(new Error(result.reason));
+      // C5-3: the ingest API rejects bodies over 2 MiB (decompressed), and a
+      // rejected body is dropped whole. So one flush is POSTed as chunks of
+      // at most MAX_CHUNK_BYTES each; a small batch is still exactly one
+      // POST with the same payload as before.
+      const { chunks, oversized } = planChunks(base, wire);
+      if (oversized.length > 0) {
+        reportSafely(new Error(
+          `query-analyser: dropped ${oversized.length} item(s) too large for one ingest request (over ${MAX_CHUNK_BYTES} bytes of JSON)`,
+        ));
+      }
+      for (let c = 0; c < chunks.length; c++) {
+        const chunk = chunks[c]!;
+        // The drop count rides on the first chunk only, so it isn't counted twice.
+        const payload: IngestPayload = { ...base, dropped: c === 0 ? dropped : 0, items: chunk.map((i) => wire[i]!) };
+        const result = await transport.send(payload);
+        if (result.status === 'retry') {
+          // This chunk and every unsent one go back into the buffer (as the
+          // buffered items, sample text included) for the next flush; the
+          // chunks already accepted are not re-sent.
+          backoffUntil = Date.now() + result.afterMs;
+          aggregator.merge(chunks.slice(c).flat().map((i) => items[i]!));
+          break;
+        }
+        if (result.status === 'disabled') {
+          disabled = true;
+          onError(new Error(result.reason));
+          break;
+        }
       }
     } catch (err) {
       onError(err instanceof Error ? err : new Error(String(err)));

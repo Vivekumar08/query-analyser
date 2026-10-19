@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { PrismaClient } from '../db.js';
+import type { EncryptedSample } from '@query-analyser/contract';
 import { requireAppRole } from '../orgs/rbac.js';
 import { percentileFromHist, avgMs } from './percentile.js';
 
@@ -26,8 +27,10 @@ function isParsableDate(v: string): boolean {
 
 const isoDate = z.string().refine(isParsableDate, { message: 'invalid date' });
 
+const MAX_OFFSET = 10_000;
+
 /**
- * Covers all five documented query params on the ranked-list route. Every
+ * Covers all six documented query params on the ranked-list route. Every
  * field is a bare `z.string()` (or narrower), which is itself what rejects
  * a repeated param: Fastify's querystring parser turns `?model=a&model=b`
  * into `model: ['a', 'b']`, and `z.string()` fails on an array, so the
@@ -43,6 +46,13 @@ const listQuerySchema = z.object({
   // `^\d+$` admitted '0' (and '00'), which `clampLimit` then silently turned
   // into the default 50 — a caller asking for nothing got a full page.
   limit: z.string().regex(/^[1-9]\d*$/, { message: 'limit must be a positive integer' }).optional(),
+  // Integer 0-10 000. Digits-only (so '-1', '1.5', 'abc' and '' all 400) and
+  // at most five of them, then bounded; bare `z.string()` also rejects repeats.
+  offset: z
+    .string()
+    .regex(/^\d{1,5}$/, { message: 'offset must be an integer from 0 to 10000' })
+    .refine((v) => Number(v) <= MAX_OFFSET, { message: 'offset must be an integer from 0 to 10000' })
+    .optional(),
 });
 
 /** `from`/`to` only — the detail and series routes take no other filter. */
@@ -105,6 +115,8 @@ export interface RankParams {
   model: string | null;
   op: string | null;
   limit: number;
+  /** Rows skipped before `limit` is applied; rank order is `rank_key DESC, s.id ASC`. */
+  offset: number;
   /**
    * Which ranking the `LIMIT` is applied to. Only the three keys SQL can
    * compute are accepted here — `p95` is computed in TypeScript after the
@@ -154,8 +166,8 @@ export async function queryHourlyRanking(prisma: PrismaClient, p: RankParams): P
         AND (${p.model}::text IS NULL OR s.model = ${p.model})
         AND (${p.op}::text IS NULL OR s.operation = ${p.op})
       GROUP BY s.id, s.hash, s.signature, s.model, s.operation
-      ORDER BY rank_key DESC
-      LIMIT ${p.limit}
+      ORDER BY rank_key DESC, s.id ASC
+      LIMIT ${p.limit} OFFSET ${p.offset}
     )
     SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
            (
@@ -168,7 +180,7 @@ export async function queryHourlyRanking(prisma: PrismaClient, p: RankParams): P
              )
            ) AS hist
     FROM agg a
-    ORDER BY a.rank_key DESC
+    ORDER BY a.rank_key DESC, a.sig_id ASC
   `;
 }
 
@@ -192,8 +204,8 @@ export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Pr
         AND (${p.model}::text IS NULL OR s.model = ${p.model})
         AND (${p.op}::text IS NULL OR s.operation = ${p.op})
       GROUP BY s.id, s.hash, s.signature, s.model, s.operation
-      ORDER BY rank_key DESC
-      LIMIT ${p.limit}
+      ORDER BY rank_key DESC, s.id ASC
+      LIMIT ${p.limit} OFFSET ${p.offset}
     )
     SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
            (
@@ -206,7 +218,7 @@ export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Pr
              )
            ) AS hist
     FROM agg a
-    ORDER BY a.rank_key DESC
+    ORDER BY a.rank_key DESC, a.sig_id ASC
   `;
 }
 
@@ -278,6 +290,7 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
     if (!window) return reply.code(400).send({ error: 'from must not be after to' });
     const { from, to, grain } = window;
     const limit = clampLimit(q.limit);
+    const offset = q.offset ? Number(q.offset) : 0;
     const model = q.model ?? null;
     const op = q.op ?? null;
     const sort: SortKey = q.sort ?? 'wasted';
@@ -293,17 +306,22 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
       to,
       model,
       op,
-      limit,
+      // One extra row tells us whether another page exists without a COUNT(*).
+      limit: limit + 1,
+      offset,
       sort: exact ? sort : 'wasted',
     };
     const rows = grain === 'hourly' ? await queryHourlyRanking(app.prisma, params) : await queryDailyRanking(app.prisma, params);
 
-    const page = rows.map((r) => toItem({ ...r, hist: r.hist ?? new Array(HIST_LENGTH).fill(0) }));
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit).map((r) => toItem({ ...r, hist: r.hist ?? new Array(HIST_LENGTH).fill(0) }));
     const items = exact ? page : sortItems(page, sort);
 
     return {
       grain,
       limit,
+      offset,
+      hasMore,
       sort,
       sortExact: exact,
       ...(exact
@@ -350,6 +368,7 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
       p99: percentileFromHist(hist, maxMs, 0.99),
       hist,
       redactedSample: signature.redactedSample,
+      encryptedSample: signature.encryptedSample as EncryptedSample | null,
       advice: signature.advice,
     };
   });

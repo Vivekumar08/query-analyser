@@ -1,6 +1,6 @@
 import type { PercentileResult } from '@query-analyser/contract';
 import type { QueryRow } from './dashboard-types';
-import { filtersToSearch, PAGE_SIZE, type QueryFilters } from './filters';
+import { filtersToSearch, type QueryFilters } from './filters';
 import type { ApiResult } from './api';
 import { formatAvg, formatMs, toMs } from './format';
 
@@ -31,9 +31,9 @@ export function emptyKind(input: { rows: number; filtered: boolean }): 'none' | 
   return input.filtered ? 'no-match' : 'no-data';
 }
 
-/** Keeps the time range, drops model/op/sort/limit. */
+/** Keeps the time range, drops model/op/sort/page. */
 export function clearFiltersHref(base: string, f: QueryFilters): string {
-  const qs = filtersToSearch({ range: f.range, sort: 'wasted', limit: PAGE_SIZE });
+  const qs = filtersToSearch({ range: f.range, sort: 'wasted', page: 1 });
   return `${base}/queries${qs ? `?${qs}` : ''}`;
 }
 

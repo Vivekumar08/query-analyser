@@ -1,1 +1,7 @@
-{ "extends": "../../tsconfig.base.json", "include": ["src"] }
+{
+  "extends": "../../tsconfig.base.json",
+  // DOM supplies the Web Crypto types (CryptoKey, SubtleCrypto, btoa/atob) used
+  // by sample-crypto.ts. Runtime code only touches `globalThis.crypto`.
+  "compilerOptions": { "lib": ["ES2022", "DOM"] },
+  "include": ["src"]
+}

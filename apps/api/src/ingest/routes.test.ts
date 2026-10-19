@@ -5,16 +5,21 @@ import { resetDb } from '../test/db.js';
 import { generateKey } from './keys.js';
 import * as writer from './writer.js';
 import type { FastifyInstance } from 'fastify';
-import type { IngestPayload } from '@query-analyser/contract';
+import { encryptSample, generateSampleKeyPair, type IngestPayload } from '@query-analyser/contract';
 
 let app: FastifyInstance;
 beforeAll(async () => { app = await buildApp({ logger: false }); });
 beforeEach(async () => { await resetDb(app.prisma); });
 afterAll(async () => { await app.close(); });
 
-async function seedKey(opts: { suspended?: boolean; revoked?: boolean } = {}) {
+async function seedKey(opts: { suspended?: boolean; revoked?: boolean; samplePublicKey?: string } = {}) {
   const org = await app.prisma.organization.create({ data: { name: 'A', slug: 'a', suspendedAt: opts.suspended ? new Date() : null } });
-  const a = await app.prisma.app.create({ data: { orgId: org.id, name: 'web', env: 'prod' } });
+  const a = await app.prisma.app.create({
+    data: {
+      orgId: org.id, name: 'web', env: 'prod',
+      ...(opts.samplePublicKey ? { samplePublicKey: opts.samplePublicKey, sampleKeyWrapped: { v: 1 } } : {}),
+    },
+  });
   const k = generateKey();
   await app.prisma.ingestKey.create({ data: { appId: a.id, keyHash: k.hash, prefix: k.prefix, revokedAt: opts.revoked ? new Date() : null } });
   return { app: a, key: k.key };
@@ -149,6 +154,39 @@ describe('POST /v1/ingest', () => {
     expect(body).toEqual({ error: 'Internal Server Error' });
     expect(JSON.stringify(body)).not.toMatch(/constraint|QueryRollup|relation/i);
     spy.mockRestore();
+  });
+});
+
+describe('POST /v1/ingest — encrypted samples', () => {
+  async function withEnvelope(publicKey: string) {
+    const body = payload(1);
+    body.items[0]!.encryptedSample = await encryptSample(publicKey, '{"filter":{"email":"a@b.c"}}');
+    return body;
+  }
+
+  it('stores the envelope for an app with a sample key', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    const { app: a, key } = await seedKey({ samplePublicKey: publicKey });
+    const body = await withEnvelope(publicKey);
+    expect((await post(key, body)).statusCode).toBe(202);
+    const sig = await app.prisma.querySignature.findFirstOrThrow({ where: { appId: a.id } });
+    expect(sig.encryptedSample).toEqual(body.items[0]!.encryptedSample);
+  });
+
+  it('does not store the envelope for an app without a sample key', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    const { app: a, key } = await seedKey();
+    expect((await post(key, await withEnvelope(publicKey))).statusCode).toBe(202);
+    const sig = await app.prisma.querySignature.findFirstOrThrow({ where: { appId: a.id } });
+    expect(sig.encryptedSample).toBeNull();
+  });
+
+  it('400s an oversized envelope', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    const { key } = await seedKey({ samplePublicKey: publicKey });
+    const body = await withEnvelope(publicKey);
+    body.items[0]!.encryptedSample = { ...body.items[0]!.encryptedSample!, ct: 'A'.repeat(24_004) };
+    expect((await post(key, body)).statusCode).toBe(400);
   });
 });
 

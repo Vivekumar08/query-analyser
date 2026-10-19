@@ -56,12 +56,22 @@ describe('homepage', () => {
     expect(pricing.textContent).toContain('Team');
   });
 
-  it('shows shapes, never values', () => {
+  it('shows shapes by default, values only with the key', () => {
     const { container } = render(<Page />);
     expect(container.textContent).toContain("priya@shop.in");
     expect(container.textContent).toContain("'range'");
-    expect(screen.getByRole('heading', { name: /never values/i })).toBeTruthy();
+    const h = screen.getByRole('heading', { name: 'Shapes by default. Values only if you hold the key.' });
+    expect(within(h).getByText('Values only if you hold the key.').tagName).toBe('EM');
+    const section = h.closest('section')!;
+    expect(section.textContent).toMatch(/end-to-end encryption/i);
+    expect(section.textContent).toContain('decrypted only in your browser');
     expect(container.textContent).toContain('MIT');
+  });
+
+  it('no longer claims values never leave, absolutely', () => {
+    const { container } = render(<Page />);
+    expect(container.textContent).not.toMatch(/never values/i);
+    expect(container.textContent).not.toMatch(/no customer data\. Ever\./i);
   });
 
   it('renders everything visible under reduced motion', () => {

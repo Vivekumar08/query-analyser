@@ -1,6 +1,6 @@
 import { authedFetch, type ApiResult } from './api';
 import type {
-  AppDetail, AppSummary, OrgSummary, QueryDetail, QueryListResponse, SeriesResponse,
+  AppDetail, AppSummary, Member, OrgSummary, PendingInvite, QueryDetail, QueryListResponse, SampleKeyStatus, SeriesResponse,
 } from './dashboard-types';
 import type { Session } from './auth';
 
@@ -20,3 +20,10 @@ export const getQuery = (t: string, app: string, hash: string): Promise<ApiResul
   authedFetch(`/v1/apps/${e(app)}/queries/${e(hash)}`, t);
 export const getSeries = (t: string, app: string, hash: string, w: { from: string; to: string }): Promise<ApiResult<SeriesResponse>> =>
   authedFetch(`/v1/apps/${e(app)}/queries/${e(hash)}/series?${windowQuery(w)}`, t);
+export const getSampleKey = (t: string, app: string): Promise<ApiResult<SampleKeyStatus>> =>
+  authedFetch(`/v1/apps/${e(app)}/sample-key`, t);
+/** Org members and pending invites. Both need ADMIN; `orgId` is the org's id, not its slug. */
+export const listMembers = (t: string, orgId: string): Promise<ApiResult<Member[]>> =>
+  authedFetch(`/v1/orgs/${e(orgId)}/members`, t);
+export const listInvites = (t: string, orgId: string): Promise<ApiResult<PendingInvite[]>> =>
+  authedFetch(`/v1/orgs/${e(orgId)}/invites`, t);

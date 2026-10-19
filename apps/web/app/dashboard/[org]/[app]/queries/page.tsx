@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { listQueries } from '@/src/dashboard-api';
 import { getShellContext } from '@/src/shell-context';
-import { filtersToApiQuery, filtersToSearch, parseFilters, showMore, MAX_LIMIT, PAGE_SIZE } from '@/src/filters';
+import { filtersToApiQuery, filtersToSearch, optionsApiQuery, parseFilters } from '@/src/filters';
 import { clearFiltersHref, emptyKind, listOutcome, toRowsView } from '@/src/queries-view';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -11,6 +11,7 @@ import { RangeControl } from '@/components/dashboard/RangeControl';
 import { QueryFiltersBar } from '@/components/dashboard/QueryFilters';
 import { QueriesTable } from '@/components/dashboard/QueriesTable';
 import { QueriesEmpty } from '@/components/dashboard/EmptyState';
+import { Pagination } from '@/components/dashboard/Pagination';
 import { FadeIn } from '@/components/dashboard/FadeIn';
 
 const INSTALL_HREF = 'https://www.npmjs.com/package/@vivekumar08/query-analyser';
@@ -37,7 +38,7 @@ export default async function QueriesPage({
   if (outcome === 'error') throw new Error('Could not load queries');
 
   const filtered = filters.model !== undefined || filters.op !== undefined;
-  const { items, sortExact, sortNote } = res.ok ? res.data : { items: [], sortExact: true, sortNote: undefined };
+  const { items, sortExact, sortNote, hasMore } = res.ok ? res.data : { items: [], sortExact: true, sortNote: undefined, hasMore: false };
   const rows = toRowsView(items);
   const kind = emptyKind({ rows: rows.length, filtered });
 
@@ -45,13 +46,19 @@ export default async function QueriesPage({
   // rows are all one model/op, so one extra unfiltered call supplies the rest.
   let optionRows = items;
   if (filtered) {
-    const all = await listQueries(token, ctx.app.id, filtersToApiQuery({ range: filters.range, sort: 'wasted', limit: 500 }));
+    const all = await listQueries(token, ctx.app.id, optionsApiQuery(filters.range));
     if (all.ok) optionRows = all.data.items;
   }
   const models = [...new Set([...optionRows.map((r) => r.model), ...(filters.model ? [filters.model] : [])])].sort();
   const ops = [...new Set([...optionRows.map((r) => r.operation), ...(filters.op ? [filters.op] : [])])].sort();
-  const more = new URLSearchParams(search);
-  more.set('limit', String(filters.limit + PAGE_SIZE));
+  const pageHref = (p: number) => {
+    const q = new URLSearchParams(search);
+    if (p > 1) q.set('page', String(p));
+    else q.delete('page');
+    const qs = q.toString();
+    return `${base}/queries${qs ? `?${qs}` : ''}`;
+  };
+  const pastEnd = outcome === 'ok' && filters.page > 1 && rows.length === 0;
 
   return (
     <>
@@ -67,6 +74,11 @@ export default async function QueriesPage({
             <p className="font-medium">These filters aren&apos;t valid.</p>
             <Button asChild variant="outline"><Link href={clearFiltersHref(base, filters)}>Clear filters</Link></Button>
           </div>
+        ) : pastEnd ? (
+          <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed px-6 py-16 text-center">
+            <p className="font-medium">No more queries</p>
+            <Button asChild variant="outline"><Link href={pageHref(1)}>Back to page 1</Link></Button>
+          </div>
         ) : kind === 'none' ? (
           <Card className="overflow-hidden p-0">
             <QueriesTable base={base} search={search} rows={rows} />
@@ -74,13 +86,8 @@ export default async function QueriesPage({
         ) : (
           <QueriesEmpty kind={kind} clearHref={clearFiltersHref(base, filters)} installHref={INSTALL_HREF} />
         )}
-        {outcome === 'ok' && showMore(rows, filters.limit) === 'more' && (
-          <Button asChild variant="outline" className="self-center">
-            <Link href={`${base}/queries?${more.toString()}`} scroll={false}>Show more</Link>
-          </Button>
-        )}
-        {outcome === 'ok' && showMore(rows, filters.limit) === 'capped' && (
-          <p className="text-center text-sm text-muted-foreground">Showing the top {MAX_LIMIT}</p>
+        {outcome === 'ok' && kind === 'none' && (
+          <Pagination page={filters.page} hasMore={hasMore} hrefFor={pageHref} />
         )}
       </div>
       </FadeIn>

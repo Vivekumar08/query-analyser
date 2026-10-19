@@ -36,7 +36,9 @@ with a type-only sample: `{"filter":{"email":"<string>","total":{"$gte":"<number
 `update` and `sort` are included in the sample only when the query actually
 has one — a plain `find()` with no sort reports as
 `{"filter":{...}}`, not `{"filter":{...},"update":"<undefined>","sort":"<undefined>"}`.
-**No queried value ever leaves your process.** There is no option to turn that off.
+**By default, no queried value ever leaves your process.** The only exception is
+the opt-in `sampleKey` below, and even then the values are encrypted before they
+leave, so we cannot read them.
 
 Object *key* names are transmitted by design — they are what the index advice
 is computed from, and this applies to any object key in a filter, update or
@@ -45,6 +47,30 @@ of user-controlled data anywhere in one of those three — a filter key like
 `{ ['email_' + userInput]: 1 }`, or an update like `{ $set: { [userKey]: 1 } }`
 — that data becomes a key name and does leave your process. Do not put
 sensitive values in filter, update, or sort keys.
+
+## Real-value samples (opt-in, end-to-end encrypted)
+
+To paste the *exact* slow query into MongoDB Compass, turn on sample encryption
+for the app in the dashboard (Settings) and pass the public key it shows you:
+
+```js
+require('@vivekumar08/query-analyser').init({
+  apiKey: process.env.QA_KEY,
+  app: 'my-service',
+  sampleKey: process.env.QA_SAMPLE_KEY,
+});
+```
+
+- The slowest occurrence of each query shape is serialised (at most 16 KiB; larger
+  samples are skipped) and **encrypted on your server** to that public key before
+  it is sent.
+- Memory stays bounded: at most about 16 KiB of sample text per tracked shape,
+  for up to `maxSignatures` shapes, held until the next flush.
+- Only someone with your team's passphrase can decrypt it, in the browser. We
+  store only ciphertext and **cannot read your values**.
+- Without `sampleKey` (or with an empty one) nothing changes: payloads are exactly
+  as described above. An invalid key is reported once through `onError` and the
+  SDK carries on without samples.
 
 ## Options
 
@@ -60,11 +86,14 @@ sensitive values in filter, update, or sort keys.
 | `endpoint` | hosted ingest | override for self-hosted |
 | `mongoose` | auto-resolved | pass explicitly if resolution fails |
 | `onError` | logs to stderr | called with internal errors |
+| `sampleKey` | — | opt-in: app's sample public key; sends end-to-end encrypted real-value samples |
 
 ## Notes
 
 - Call `init()` anywhere. Models compiled before the call are instrumented too.
-- Nothing runs on the query path except a timestamp and a map write. No I/O.
+- Nothing runs on the query path except a timestamp and a map write (plus, with
+  `sampleKey`, a bounded 16 KiB serialisation when a query is the new slowest for
+  its shape; encryption happens later, at flush). No I/O.
 - If the endpoint is unreachable the SDK retries with backoff and then drops.
   Your queries are never affected.
 - `await require('@vivekumar08/query-analyser').shutdown()` drains the buffer

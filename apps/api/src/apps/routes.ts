@@ -3,11 +3,14 @@ import { z } from 'zod';
 import { requireRole, requireAppRole } from '../orgs/rbac.js';
 import { generateKey } from '../ingest/keys.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { sampleKeyRoutes } from './sample-key.js';
 
 const createSchema = z.object({ name: z.string().min(1).max(100), env: z.string().min(1).max(40) });
 const appSelect = { id: true, name: true, env: true, createdAt: true } as const;
 
 export async function appRoutes(app: FastifyInstance): Promise<void> {
+  await app.register(sampleKeyRoutes);
+
   app.get('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('VIEWER')] }, async (req) =>
     app.prisma.app.findMany({ where: { orgId: req.membership.orgId }, select: appSelect, orderBy: { createdAt: 'asc' } }));
 

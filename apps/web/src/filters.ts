@@ -3,7 +3,7 @@ import { getParam, getParams, parseRange, rangeToParams, rangeToWindow, type Ran
 export type SortKey = 'wasted' | 'count' | 'p95' | 'maxMs';
 const SORTS: SortKey[] = ['wasted', 'count', 'p95', 'maxMs'];
 export const PAGE_SIZE = 25;
-export const MAX_LIMIT = 500;
+export const MAX_LIMIT = 200;
 const MAX_VALUE_LEN = 200;
 
 /** First non-empty value of at most 200 chars, else undefined. */
@@ -18,17 +18,17 @@ export interface QueryFilters {
   model?: string;
   op?: string;
   sort: SortKey;
-  limit: number;
+  /** 1-based page of PAGE_SIZE rows. */
+  page: number;
 }
 
 type Params = URLSearchParams | Record<string, string | string[] | undefined>;
 
 export function parseFilters(p: Params): QueryFilters {
   const sort = getParam(p, 'sort');
-  const rawLimit = Number(getParam(p, 'limit'));
-  const limit = Number.isInteger(rawLimit) && rawLimit > 0
-    ? Math.min(MAX_LIMIT, Math.ceil(rawLimit / PAGE_SIZE) * PAGE_SIZE)
-    : PAGE_SIZE;
+  const rawPage = getParam(p, 'page');
+  const n = rawPage !== undefined && /^\d+$/.test(rawPage) ? Number(rawPage) : 1;
+  const page = Number.isSafeInteger(n) && n >= 1 ? n : 1;
   const model = firstValue(getParams(p, 'model'));
   const op = firstValue(getParams(p, 'op'));
   return {
@@ -36,7 +36,7 @@ export function parseFilters(p: Params): QueryFilters {
     ...(model !== undefined && { model }),
     ...(op !== undefined && { op }),
     sort: SORTS.includes(sort as SortKey) ? (sort as SortKey) : 'wasted',
-    limit,
+    page,
   };
 }
 
@@ -45,20 +45,20 @@ export function filtersToSearch(f: QueryFilters): string {
   if (f.model) s.set('model', f.model);
   if (f.op) s.set('op', f.op);
   if (f.sort !== 'wasted') s.set('sort', f.sort);
-  if (f.limit !== PAGE_SIZE) s.set('limit', String(f.limit));
+  if (f.page > 1) s.set('page', String(f.page));
   return s.toString();
 }
 
 export function filtersToApiQuery(f: QueryFilters, now: Date = new Date()): string {
   const { from, to } = rangeToWindow(f.range, now);
-  const s = new URLSearchParams({ from, to, sort: f.sort, limit: String(f.limit) });
+  const s = new URLSearchParams({ from, to, sort: f.sort, limit: String(PAGE_SIZE), offset: String((f.page - 1) * PAGE_SIZE) });
   if (f.model) s.set('model', f.model);
   if (f.op) s.set('op', f.op);
   return s.toString();
 }
 
-/** 'more' when a further page may exist, 'capped' at the hard row cap, else 'none'. */
-export function showMore(rows: readonly unknown[], limit: number): 'more' | 'capped' | 'none' {
-  if (rows.length !== limit) return 'none';
-  return limit < MAX_LIMIT ? 'more' : 'capped';
+/** Unfiltered top-by-wasted window used to fill the model/op dropdowns. */
+export function optionsApiQuery(range: RangeState, now: Date = new Date()): string {
+  const { from, to } = rangeToWindow(range, now);
+  return new URLSearchParams({ from, to, sort: 'wasted', limit: String(MAX_LIMIT) }).toString();
 }

@@ -34,6 +34,8 @@ export interface IngestItem {
   lastTs: number;
   hist: number[];
   sample: unknown | null;
+  /** Present only when the SDK was given a `sampleKey`; `null` when this item's sample was skipped. */
+  encryptedSample?: EncryptedSample | null;
 }
 
 export interface IngestPayload {
@@ -57,3 +59,7 @@ export function bucketOf(date: Date): string {
     p(date.getUTCHours())
   );
 }
+
+// End-to-end sample crypto (Web Crypto only, zero-dependency).
+export * from './sample-crypto.js';
+import type { EncryptedSample } from './sample-crypto.js';

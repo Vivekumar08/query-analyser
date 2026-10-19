@@ -24,7 +24,7 @@ export default async function AppShell({
       newAppHref={`/onboarding?org=${encodeURIComponent(org)}`}
     />
   );
-  const nav = <SidebarNav base={base} active="queries" />;
+  const nav = <SidebarNav base={base} />;
   const footer = (
     <div className="flex flex-col gap-2 text-sm">
       <span className="truncate text-muted-foreground">{session.user.email}</span>

@@ -3,16 +3,24 @@ import { createPrisma } from '../db.js';
 import { resetDb } from '../test/db.js';
 import { loadConfig } from '../config.js';
 import { writeBatch, bucketToDate } from './writer.js';
-import type { IngestPayload, IngestItem } from '@query-analyser/contract';
+import type { IngestPayload, IngestItem, EncryptedSample } from '@query-analyser/contract';
 
 const prisma = createPrisma(loadConfig().DATABASE_URL);
 beforeEach(async () => { await resetDb(prisma); });
 afterAll(async () => { await prisma.$disconnect(); });
 
-async function seedApp() {
+async function seedApp(opts: { sampleKey?: boolean } = {}) {
   const org = await prisma.organization.create({ data: { name: 'A', slug: 'a' } });
-  return prisma.app.create({ data: { orgId: org.id, name: 'web', env: 'prod' } });
+  return prisma.app.create({
+    data: {
+      orgId: org.id, name: 'web', env: 'prod',
+      // The writer only checks presence; the key's validity is the PUT route's job.
+      ...(opts.sampleKey ? { samplePublicKey: 'cHVibGlj', sampleKeyWrapped: { v: 1 } } : {}),
+    },
+  });
 }
+
+const envelope = (ct = 'Y2lwaGVydGV4dA=='): EncryptedSample => ({ v: 1, epk: 'ZXBr', iv: 'aXZpdml2aXZpdml2', ct });
 
 function item(over: Partial<IngestItem> = {}): IngestItem {
   return {
@@ -141,5 +149,49 @@ describe('writeBatch', () => {
     // row, so a bypassed or buggy validator still can't corrupt a rollup.
     const bad = item({ hist: [0, 1, 2, 3, 4, 5, 6] as unknown as number[] });
     await expect(writeBatch(prisma, app.id, payload([bad]))).rejects.toThrow(/hist_length_check/);
+  });
+
+  describe('encryptedSample', () => {
+    it('stores the envelope for an app with a sample key', async () => {
+      const app = await seedApp({ sampleKey: true });
+      await writeBatch(prisma, app.id, payload([item({ encryptedSample: envelope() })]));
+      const sig = await prisma.querySignature.findFirstOrThrow({ where: { appId: app.id } });
+      expect(sig.encryptedSample).toEqual(envelope());
+    });
+
+    it('drops the envelope for an app without a sample key', async () => {
+      const app = await seedApp();
+      await writeBatch(prisma, app.id, payload([item({ encryptedSample: envelope() })]));
+      const sig = await prisma.querySignature.findFirstOrThrow({ where: { appId: app.id } });
+      expect(sig.encryptedSample).toBeNull();
+      expect(sig.redactedSample).toEqual({ filter: { status: '<string>' } });
+    });
+
+    it('keeps the stored envelope when a later batch (or a later chunk of the same flush) carries none', async () => {
+      const app = await seedApp({ sampleKey: true });
+      await writeBatch(prisma, app.id, payload([item({ encryptedSample: envelope() })]));
+      await writeBatch(prisma, app.id, payload([item({ encryptedSample: null })]));
+      await writeBatch(prisma, app.id, payload([item()]));
+      const sig = await prisma.querySignature.findFirstOrThrow({ where: { appId: app.id } });
+      expect(sig.encryptedSample).toEqual(envelope());
+    });
+
+    it('replaces the stored envelope with a newer one', async () => {
+      const app = await seedApp({ sampleKey: true });
+      await writeBatch(prisma, app.id, payload([item({ encryptedSample: envelope('b2xk') })]));
+      await writeBatch(prisma, app.id, payload([item({ encryptedSample: envelope('bmV3') })]));
+      const sig = await prisma.querySignature.findFirstOrThrow({ where: { appId: app.id } });
+      expect(sig.encryptedSample).toEqual(envelope('bmV3'));
+    });
+
+    it('accumulates one signature split across separate requests of the same flush', async () => {
+      const app = await seedApp({ sampleKey: true });
+      await writeBatch(prisma, app.id, payload([item({ count: 2, totalMs: 300, encryptedSample: envelope() })]));
+      await writeBatch(prisma, app.id, payload([item({ count: 1, totalMs: 100, encryptedSample: null })]));
+      const sig = await prisma.querySignature.findFirstOrThrow({ where: { appId: app.id } });
+      const roll = await prisma.queryRollup.findFirstOrThrow({ where: { signatureId: sig.id } });
+      expect(roll.count).toBe(3);
+      expect(sig.encryptedSample).toEqual(envelope());
+    });
   });
 });

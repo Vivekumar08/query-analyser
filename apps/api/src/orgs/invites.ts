@@ -5,9 +5,21 @@ import { requireRole } from './rbac.js';
 import { Prisma } from '../generated/prisma/client.js';
 
 const INVITE_TTL_MS = 7 * 24 * 3600 * 1000;
+const INVITE_TTL_DAYS = Math.round(INVITE_TTL_MS / (24 * 3600 * 1000));
+// Every invite now sends mail from the product's sender, so creation is
+// throttled like the other mail-sending routes (auth/routes.ts), and an org
+// can hold at most this many distinct pending invitees (Ruling C9-1).
+const MAX_PENDING_INVITES = 50;
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
 const createSchema = z.object({ email: z.string().email().max(200), role: z.enum(ROLES) });
 const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
+
+// The org name is user-controlled and lands in an HTML body and a mail
+// header, so escape it for the former and flatten it for the latter (a CR/LF
+// in a subject is a header-injection vector even if nodemailer folds it).
+const escapeHtml = (s: string) =>
+  s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+const oneLine = (s: string) => s.replace(/[\r\n]+/g, ' ');
 
 // Sentinel thrown inside the acceptance transaction when the invite was
 // consumed (or expired) between the pre-transaction read and the atomic
@@ -16,7 +28,10 @@ const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
 class InviteGoneError extends Error {}
 
 export async function inviteRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/v1/orgs/:org/invites', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req, reply) => {
+  app.post('/v1/orgs/:org/invites', {
+    preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')],
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+  }, async (req, reply) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
     // Privilege-escalation gate: an ADMIN who could mint an OWNER invite
@@ -26,17 +41,51 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
     if (parsed.data.role === 'OWNER' && req.membership.role !== 'OWNER') {
       return reply.code(403).send({ error: 'only an owner can invite an owner' });
     }
+    const email = parsed.data.email.toLowerCase();
+    // Count distinct pending invitees, not rows: re-inviting an address that
+    // already has a pending invite adds a second row (unchanged behaviour)
+    // but no new invitee, so it is never refused by the cap. Check-then-insert
+    // can overshoot by a few under concurrent creates, which the rate limit
+    // above bounds; the cap is a mail-abuse brake, not an invariant.
+    const pending = { orgId: req.membership.orgId, acceptedAt: null, expiresAt: { gt: new Date() } };
+    const alreadyPending = await app.prisma.invite.findFirst({ where: { ...pending, email }, select: { id: true } });
+    if (!alreadyPending) {
+      const invitees = await app.prisma.invite.findMany({ where: pending, distinct: ['email'], select: { email: true } });
+      if (invitees.length >= MAX_PENDING_INVITES) {
+        return reply.code(409).send({ error: 'Too many pending invites — revoke some first.' });
+      }
+    }
     const token = randomBytes(32).toString('base64url');
     const row = await app.prisma.invite.create({
       data: {
         orgId: req.membership.orgId,
-        email: parsed.data.email.toLowerCase(),
+        email,
         role: parsed.data.role,
         tokenHash: hashToken(token),
         expiresAt: new Date(Date.now() + INVITE_TTL_MS),
       },
-      select: { id: true, email: true, role: true, expiresAt: true },
+      select: { id: true, email: true, role: true, expiresAt: true, org: { select: { name: true } } },
     });
+    const { org, ...invite } = row;
+
+    // A mail failure must never fail the invite: the admin still gets the
+    // token below and can copy the link by hand. `mailer.send` swallows SMTP
+    // errors itself, but guard anyway, and log only the error's name — the
+    // message could quote the link, and the link carries the token.
+    const link = new URL('/invite', app.config.WEB_ORIGIN);
+    link.searchParams.set('token', token);
+    const href = link.toString();
+    try {
+      await app.mailer.send({
+        to: invite.email,
+        subject: oneLine(`You're invited to ${org.name} on Query Analyser`),
+        text: `You've been invited to join ${oneLine(org.name)} on Query Analyser.\n\nAccept the invite:\n\n${href}\n\nThis link expires in ${INVITE_TTL_DAYS} days.`,
+        html: `<p>You've been invited to join <strong>${escapeHtml(org.name)}</strong> on Query Analyser.</p><p><a href="${escapeHtml(href)}">Accept the invite</a></p><p>Or paste this link into your browser:<br>${escapeHtml(href)}</p><p>This link expires in ${INVITE_TTL_DAYS} days.</p>`,
+      });
+    } catch (err) {
+      req.log.error({ err: err instanceof Error ? err.name : 'unknown' }, 'invite mail failed');
+    }
+
     // The token is a bearer credential for org membership — return it
     // exactly once, here, and never again (the list route below never
     // selects tokenHash). The accept route below carries this same token in
@@ -44,7 +93,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
     // otherwise log verbatim on every hit (including failed attempts); that
     // is redacted centrally in `buildApp` (see `reqSerializer` in app.ts),
     // not here.
-    return reply.code(201).send({ ...row, token });
+    return reply.code(201).send({ ...invite, token });
   });
 
   app.get('/v1/orgs/:org/invites', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req) =>
@@ -53,6 +102,19 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
       select: { id: true, email: true, role: true, expiresAt: true, createdAt: true },
       orderBy: { createdAt: 'desc' },
     }));
+
+  // Revoking deletes the row, so the accept route sees a revoked token as
+  // unknown (404). Only a still-pending invite in *this* org can be revoked;
+  // another org's, an accepted or an expired one all 404 alike, so ids from
+  // elsewhere can't be probed.
+  app.delete('/v1/orgs/:org/invites/:id', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { count } = await app.prisma.invite.deleteMany({
+      where: { id, orgId: req.membership.orgId, acceptedAt: null, expiresAt: { gt: new Date() } },
+    });
+    if (count === 0) return reply.code(404).send({ error: 'Not Found' });
+    return reply.code(204).send();
+  });
 
   // A URL token must never reach a mutation without being resolved and
   // gated first: we look the invite up by its hash before doing anything

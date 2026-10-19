@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { gunzipSync } from 'node:zlib';
 import mongoose from 'mongoose';
+// Test-only: the contract is a dev dependency, used here to make a recipient
+// key pair and to decrypt what the SDK sent.
+import { generateSampleKeyPair, decryptSample } from '@query-analyser/contract/runtime';
 import { init, shutdown } from './index.js';
 import { buildSignature, type SignatureResult } from './signature.js';
+import { MAX_CHUNK_BYTES } from './transport.js';
 
 afterEach(async () => { await shutdown(); });
 
@@ -15,8 +20,9 @@ const okFetch = () => Promise.resolve(new Response('{}', { status: 202 }));
  */
 type Seedable = {
   _aggregator: {
-    add(sig: SignatureResult, ms: number, sample: unknown): void;
+    add(sig: SignatureResult, ms: number, sample: unknown, rawSample?: unknown): void;
     swap(): { items: unknown[]; dropped: number };
+    merge(items: unknown[]): void;
     size: number;
   };
 };
@@ -371,5 +377,301 @@ describe('init', () => {
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string };
     const { SDK_VERSION } = await import('./index.js');
     expect(SDK_VERSION).toBe(pkg.version);
+  });
+});
+
+/** The JSON text of the n-th request body, gunzipped when the transport compressed it. */
+function bodyText(fetchImpl: { mock: { calls: unknown[][] } }, n = 0): string {
+  const init = fetchImpl.mock.calls[n]![1] as RequestInit;
+  const gz = (init.headers as Record<string, string>)['Content-Encoding'] === 'gzip';
+  return gz ? gunzipSync(init.body as Buffer).toString('utf8') : String(init.body);
+}
+
+const WIRE_ITEM_KEYS = [
+  'signature', 'hash', 'model', 'operation', 'filterShape', 'sortKeys', 'stages',
+  'count', 'totalMs', 'maxMs', 'lastMs', 'lastTs', 'hist', 'sample',
+];
+
+describe('encrypted samples', () => {
+  const sigFor = (key: string) => buildSignature({ model: 'M', operation: 'find', filter: { [key]: 1 } });
+
+  it('without sampleKey the payload has no encryptedSample key and never the raw values', async () => {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl });
+    const agg = (a as unknown as Seedable)._aggregator;
+    agg.add(sigFor('email'), 150, { filter: { email: '<string>' } }, { filter: { email: 'ana@secret.test' } });
+    await a.flush();
+
+    const text = bodyText(fetchImpl);
+    expect(text).not.toContain('encryptedSample');
+    expect(text).not.toContain('sampleText');
+    expect(text).not.toContain('ana@secret.test');
+    const sent = JSON.parse(text) as { items: Record<string, unknown>[] };
+    expect(Object.keys(sent.items[0]!)).toEqual(WIRE_ITEM_KEYS);
+  });
+
+  it('with sampleKey it sends an envelope that decrypts to the slowest call\'s real filter', async () => {
+    const { publicKey, privateKey } = await generateSampleKeyPair();
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError, sampleKey: publicKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const sig = sigFor('email');
+    agg.add(sig, 150, { filter: { email: '<string>' } }, { filter: { email: 'fast@secret.test' } });
+    agg.add(sig, 900, { filter: { email: '<string>' } }, { filter: { email: 'slow@secret.test' } });
+    await a.flush();
+
+    const text = bodyText(fetchImpl);
+    expect(text).not.toContain('secret.test');
+    expect(text).not.toContain('sampleText');
+    const sent = JSON.parse(text) as { items: { sample: unknown; encryptedSample: Parameters<typeof decryptSample>[1] }[] };
+    const item = sent.items[0]!;
+    expect(item.sample).toEqual({ filter: { email: '<string>' } });
+    expect(item.encryptedSample).toMatchObject({ v: 1 });
+    const plain = await decryptSample(privateKey, item.encryptedSample);
+    expect(JSON.parse(plain)).toEqual({ filter: { email: 'slow@secret.test' } });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('skips (null) a sample whose serialised form is over 16 KiB, without an error', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError, sampleKey: publicKey });
+    (a as unknown as Seedable)._aggregator.add(sigFor('big'), 150, null, { filter: { big: 'x'.repeat(20_000) } });
+    await a.flush();
+
+    const sent = JSON.parse(bodyText(fetchImpl)) as { items: { encryptedSample: unknown }[] };
+    expect(sent.items[0]!.encryptedSample).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('on an encryption failure reports onError once and still sends the batch with encryptedSample: null', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError, sampleKey: publicKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const encrypt = vi.spyOn(globalThis.crypto.subtle, 'encrypt').mockRejectedValue(new Error('gcm exploded'));
+    try {
+      agg.add(sigFor('a'), 150, null, { filter: { a: 1 } });
+      agg.add(sigFor('b'), 150, null, { filter: { b: 2 } });
+      await a.flush();
+      agg.add(sigFor('c'), 150, null, { filter: { c: 3 } });
+      await a.flush();
+    } finally {
+      encrypt.mockRestore();
+    }
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const first = JSON.parse(bodyText(fetchImpl, 0)) as { items: { encryptedSample: unknown }[] };
+    expect(first.items).toHaveLength(2);
+    expect(first.items.map((i) => i.encryptedSample)).toEqual([null, null]);
+    const second = JSON.parse(bodyText(fetchImpl, 1)) as { items: { encryptedSample: unknown }[] };
+    expect(second.items[0]!.encryptedSample).toBeNull();
+    // One distinct cause, reported once across both flushes.
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]![0] as Error).message).toMatch(/gcm exploded/);
+  });
+
+  it('an invalid sampleKey reports onError once and runs without encryption', async () => {
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError, sampleKey: 'not-a-real-key' });
+    const agg = (a as unknown as Seedable)._aggregator;
+    agg.add(sigFor('a'), 150, null, { filter: { a: 'ana@secret.test' } });
+    await a.flush();
+    agg.add(sigFor('b'), 150, null, { filter: { b: 'ana@secret.test' } });
+    await a.flush();
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]![0] as Error).message).toMatch(/sampleKey/);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    for (const n of [0, 1]) {
+      const text = bodyText(fetchImpl, n);
+      expect(text).not.toContain('encryptedSample');
+      expect(text).not.toContain('secret.test');
+    }
+  });
+
+  it('sends only IngestItem keys and never the plaintext, with and without sampleKey', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    for (const sampleKey of [undefined, publicKey]) {
+      const fetchImpl = vi.fn(okFetch);
+      const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {}, sampleKey });
+      (a as unknown as Seedable)._aggregator.add(sigFor('email'), 150, { filter: { email: '<string>' } }, { filter: { email: 'ana@secret.test' } });
+      await a.flush();
+      const text = bodyText(fetchImpl);
+      expect(text).not.toContain('ana@secret.test');
+      expect(text).not.toContain('sampleText');
+      const sent = JSON.parse(text) as { items: Record<string, unknown>[] };
+      const allowed = sampleKey ? [...WIRE_ITEM_KEYS, 'encryptedSample'] : WIRE_ITEM_KEYS;
+      for (const item of sent.items) expect(Object.keys(item)).toEqual(allowed);
+      await shutdown();
+    }
+  });
+
+  it('on retry re-encrypts from the stored string (fresh envelope, same plaintext)', async () => {
+    const { publicKey, privateKey } = await generateSampleKeyPair();
+    let calls = 0;
+    const fetchImpl = vi.fn(async (_u: Parameters<typeof fetch>[0], _i?: Parameters<typeof fetch>[1]) => {
+      calls++;
+      return calls === 1 ? new Response('unavailable', { status: 503 }) : new Response('{}', { status: 202 });
+    });
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {}, sampleKey: publicKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const raw = { filter: { email: 'retry@secret.test' } };
+    agg.add(sigFor('email'), 300, null, raw);
+    await a.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // The merged-back item holds the bounded string, not the filter object.
+    const held = agg.swap().items as { sampleText?: unknown }[];
+    expect(held).toHaveLength(1);
+    expect(held[0]!.sampleText).toBe('{"filter":{"email":"retry@secret.test"}}');
+    expect(Object.values(held[0]!)).not.toContain(raw);
+    agg.merge(held);
+
+    await a.shutdown();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    type Sent = { items: { encryptedSample: Parameters<typeof decryptSample>[1] }[] };
+    const first = JSON.parse(bodyText(fetchImpl, 0)) as Sent;
+    const second = JSON.parse(bodyText(fetchImpl, 1)) as Sent;
+    expect(second.items).toHaveLength(1);
+    expect(second.items[0]!.encryptedSample.epk).not.toBe(first.items[0]!.encryptedSample.epk);
+    expect(JSON.parse(await decryptSample(privateKey, second.items[0]!.encryptedSample))).toEqual(raw);
+  });
+
+  it('caps the envelopes in one flush so 150 x 16 KiB samples stay under the 2 MiB body limit', async () => {
+    const { publicKey } = await generateSampleKeyPair();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {}, sampleKey: publicKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    for (let i = 0; i < 150; i++) {
+      agg.add(sigFor(`k${i}`), 100 + i, null, { filter: { v: String(i).padEnd(16_300, 'x') } });
+    }
+    await a.flush();
+
+    const text = bodyText(fetchImpl);
+    expect(Buffer.byteLength(text)).toBeLessThan(2 * 1024 * 1024);
+    const sent = JSON.parse(text) as { items: { maxMs: number; encryptedSample: { ct: string } | null }[] };
+    expect(sent.items).toHaveLength(150);
+    const withEnvelope = sent.items.filter((i) => i.encryptedSample !== null);
+    expect(withEnvelope.length).toBeGreaterThan(0);
+    expect(withEnvelope.length).toBeLessThan(150);
+    expect(withEnvelope.reduce((n, i) => n + i.encryptedSample!.ct.length, 0)).toBeLessThanOrEqual(1_048_576);
+    // The slowest items get the budget first.
+    const minWith = Math.min(...withEnvelope.map((i) => i.maxMs));
+    const maxWithout = Math.max(...sent.items.filter((i) => i.encryptedSample === null).map((i) => i.maxMs));
+    expect(minWith).toBeGreaterThan(maxWithout);
+  });
+
+  it('never makes init() throw, whatever the sampleKey', async () => {
+    for (const sampleKey of ['', '!!!', 'A'.repeat(10_000)]) {
+      expect(() => init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError: () => {}, sampleKey })).not.toThrow();
+      await shutdown();
+    }
+  });
+});
+
+describe('chunked flushes', () => {
+  // A realistic, wide signature: long key names make each item ~400 B.
+  const wideSig = (i: number) => buildSignature({
+    model: 'Order', operation: 'find',
+    filter: Object.fromEntries(Array.from({ length: 8 }, (_, k) => [`customer_profile_field_${k}_${i}`, 1])),
+  });
+  type Sent = { dropped: number; items: { hash: string; encryptedSample?: unknown }[] };
+  const allBodies = (fetchImpl: { mock: { calls: unknown[][] } }) =>
+    fetchImpl.mock.calls.map((_, n) => bodyText(fetchImpl, n));
+
+  async function flushMany(sampleKey: string | undefined, count: number) {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {}, sampleKey });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const hashes: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const sig = wideSig(i);
+      hashes.push(sig.hash);
+      agg.add(sig, 150, { filter: { email: '<string>' } }, { filter: { email: `user${i}@secret.test`, n: i } });
+    }
+    await a.flush();
+    return { fetchImpl, hashes };
+  }
+
+  for (const withKey of [true, false]) {
+    it(`5000 signatures ${withKey ? 'with' : 'without'} a key: every POST body is within the chunk limit and every item is delivered once`, async () => {
+      const sampleKey = withKey ? (await generateSampleKeyPair()).publicKey : undefined;
+      const { fetchImpl, hashes } = await flushMany(sampleKey, 5000);
+      const bodies = allBodies(fetchImpl);
+      expect(bodies.length).toBeGreaterThan(1);
+      for (const b of bodies) expect(Buffer.byteLength(b)).toBeLessThanOrEqual(MAX_CHUNK_BYTES);
+      const delivered = bodies.flatMap((b) => (JSON.parse(b) as Sent).items.map((i) => i.hash));
+      expect(delivered.length).toBe(5000);
+      expect(new Set(delivered)).toEqual(new Set(hashes));
+      if (withKey) {
+        const envelopes = bodies.flatMap((b) => (JSON.parse(b) as Sent).items.filter((i) => i.encryptedSample));
+        expect(envelopes.length).toBeGreaterThan(0);
+      } else {
+        for (const b of bodies) expect(b).not.toContain('encryptedSample');
+      }
+    }, 60_000);
+  }
+
+  it('retries only the failed chunk: chunk 1 is never sent twice', async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn(async (_u: Parameters<typeof fetch>[0], _i?: Parameters<typeof fetch>[1]) => {
+      calls++;
+      return calls === 2 ? new Response('unavailable', { status: 503 }) : new Response('{}', { status: 202 });
+    });
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError: () => {} });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const hashes: string[] = [];
+    for (let i = 0; i < 5000; i++) {
+      const sig = wideSig(i);
+      hashes.push(sig.hash);
+      agg.add(sig, 150, { filter: { email: '<string>' } });
+    }
+    await a.flush();
+    const sentInFlush = fetchImpl.mock.calls.length;
+    expect(sentInFlush).toBe(2); // chunk 1 ok, chunk 2 failed -> stop and back off
+
+    await a.shutdown();          // resets backoff and drains the merged-back remainder
+    const bodies = allBodies(fetchImpl);
+    const okBodies = bodies.filter((_, n) => n !== 1);
+    const delivered = okBodies.flatMap((b) => (JSON.parse(b) as Sent).items.map((i) => i.hash));
+    expect(delivered.length).toBe(5000);
+    expect(new Set(delivered)).toEqual(new Set(hashes));
+  }, 60_000);
+
+  it('without a key, a small batch is exactly one POST with the same payload as before', async () => {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, env: 'test' });
+    const sig = wideSig(1);
+    (a as unknown as Seedable)._aggregator.add(sig, 150, { filter: { a: '<number>' } });
+    await a.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const text = bodyText(fetchImpl);
+    const sent = JSON.parse(text) as Record<string, unknown> & { items: Record<string, unknown>[] };
+    expect(Object.keys(sent)).toEqual(['app', 'env', 'host', 'sdkVersion', 'bucket', 'thresholdMs', 'dropped', 'items']);
+    expect(sent.items).toHaveLength(1);
+    expect(Object.keys(sent.items[0]!)).toEqual(WIRE_ITEM_KEYS);
+    expect(sent.items[0]).toMatchObject({ hash: sig.hash, signature: sig.signature, count: 1, maxMs: 150, sample: { filter: { a: '<number>' } } });
+    expect(text).toBe(JSON.stringify(sent));
+  });
+
+  it('drops (and reports) a single item too big for any chunk, delivering the rest', async () => {
+    const onError = vi.fn();
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError });
+    const agg = (a as unknown as Seedable)._aggregator;
+    const small = wideSig(1);
+    agg.add(small, 150, null);
+    agg.add(wideSig(2), 150, { blob: 'x'.repeat(MAX_CHUNK_BYTES) });
+    await a.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(bodyText(fetchImpl)) as Sent;
+    expect(sent.items.map((i) => i.hash)).toEqual([small.hash]);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0]![0] as Error).message).toMatch(/too large/);
   });
 });

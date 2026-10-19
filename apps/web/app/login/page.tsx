@@ -16,6 +16,9 @@ export default async function LoginPage({
   // a value that re-parses on THIS origin, which is exactly what safeNext
   // guarantees. Do not "simplify" this to a prefix check.
   const target = safeNext(next, 'https://x.invalid', '/dashboard');
+  // A new user who arrived with a `next` (an invite link, typically) keeps it through signup.
+  const carried = safeNext(next, 'https://x.invalid', '');
+  const signupHref = carried ? `/signup?next=${encodeURIComponent(carried)}` : '/signup';
 
   return (
     <AuthShell
@@ -23,7 +26,7 @@ export default async function LoginPage({
       footer={
         <>
           <Link href="/forgot-password" className="font-medium text-accent-text underline underline-offset-4">Forgot password?</Link>
-          <p>No account? <Link href="/signup" className="font-medium text-accent-text underline underline-offset-4">Create one</Link></p>
+          <p>No account? <Link href={signupHref} className="font-medium text-accent-text underline underline-offset-4">Create one</Link></p>
         </>
       }
     >

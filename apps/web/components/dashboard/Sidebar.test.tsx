@@ -1,18 +1,52 @@
 // @vitest-environment jsdom
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
-import { SidebarNav } from './Sidebar';
+
+const nav = vi.hoisted(() => ({ pathname: '/dashboard/acme/a1/queries' }));
+vi.mock('next/navigation', () => ({ usePathname: () => nav.pathname }));
+
+import { Sidebar, SidebarNav } from './Sidebar';
 
 afterEach(cleanup);
 
 describe('SidebarNav', () => {
-  it('Queries is a link; C2 pages are disabled with a Soon badge', () => {
-    render(<SidebarNav base="/dashboard/acme/a1" active="queries" />);
+  it('Queries and Settings are links; the other C2 pages are disabled with a Soon badge', () => {
+    render(<SidebarNav base="/dashboard/acme/a1" />);
     expect(screen.getByRole('link', { name: /queries/i }).getAttribute('href')).toBe('/dashboard/acme/a1/queries');
-    for (const name of ['Overview', 'Alerts', 'Settings']) {
+    expect(screen.getByRole('link', { name: /settings/i }).getAttribute('href')).toBe('/dashboard/acme/a1/settings');
+    for (const name of ['Overview', 'Alerts']) {
       expect(screen.queryByRole('link', { name: new RegExp(name, 'i') })).toBeNull();
       expect(screen.getByText(name).closest('[aria-disabled="true"]')).toBeTruthy();
     }
-    expect(screen.getAllByText('Soon')).toHaveLength(3);
+    expect(screen.getAllByText('Soon')).toHaveLength(2);
+  });
+
+  it('marks the current page', () => {
+    nav.pathname = '/dashboard/acme/a1/queries/h1';
+    const { rerender } = render(<SidebarNav base="/dashboard/acme/a1" />);
+    expect(screen.getByRole('link', { name: /queries/i }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('link', { name: /settings/i }).getAttribute('aria-current')).toBeNull();
+    nav.pathname = '/dashboard/acme/a1/settings';
+    rerender(<SidebarNav base="/dashboard/acme/a1" />);
+    expect(screen.getByRole('link', { name: /settings/i }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('link', { name: /queries/i }).getAttribute('aria-current')).toBeNull();
+  });
+});
+
+describe('Sidebar', () => {
+  it('sidebar is pinned', () => {
+    const { container } = render(
+      <Sidebar
+        switcher={<span>switch</span>}
+        nav={<SidebarNav base="/dashboard/acme/a1" />}
+        footer={<span>foot</span>}
+      />,
+    );
+    const aside = container.querySelector('aside');
+    expect(aside).toBeTruthy();
+    const classes = aside!.className.split(/\s+/);
+    expect(classes).toEqual(expect.arrayContaining(['sticky', 'top-0', 'h-dvh']));
+    const navWrapper = aside!.querySelector('nav')!.parentElement!;
+    expect(navWrapper.className.split(/\s+/)).toContain('overflow-y-auto');
   });
 });

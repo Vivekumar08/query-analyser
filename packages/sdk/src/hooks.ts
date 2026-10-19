@@ -14,6 +14,13 @@ export interface HookContext {
   thresholdMs: number;
   onError: (e: Error) => void;
   isDisabled: () => boolean;
+  /**
+   * True while sample encryption is on. The hook then also hands the raw
+   * sample input to the aggregator, which serialises it (bounded, 16 KiB)
+   * only if this occurrence is the new slowest, and never keeps the object.
+   * Encryption happens later, in the flush.
+   */
+  captureRawSample?: () => boolean;
 }
 
 /** Minimal structural type so the SDK never imports mongoose at runtime. */
@@ -112,7 +119,7 @@ export function installHooks(schema: MongooseSchemaLike, getCtx: GetHookContext)
         ? { pipeline }
         : { filter, ...(update !== undefined ? { update } : {}), ...(sort !== undefined ? { sort } : {}) };
       const sample = redact(sampleInput);
-      ctx.aggregator.add(sig, duration, sample);
+      ctx.aggregator.add(sig, duration, sample, ctx.captureRawSample?.() ? sampleInput : undefined);
     } catch (err) {
       ctx.onError(err instanceof Error ? err : new Error(String(err)));
     }
