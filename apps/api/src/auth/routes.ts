@@ -150,11 +150,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({ error: 'new password must differ from the current one' });
       }
 
+      // A missing row means a deleted account holding a still-valid access
+      // token: treat it as signed out, as GET /v1/me does. Nothing to
+      // enumerate here, since the caller already proved who they were.
       const user = await app.prisma.user.findUnique({ where: { id: req.user.id } });
-      // Same response, same argon2 cost, whether the account still exists or
-      // not (a deleted user holding a still-valid access token).
-      const ok = await verifyPassword(user?.passwordHash ?? (await getDummyHash()), currentPassword);
-      if (!user || !ok) return reply.code(403).send({ error: 'wrong-password' });
+      if (!user) return reply.code(401).send({ error: 'unauthorized' });
+      // argon2.verify compares in constant time.
+      if (!(await verifyPassword(user.passwordHash, currentPassword))) {
+        return reply.code(403).send({ error: 'wrong-password' });
+      }
 
       // Store the new hash and revoke every refresh token in one transaction:
       // no window where the new password is live but old sessions can still

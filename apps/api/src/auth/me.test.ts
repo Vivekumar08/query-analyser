@@ -136,6 +136,22 @@ describe('POST /v1/me/password', () => {
     expect((await login('a@x.io', PASSWORD)).statusCode).toBe(401);
   });
 
+  it('401s a still-valid access token whose user row was deleted, and changes no password', async () => {
+    const gone = await user('gone@x.io');
+    const bystander = await user('b@x.io');
+    const before = await app.prisma.user.findUniqueOrThrow({ where: { id: bystander.id }, select: { passwordHash: true } });
+    await app.prisma.refreshToken.deleteMany({ where: { userId: gone.id } });
+    await app.prisma.user.delete({ where: { id: gone.id } });
+
+    const res = await changePassword(gone.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: 'unauthorized' });
+    expect(res.cookies.find((c) => c.name === 'qa_refresh')).toBeUndefined();
+    const after = await app.prisma.user.findUniqueOrThrow({ where: { id: bystander.id }, select: { passwordHash: true } });
+    expect(after.passwordHash).toBe(before.passwordHash);
+    expect(await app.prisma.refreshToken.count({ where: { userId: gone.id } })).toBe(0);
+  });
+
   it('rate-limits to 10 a minute', async () => {
     const u = await user('a@x.io');
     const addr = '10.9.9.9';
