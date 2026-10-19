@@ -3,10 +3,12 @@
 import { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
+import { ContinueToInviteLink, usePendingInvite } from './ContinueToInvite';
 
 export function VerifyClient({ token }: { token: string }) {
   const [state, setState] = useState<'pending' | 'done' | 'failed' | 'offline'>('pending');
   const pathname = usePathname();
+  const invite = usePendingInvite();
 
   useEffect(() => {
     let cancelled = false;
@@ -37,6 +39,8 @@ export function VerifyClient({ token }: { token: string }) {
     return (
       <>
         <p className="text-foreground">Your email is confirmed.</p>
+        {/* A new user who signed up from an invite: lead them back to it, not into creating their own workspace. */}
+        {invite && <ContinueToInviteLink path={invite} />}
         <Link href="/dashboard" className="font-medium text-accent-text underline underline-offset-4">Go to your dashboard</Link>
       </>
     );

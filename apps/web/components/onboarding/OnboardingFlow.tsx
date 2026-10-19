@@ -8,6 +8,7 @@ import { VerifyStep } from './VerifyStep';
 import { OrgStep } from './OrgStep';
 import { AppStep } from './AppStep';
 import { InstallStep } from './InstallStep';
+import { ContinueToInviteLink, usePendingInvite } from '@/app/_components/ContinueToInvite';
 
 type Step = 'verify' | 'org' | 'app' | 'install';
 const STEPS: { id: Step; label: string }[] = [
@@ -24,6 +25,7 @@ export function OnboardingFlow({ start, email }: { start: OnboardingStart; email
   const [key, setKey] = useState<string | null>(null);
   const [keyError, setKeyError] = useState<'forbidden' | 'failed' | null>(null);
   const index = STEPS.findIndex((s) => s.id === step);
+  const invite = usePendingInvite();
 
   return (
     <>
@@ -40,7 +42,15 @@ export function OnboardingFlow({ start, email }: { start: OnboardingStart; email
           </li>
         ))}
       </ol>
-      <section>
+      <section className="flex flex-col gap-6">
+        {invite && (
+          // Signed up from an invite: joining that team is what they came for,
+          // not creating a workspace of their own.
+          <div className="flex flex-col gap-3 rounded-xl border border-border p-4 text-sm">
+            <p>You were invited to a team. Join it instead of creating your own workspace.</p>
+            <ContinueToInviteLink path={invite} />
+          </div>
+        )}
         {step === 'verify' && <VerifyStep email={email} />}
         {step === 'org' && <OrgStep onCreated={(slug) => { setOrg(slug); setStep('app'); }} />}
         {step === 'app' && org && (

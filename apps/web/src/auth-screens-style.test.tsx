@@ -27,8 +27,8 @@ describe('auth screens wear Mist', () => {
     expectMist(/sign in/i);
   });
 
-  it('signup', () => {
-    render(<SignupPage />);
+  it('signup', async () => {
+    render(await SignupPage({ searchParams: Promise.resolve({}) }));
     expectMist(/create account|sign up/i);
   });
 

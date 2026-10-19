@@ -68,7 +68,8 @@ independently. The mobile sheet is unchanged.
     - session-gated (a signed-out visitor goes through login and comes back);
     - scrubs the token from the URL after mount, like `/verify`;
     - accepts via BFF, then sends the user to `/dashboard`;
-    - shows clear messages for expired or used invites (410), the wrong email (403) and already being a member (409).
+    - shows clear messages for expired or used invites (410), the wrong email (403) and already being a member (409);
+    - keeps a new invitee on the invite: /login "Create one" carries `next` (through `safeNext`) to /signup and on after signup. Because the verify link opens in a new tab, the page also stores `{path, savedAt}` under localStorage `qa:pendingInvite` (7-day expiry; cleared on accept and on 404/410/409/wrong-email 403, kept while the email is unverified), and /verify success and onboarding offer "Continue to your invite".
 
 ## 4. Real-value samples (end-to-end encrypted)
 

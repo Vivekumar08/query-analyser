@@ -27,7 +27,13 @@ export async function POST(request: Request): Promise<Response> {
     case 404:
     case 410: return jsonError(GONE, 410);
     case 403:
-      if (res.code === 'email_not_verified') return jsonError('Confirm your email address first, then open the invite link again.', 403);
+      if (res.code === 'email_not_verified') {
+        // The code tells the invite page to keep the pending invite for after verification.
+        return NextResponse.json(
+          { error: 'Confirm your email address first, then open the invite link again.', code: 'email_not_verified' },
+          { status: 403, headers: NO_STORE },
+        );
+      }
       if (res.error === 'organization suspended') return jsonError("This workspace is suspended and can't take new members.", 403);
       return jsonError('This invite was sent to a different email address.', 403);
     case 409: return jsonError("You're already a member.", 409);

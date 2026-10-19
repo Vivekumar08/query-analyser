@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { clearPendingInvite, savePendingInvite } from '@/src/pending-invite';
 
 type State =
   | { kind: 'pending' }
@@ -12,6 +13,9 @@ type State =
   | { kind: 'failed'; message: string };
 
 const GENERIC = 'Something went wrong. Please try again.';
+const isFinal = (status: number, code: string | undefined) =>
+  status === 400 || status === 404 || status === 409 || status === 410 || (status === 403 && code !== 'email_not_verified');
+
 const LINK_CLASS = 'font-medium text-accent-text underline underline-offset-4';
 
 /**
@@ -20,6 +24,10 @@ const LINK_CLASS = 'font-medium text-accent-text underline underline-offset-4';
  * at once, and POSTed exactly once (the ref survives React StrictMode's
  * mount → unmount → mount, which would otherwise send it twice and turn the
  * second attempt into a confusing "already used").
+ *
+ * The path is also remembered (src/pending-invite.ts) before the scrub, so a
+ * new user who signs up and verifies in another tab can be led back here. It
+ * is forgotten once the invite is accepted or can never be accepted.
  */
 export function AcceptInviteClient() {
   const router = useRouter();
@@ -31,6 +39,7 @@ export function AcceptInviteClient() {
     started.current = true;
 
     const token = new URLSearchParams(window.location.search).get('token');
+    if (token) savePendingInvite(`/invite?token=${encodeURIComponent(token)}`);
     // A plain History API call, like /verify: out of history and any Referer
     // before anything else happens.
     window.history.replaceState(null, '', window.location.pathname);
@@ -46,6 +55,7 @@ export function AcceptInviteClient() {
     })
       .then(async (res) => {
         if (res.ok) {
+          clearPendingInvite();
           setState({ kind: 'done' });
           router.replace('/dashboard');
           return;
@@ -55,7 +65,11 @@ export function AcceptInviteClient() {
           window.location.assign(`/api/auth/refresh?next=${encodeURIComponent(`/invite?token=${encodeURIComponent(token)}`)}`);
           return;
         }
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+        // Keep it only while the invite can still succeed: an unverified
+        // email (verify, then continue) or a transient failure. Gone, wrong
+        // email, suspended, already a member or a malformed link are final.
+        if (isFinal(res.status, data.code)) clearPendingInvite();
         setState({ kind: 'failed', message: data.error ?? GENERIC });
       })
       // A thrown fetch never reached the server: say so, not "expired".

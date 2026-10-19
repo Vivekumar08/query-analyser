@@ -7,6 +7,10 @@ const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.
 vi.mock('next/navigation', () => ({ useRouter: () => router }));
 
 import { AcceptInviteClient } from '@/app/_components/AcceptInviteClient';
+import { PENDING_INVITE_KEY } from '@/src/pending-invite';
+import { installJsdomLocalStorage } from '@/src/jsdom-storage';
+
+installJsdomLocalStorage();
 
 let fetchMock: ReturnType<typeof vi.fn>;
 const reply = (status: number, body?: unknown) => ({ ok: status < 300, status, json: async () => body ?? {} });
@@ -17,6 +21,7 @@ beforeEach(() => {
   fetchMock = vi.fn().mockResolvedValue(reply(200, { orgId: 'org1', role: 'MEMBER' }));
   vi.stubGlobal('fetch', fetchMock);
   window.history.replaceState(null, '', '/invite?token=tOk_en-1');
+  localStorage.clear();
 });
 afterEach(() => {
   cleanup();
@@ -78,5 +83,60 @@ describe('AcceptInviteClient', () => {
     fetchMock.mockReturnValue(new Promise(() => {}));
     render(<AcceptInviteClient />);
     expect(screen.getByRole('status').textContent).toMatch(/Joining/);
+  });
+
+  describe('pending invite (survives signup and the verify-email hop)', () => {
+    const stored = () => {
+      const raw = localStorage.getItem(PENDING_INVITE_KEY);
+      return raw === null ? null : (JSON.parse(raw) as { path: string; savedAt: number });
+    };
+
+    it('is saved before the URL is scrubbed', () => {
+      fetchMock.mockReturnValue(new Promise(() => {}));
+      let atScrub: ReturnType<typeof stored> = null;
+      vi.spyOn(window.history, 'replaceState').mockImplementation(() => { atScrub = stored(); });
+      render(<AcceptInviteClient />);
+      expect(atScrub).toMatchObject({ path: '/invite?token=tOk_en-1' });
+      expect(typeof atScrub!.savedAt).toBe('number');
+    });
+
+    it('is cleared once the invite is accepted', async () => {
+      render(<AcceptInviteClient />);
+      await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard'));
+      expect(stored()).toBeNull();
+    });
+
+    it.each([
+      [410, 'This invite has expired or was already used.', undefined],
+      [404, 'This invite has expired or was already used.', undefined],
+      [403, 'This invite was sent to a different email address.', undefined],
+      [409, "You're already a member.", undefined],
+    ])('is cleared on a terminal %i', async (status, error, code) => {
+      fetchMock.mockResolvedValue(reply(status, { error, code }));
+      render(<AcceptInviteClient />);
+      await screen.findByRole('alert');
+      expect(stored()).toBeNull();
+    });
+
+    it('is kept when the email is not verified yet, so /verify can lead back here', async () => {
+      fetchMock.mockResolvedValue(reply(403, { error: 'Confirm your email address first, then open the invite link again.', code: 'email_not_verified' }));
+      render(<AcceptInviteClient />);
+      await screen.findByRole('alert');
+      expect(stored()).toMatchObject({ path: '/invite?token=tOk_en-1' });
+    });
+
+    it('is kept on a network failure', async () => {
+      fetchMock.mockRejectedValue(new TypeError('Failed to fetch'));
+      render(<AcceptInviteClient />);
+      await screen.findByRole('alert');
+      expect(stored()).toMatchObject({ path: '/invite?token=tOk_en-1' });
+    });
+
+    it('a broken localStorage does not stop the accept', async () => {
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('QuotaExceeded'); });
+      render(<AcceptInviteClient />);
+      await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard'));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
   });
 });

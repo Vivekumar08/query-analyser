@@ -237,8 +237,9 @@ describe('POST accept', () => {
 
   it('403 for an unverified email or a suspended workspace says so', async () => {
     upstream(403, 'email not verified', 'email_not_verified');
+    // The code lets the invite page keep the pending invite for after verification.
     expect(await (await acceptInvite(req('POST', { token: 'abc' }))).json())
-      .toEqual({ error: 'Confirm your email address first, then open the invite link again.' });
+      .toEqual({ error: 'Confirm your email address first, then open the invite link again.', code: 'email_not_verified' });
     upstream(403, 'organization suspended');
     expect(await (await acceptInvite(req('POST', { token: 'abc' }))).json())
       .toEqual({ error: 'This workspace is suspended and can\'t take new members.' });
