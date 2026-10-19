@@ -6,6 +6,7 @@ import { Eyebrow } from '@/components/marketing/Eyebrow';
 import { ExternalLink } from '@/components/marketing/ExternalLink';
 import { GlassCard } from '@/components/marketing/GlassCard';
 import { PillLink } from '@/components/marketing/PillLink';
+import { LogoMark, Wordmark } from '@/components/brand/Logo';
 import { ProductPreview } from '@/components/marketing/ProductPreview';
 
 const INSTALL = 'npm i @vivekumar08/query-analyser';
@@ -17,14 +18,6 @@ const STEPS = [
   { title: 'We group by shape', body: 'Every call of 100 ms or more folds into its shape: model, operation, filter and sort keys.' },
   { title: 'Fix what matters first', body: 'Shapes ranked by the time they waste, honest p95 and p99, and the index to add.' },
 ];
-
-function Wordmark() {
-  return (
-    <Link href="/" className="text-[15px] font-semibold tracking-tight">
-      <span className="text-accent-text">◐</span> query·analyser
-    </Link>
-  );
-}
 
 function SectionHeading({ id, children }: { id?: string; children: React.ReactNode }) {
   return (
@@ -172,8 +165,8 @@ export default function Page() {
 
       <footer className="border-t border-border">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-6 text-sm text-caption sm:px-8">
-          <span>
-            <span className="text-accent-text">◐</span> query·analyser · MIT
+          <span className="inline-flex items-center gap-2">
+            <LogoMark size={16} decorative /> query·analyser · MIT
           </span>
           <span className="flex gap-4">
             <ExternalLink href={GITHUB}>GitHub</ExternalLink>
