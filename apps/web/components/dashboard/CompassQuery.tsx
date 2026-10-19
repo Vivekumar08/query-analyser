@@ -62,7 +62,7 @@ export function CompassQuery({
           <RevealValues appId={appId} encryptedSample={encryptedSample} collection={collection} />
         )}
         {sampleKeyEnabled && !encryptedSample && (
-          <p className="text-xs text-muted-foreground">No encrypted sample for this query yet. One arrives with the next slowest run.</p>
+          <p className="text-xs text-muted-foreground">No encrypted sample for this query yet. One arrives with the next slowest run from an app running with <code className="font-mono">QA_SAMPLE_KEY</code> set.</p>
         )}
         {!sampleKeyEnabled && canManage && (
           <Link href={settingsHref} className="text-xs font-medium text-accent-text hover:underline">Enable real values in Settings</Link>

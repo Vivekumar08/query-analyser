@@ -64,6 +64,8 @@ require('@vivekumar08/query-analyser').init({
 - The slowest occurrence of each query shape is serialised (at most 16 KiB; larger
   samples are skipped) and **encrypted on your server** to that public key before
   it is sent.
+- Memory stays bounded: at most about 16 KiB of sample text per tracked shape,
+  for up to `maxSignatures` shapes, held until the next flush.
 - Only someone with your team's passphrase can decrypt it, in the browser. We
   store only ciphertext and **cannot read your values**.
 - Without `sampleKey` (or with an empty one) nothing changes: payloads are exactly

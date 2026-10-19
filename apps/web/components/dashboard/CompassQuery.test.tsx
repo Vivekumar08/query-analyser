@@ -43,6 +43,9 @@ describe('CompassQuery', () => {
   it('explains when the app has a key but this query has no encrypted sample yet', () => {
     render(<CompassQuery {...base} encryptedSample={null} sampleKeyEnabled canManage />);
     expect(screen.queryByRole('button', { name: 'Reveal real values' })).toBeNull();
-    expect(screen.getByText(/no encrypted sample for this query yet/i)).toBeTruthy();
+    const note = screen.getByText(/no encrypted sample for this query yet/i).textContent!;
+    // Arrival needs both a slower run and an SDK that has the public key.
+    expect(note).toMatch(/next slowest run/);
+    expect(note).toContain('QA_SAMPLE_KEY');
   });
 });
