@@ -6,10 +6,15 @@ import { LAST_APP_COOKIE } from '@/src/landing';
 
 type Params = { params: Promise<{ org: string }> };
 
-function failure(status: number): Response {
+function failure(status: number, upstreamError: string): Response {
   switch (status) {
     case 401: return jsonError('unauthorized', 401);
-    case 403: return jsonError(safeUpstreamMessage(403, 'generic'), 403);
+    case 403:
+      // rbac.ts sends this exact code for a suspended org; other 403s stay generic.
+      if (upstreamError === 'organization suspended') {
+        return jsonError("This organisation is suspended, so you can't leave it right now.", 403);
+      }
+      return jsonError(safeUpstreamMessage(403, 'generic'), 403);
     case 404: return jsonError("You're no longer a member of this organisation.", 404);
     // The API's only 409 here: the caller is the org's last OWNER.
     case 409: return jsonError("You're the only owner. Make someone else an owner first.", 409);
@@ -26,7 +31,7 @@ export async function DELETE(request: Request, { params }: Params): Promise<Resp
   if (!isSafeSegment(org)) return badParam();
 
   const res = await authedFetch(`/v1/orgs/${org}/membership`, g.session.accessToken, { method: 'DELETE' });
-  if (!res.ok) return failure(res.status);
+  if (!res.ok) return failure(res.status, res.error);
 
   const out = new NextResponse(null, { status: 204, headers: NO_STORE });
   // qa_last_app is scoped to /dashboard and holds a slug, so this handler can

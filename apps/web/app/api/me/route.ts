@@ -26,10 +26,13 @@ export async function PATCH(request: Request): Promise<Response> {
   const name = value.trim();
   if (name.length < 1 || name.length > NAME_MAX) return failure(400);
 
-  const res = await authedFetch<{ name: string }>('/v1/me', g.session.accessToken, {
+  const res = await authedFetch<{ name?: unknown } | null>('/v1/me', g.session.accessToken, {
     method: 'PATCH',
     body: JSON.stringify({ name }),
   });
   if (!res.ok) return failure(res.status);
-  return NextResponse.json({ name: res.data.name }, { headers: NO_STORE });
+  // apiFetch yields data: undefined for an empty or non-JSON 2xx body.
+  const saved = res.data && typeof res.data === 'object' ? res.data.name : undefined;
+  if (typeof saved !== 'string') return failure(502);
+  return NextResponse.json({ name: saved }, { headers: NO_STORE });
 }

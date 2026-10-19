@@ -31,7 +31,7 @@ describe('dashboard wears Mist', () => {
   });
 
   it('no dashboard, onboarding or settings text uses the chart periwinkle', () => {
-    for (const dir of ['components/dashboard', 'components/onboarding', 'components/settings']) {
+    for (const dir of ['components/dashboard', 'components/onboarding', 'components/settings', 'components/account']) {
       const abs = path.resolve(__dirname, '..', dir);
       for (const f of readdirSync(abs).filter((x) => x.endsWith('.tsx'))) {
         const src = readFileSync(path.join(abs, f), 'utf8');

@@ -130,6 +130,17 @@ describe('PATCH /api/me', () => {
       expect(await res.json()).toEqual({ error });
     }
   });
+
+  it('502s with no-store when a 2xx has an empty or non-JSON body', async () => {
+    // apiFetch yields data: undefined for both an empty body and unparseable text.
+    for (const data of [undefined, null, 'not json', { name: 5 }]) {
+      vi.mocked(authedFetch).mockResolvedValue({ ok: true, data } as never);
+      const res = await patchMe(req('PATCH', { name: 'Ada' }));
+      expect(res.status).toBe(502);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(await res.json()).toEqual({ error: 'Something went wrong. Please try again.' });
+    }
+  });
 });
 
 describe('POST /api/me/password', () => {
@@ -274,6 +285,15 @@ describe('DELETE /api/orgs/[org]/membership', () => {
     const res = await leave(req('DELETE'), orgCtx());
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "You're no longer a member of this organisation." });
+    expect(res.headers.getSetCookie()).toEqual([]);
+  });
+
+  it('403 organization suspended → the suspended copy, cookie untouched', async () => {
+    upstream(403, 'organization suspended');
+    const res = await leave(req('DELETE'), orgCtx());
+    expect(res.status).toBe(403);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toEqual({ error: "This organisation is suspended, so you can't leave it right now." });
     expect(res.headers.getSetCookie()).toEqual([]);
   });
 
