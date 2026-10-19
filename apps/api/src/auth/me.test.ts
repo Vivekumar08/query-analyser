@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import type { FastifyInstance } from 'fastify';
+import { rotateRefreshToken } from './tokens.js';
 
 let app: FastifyInstance;
 beforeAll(async () => { app = await buildApp({ logger: false }); });
@@ -150,6 +151,51 @@ describe('POST /v1/me/password', () => {
     const after = await app.prisma.user.findUniqueOrThrow({ where: { id: bystander.id }, select: { passwordHash: true } });
     expect(after.passwordHash).toBe(before.passwordHash);
     expect(await app.prisma.refreshToken.count({ where: { userId: gone.id } })).toBe(0);
+  });
+
+  it('leaves no live refresh token from before the change when a refresh straddles it', async () => {
+    const u = await user('a@x.io');
+    let change: Promise<{ statusCode: number; cookies: { name: string; value: string }[] }> | undefined;
+    // The rotation has consumed the old token but not yet stored its
+    // successor when the password change starts. Give the change up to a
+    // second to finish; if it is (correctly) blocked behind the rotation,
+    // let the rotation go on and the change completes after it.
+    const rotated = await rotateRefreshToken(app.prisma, u.cookie, {
+      afterConsume: async () => {
+        change = changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+        await Promise.race([change, new Promise((r) => setTimeout(r, 1000))]);
+      },
+    });
+    const res = await change!;
+    expect(res.statusCode).toBe(200);
+    expect(rotated).toMatchObject({ userId: u.id });
+
+    // Only the change's own session is live; the rotation's successor is not.
+    expect(await app.prisma.refreshToken.count({ where: { userId: u.id, consumedAt: null } })).toBe(1);
+    if (typeof rotated !== 'string') expect((await refresh(rotated.token)).statusCode).toBe(401);
+    expect((await refresh(cookieOf(res))).statusCode).toBe(200);
+  });
+
+  it('kills an outstanding reset link', async () => {
+    const u = await user('a@x.io');
+    const mailBefore = app.sentMail.length;
+    const req = await app.inject({ method: 'POST', url: '/v1/auth/password/request', remoteAddress: ip(), payload: { email: 'a@x.io' } });
+    expect(req.statusCode).toBe(202);
+    const deadline = Date.now() + 5000;
+    while (app.sentMail.length <= mailBefore) {
+      if (Date.now() > deadline) throw new Error('timed out waiting for the reset mail');
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const resetToken = /token=([A-Za-z0-9_-]+)/.exec(app.sentMail.at(-1)!.text)![1];
+
+    expect((await changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD })).statusCode).toBe(200);
+
+    const confirm = await app.inject({
+      method: 'POST', url: '/v1/auth/password/confirm',
+      payload: { token: resetToken, password: 'an-attackers-password-1' },
+    });
+    expect(confirm.statusCode).toBe(400);
+    expect((await login('a@x.io', NEW_PASSWORD)).statusCode).toBe(200);
   });
 
   it('rate-limits to 10 a minute', async () => {

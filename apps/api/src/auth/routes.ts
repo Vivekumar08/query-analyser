@@ -4,6 +4,23 @@ import { hashPassword, verifyPassword } from './password.js';
 import { issueRefreshToken, rotateRefreshToken, consumeRefreshToken, REFRESH_TTL_MS } from './tokens.js';
 import { issueVerificationToken, consumeVerificationToken, VERIFY_TTL_MS, RESET_TTL_MS } from './verification.js';
 import { verifyEmail, resetPasswordEmail } from '../mail/templates.js';
+import type { PrismaClient } from '../db.js';
+
+/**
+ * Store a new password hash and end every way back in under the old one:
+ * every refresh token and every outstanding reset link. Holds the User row
+ * lock that `rotateRefreshToken` takes, so a refresh in flight cannot slip a
+ * live successor in behind the revocation.
+ */
+async function replacePassword(prisma: PrismaClient, userId: string, passwordHash: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE`;
+    await tx.user.update({ where: { id: userId }, data: { passwordHash } });
+    const now = new Date();
+    await tx.refreshToken.updateMany({ where: { userId, consumedAt: null }, data: { consumedAt: now } });
+    await tx.verificationToken.updateMany({ where: { userId, purpose: 'RESET', consumedAt: null }, data: { consumedAt: now } });
+  });
+}
 
 const COOKIE = 'qa_refresh';
 
@@ -160,15 +177,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(403).send({ error: 'wrong-password' });
       }
 
-      // Store the new hash and revoke every refresh token in one transaction:
-      // no window where the new password is live but old sessions can still
-      // refresh. The fresh session is issued only after this commits, so it is
-      // not caught by the revocation.
-      const passwordHash = await hashPassword(newPassword);
-      await app.prisma.$transaction([
-        app.prisma.user.update({ where: { id: user.id }, data: { passwordHash } }),
-        app.prisma.refreshToken.updateMany({ where: { userId: user.id, consumedAt: null }, data: { consumedAt: new Date() } }),
-      ]);
+      // The fresh session is issued only after the revocation commits, so it
+      // is not caught by it.
+      await replacePassword(app.prisma, user.id, await hashPassword(newPassword));
 
       const accessToken = await issue(reply, user.id);
       return reply.send({ accessToken, user: { id: user.id, email: user.email, name: user.name, isPlatformAdmin: user.isPlatformAdmin } });
@@ -244,18 +255,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const userId = await consumeVerificationToken(app.prisma, parsed.data.token, 'RESET');
     if (!userId) return reply.code(400).send({ error: 'invalid or expired token' });
 
-    await app.prisma.user.update({
-      where: { id: userId },
-      data: { passwordHash: await hashPassword(parsed.data.password) },
-    });
-
-    // A password change invalidates every session. The API already revokes a
-    // refresh family on replay; resetting after a compromise should do at least
-    // as much.
-    await app.prisma.refreshToken.updateMany({
-      where: { userId, consumedAt: null },
-      data: { consumedAt: new Date() },
-    });
+    // A password change invalidates every session and every other reset link.
+    // The API already revokes a refresh family on replay; resetting after a
+    // compromise should do at least as much.
+    await replacePassword(app.prisma, userId, await hashPassword(parsed.data.password));
 
     return reply.send({ status: 'reset' });
   });
