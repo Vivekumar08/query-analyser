@@ -2,11 +2,11 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from
 import { createHash, randomBytes } from 'node:crypto';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
+import { settledOrBlocked } from '../test/locks.js';
 import type { FastifyInstance } from 'fastify';
 import { rotateRefreshToken } from './tokens.js';
 import { issueVerificationToken } from './verification.js';
 import type { AuthRouteHooks } from './routes.js';
-import type { Prisma } from '../generated/prisma/client.js';
 
 // Test seams inside the auth routes. Tests set them; afterEach clears them.
 const hooks: AuthRouteHooks = {};
@@ -16,28 +16,6 @@ beforeAll(async () => { app = await buildApp({ logger: false, authHooks: hooks }
 beforeEach(async () => { await resetDb(app.prisma); });
 afterEach(() => { for (const k of Object.keys(hooks)) delete hooks[k as keyof AuthRouteHooks]; });
 afterAll(async () => { await app.close(); });
-
-/**
- * Resolves once `pending` has settled, or once some backend is waiting on a
- * lock held by `holder`'s backend (i.e. `pending` is blocked behind it). A
- * signal, not a timeout: no wall-clock guess about how long argon2 takes on
- * this machine, and no false "blocked" from an unrelated lock waiter.
- */
-async function settledOrBlocked(pending: Promise<unknown>, holder: Prisma.TransactionClient): Promise<'settled' | 'blocked'> {
-  const [me] = await holder.$queryRaw<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
-  const pid = me!.pid;
-  let settled = false;
-  pending.then(() => { settled = true; }, () => { settled = true; });
-  const deadline = Date.now() + 30_000;
-  while (!settled) {
-    const [row] = await app.prisma.$queryRaw<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`;
-    if (row!.n > 0) return 'blocked';
-    if (Date.now() > deadline) throw new Error('neither settled nor blocked');
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  return 'settled';
-}
 
 // Signup, login and the password route are rate-limited per `req.ip`, and the
 // limiter's store lives as long as the app (the whole file). Every request
@@ -193,7 +171,7 @@ describe('POST /v1/me/password', () => {
     const rotated = await rotateRefreshToken(app.prisma, u.cookie, {
       afterConsume: async (tx) => {
         change = changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
-        await settledOrBlocked(change, tx);
+        await settledOrBlocked(app.prisma, change, tx);
       },
     });
     const res = await change!;
@@ -242,7 +220,7 @@ describe('POST /v1/me/password', () => {
     await app.prisma.$transaction(async (tx) => {
       await tx.verificationToken.updateMany({ where: { userId: u.id, purpose: 'RESET', consumedAt: null }, data: { consumedAt: new Date() } });
       change = changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
-      expect(await settledOrBlocked(change, tx)).toBe('blocked');
+      expect(await settledOrBlocked(app.prisma, change, tx)).toBe('blocked');
       await tx.verificationToken.create({
         data: { userId: u.id, purpose: 'RESET', tokenHash: randomBytes(32).toString('hex'), expiresAt: new Date(Date.now() + 3600_000) },
       });
@@ -336,7 +314,7 @@ describe('POST /v1/auth/login vs a password change', () => {
     hooks.beforePasswordCommit = async (tx) => {
       delete hooks.beforePasswordCommit;
       raced = login('a@x.io', PASSWORD);
-      await settledOrBlocked(raced, tx);
+      await settledOrBlocked(app.prisma, raced, tx);
     };
     const change = await changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
     expect(change.statusCode).toBe(200);
