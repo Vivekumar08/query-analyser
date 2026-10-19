@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { clearPendingInvite, savePendingInvite } from '@/src/pending-invite';
+import { orgPath } from '@/src/landing';
 
 type State =
   | { kind: 'pending' }
@@ -57,7 +58,9 @@ export function AcceptInviteClient() {
         if (res.ok) {
           clearPendingInvite();
           setState({ kind: 'done' });
-          router.replace('/dashboard');
+          const data = (await res.json().catch(() => ({}))) as { slug?: unknown };
+          // Straight to the team just joined; /dashboard picks a landing without a slug.
+          router.replace(typeof data.slug === 'string' && data.slug ? orgPath(data.slug) : '/dashboard');
           return;
         }
         if (res.status === 401) {

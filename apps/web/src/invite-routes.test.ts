@@ -211,10 +211,11 @@ describe('DELETE member', () => {
 
 describe('POST accept', () => {
   it('POSTs the token to the API path and returns 200 with no-store', async () => {
-    vi.mocked(authedFetch).mockResolvedValue({ ok: true, data: { orgId: 'org1', role: 'MEMBER' } });
+    vi.mocked(authedFetch).mockResolvedValue({ ok: true, data: { orgId: 'org1', slug: 'acme', role: 'MEMBER' } });
     const res = await acceptInvite(req('POST', { token: 'tOk_en-1' }));
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toEqual({ orgId: 'org1', slug: 'acme' });
     expect(call()[0]).toBe('/v1/invites/tOk_en-1/accept');
     expect(call()[2]!.method).toBe('POST');
   });
