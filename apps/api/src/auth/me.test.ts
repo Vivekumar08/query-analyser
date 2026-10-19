@@ -1,13 +1,40 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
+import { createHash, randomBytes } from 'node:crypto';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import type { FastifyInstance } from 'fastify';
 import { rotateRefreshToken } from './tokens.js';
+import { issueVerificationToken } from './verification.js';
+import type { AuthRouteHooks } from './routes.js';
+
+// Test seams inside the auth routes. Tests set them; afterEach clears them.
+const hooks: AuthRouteHooks = {};
 
 let app: FastifyInstance;
-beforeAll(async () => { app = await buildApp({ logger: false }); });
+beforeAll(async () => { app = await buildApp({ logger: false, authHooks: hooks }); });
 beforeEach(async () => { await resetDb(app.prisma); });
+afterEach(() => { delete hooks.afterLoginVerify; delete hooks.afterPasswordVerify; });
 afterAll(async () => { await app.close(); });
+
+/**
+ * Resolves once `pending` has settled, or once some backend in this database
+ * is waiting on a lock (i.e. `pending` is blocked behind a lock the caller
+ * holds). A signal, not a timeout: no wall-clock guess about how long argon2
+ * takes on this machine.
+ */
+async function settledOrBlocked(pending: Promise<unknown>): Promise<'settled' | 'blocked'> {
+  let settled = false;
+  pending.then(() => { settled = true; }, () => { settled = true; });
+  const deadline = Date.now() + 30_000;
+  while (!settled) {
+    const [row] = await app.prisma.$queryRaw<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`;
+    if (row!.n > 0) return 'blocked';
+    if (Date.now() > deadline) throw new Error('neither settled nor blocked');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return 'settled';
+}
 
 // Signup, login and the password route are rate-limited per `req.ip`, and the
 // limiter's store lives as long as the app (the whole file). Every request
@@ -157,13 +184,13 @@ describe('POST /v1/me/password', () => {
     const u = await user('a@x.io');
     let change: Promise<{ statusCode: number; cookies: { name: string; value: string }[] }> | undefined;
     // The rotation has consumed the old token but not yet stored its
-    // successor when the password change starts. Give the change up to a
-    // second to finish; if it is (correctly) blocked behind the rotation,
-    // let the rotation go on and the change completes after it.
+    // successor when the password change starts. Let the rotation go on once
+    // the change has either finished (no lock: the bug) or is blocked behind
+    // the rotation's User row lock (the fix).
     const rotated = await rotateRefreshToken(app.prisma, u.cookie, {
       afterConsume: async () => {
         change = changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
-        await Promise.race([change, new Promise((r) => setTimeout(r, 1000))]);
+        await settledOrBlocked(change);
       },
     });
     const res = await change!;
@@ -198,6 +225,51 @@ describe('POST /v1/me/password', () => {
     expect((await login('a@x.io', NEW_PASSWORD)).statusCode).toBe(200);
   });
 
+  it('is not deadlocked by a reset link being issued at the same time', async () => {
+    const u = await user('a@x.io');
+    // An outstanding link, whose row the next reset request locks first.
+    await issueVerificationToken(app.prisma, u.id, 'RESET');
+
+    // issueVerificationToken's own statements, in its order (burn the
+    // outstanding RESET rows, then insert the new one), with the password
+    // change landing between them: it waits on the RESET row this
+    // transaction holds, and then the insert's FK check needs a KEY SHARE
+    // lock on the User row the change has locked.
+    let change: Promise<{ statusCode: number }> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.verificationToken.updateMany({ where: { userId: u.id, purpose: 'RESET', consumedAt: null }, data: { consumedAt: new Date() } });
+      change = changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+      expect(await settledOrBlocked(change)).toBe('blocked');
+      await tx.verificationToken.create({
+        data: { userId: u.id, purpose: 'RESET', tokenHash: randomBytes(32).toString('hex'), expiresAt: new Date(Date.now() + 3600_000) },
+      });
+    });
+    expect((await change!).statusCode).toBe(200);
+    expect((await login('a@x.io', NEW_PASSWORD)).statusCode).toBe(200);
+  });
+
+  it('409s the second of two changes that both verified the same old password, and issues it nothing', async () => {
+    const u = await user('a@x.io');
+    let second: { statusCode: number; cookies: { name: string; value: string }[] } | undefined;
+    // The first change has verified the old password; the second one runs to
+    // completion before the first writes anything.
+    hooks.afterPasswordVerify = async () => {
+      delete hooks.afterPasswordVerify;
+      second = await changePassword(u.token, { currentPassword: PASSWORD, newPassword: 'the-other-new-password-2' });
+    };
+    const first = await changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+
+    expect(second!.statusCode).toBe(200);
+    expect(first.statusCode).toBe(409);
+    expect(first.json()).toEqual({ error: 'password-changed' });
+    expect(first.cookies.find((c) => c.name === 'qa_refresh')).toBeUndefined();
+    // The winner's session is the only one, and it was not revoked by the loser.
+    expect(await app.prisma.refreshToken.count({ where: { userId: u.id, consumedAt: null } })).toBe(1);
+    expect((await refresh(cookieOf(second!))).statusCode).toBe(200);
+    expect((await login('a@x.io', 'the-other-new-password-2')).statusCode).toBe(200);
+    expect((await login('a@x.io', NEW_PASSWORD)).statusCode).toBe(401);
+  });
+
   it('rate-limits to 10 a minute', async () => {
     const u = await user('a@x.io');
     const addr = '10.9.9.9';
@@ -215,5 +287,42 @@ describe('POST /v1/me/password', () => {
       payload: { currentPassword: PASSWORD, newPassword: NEW_PASSWORD },
     });
     expect(res.statusCode).toBe(401);
+  });
+});
+
+describe('POST /v1/auth/login vs a password change', () => {
+  it('issues nothing to a login that verified the old password if the change commits first', async () => {
+    const u = await user('a@x.io');
+    hooks.afterLoginVerify = async () => {
+      delete hooks.afterLoginVerify;
+      const change = await changePassword(u.token, { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+      expect(change.statusCode).toBe(200);
+    };
+    const res = await login('a@x.io', PASSWORD);
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: 'invalid credentials' });
+    expect(res.cookies.find((c) => c.name === 'qa_refresh')).toBeUndefined();
+    // only the change's own session is live
+    expect(await app.prisma.refreshToken.count({ where: { userId: u.id, consumedAt: null } })).toBe(1);
+  });
+});
+
+describe('POST /v1/auth/password/confirm', () => {
+  it('kills every other reset link and every session', async () => {
+    const u = await user('a@x.io');
+    const used = await issueVerificationToken(app.prisma, u.id, 'RESET');
+    // A second outstanding link. issueVerificationToken would burn the first,
+    // so this one goes in directly.
+    const other = randomBytes(32).toString('base64url');
+    await app.prisma.verificationToken.create({
+      data: { userId: u.id, purpose: 'RESET', tokenHash: createHash('sha256').update(other).digest('hex'), expiresAt: new Date(Date.now() + 3600_000) },
+    });
+
+    const confirm = (token: string) =>
+      app.inject({ method: 'POST', url: '/v1/auth/password/confirm', payload: { token, password: NEW_PASSWORD } });
+    expect((await confirm(used.token)).statusCode).toBe(200);
+    expect((await confirm(other)).statusCode).toBe(400);
+    expect((await refresh(u.cookie)).statusCode).toBe(401);
+    expect(await app.prisma.refreshToken.count({ where: { userId: u.id, consumedAt: null } })).toBe(0);
   });
 });

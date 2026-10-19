@@ -25,6 +25,7 @@ export type RotateResult = { userId: string; token: string; expiresAt: Date } | 
 export async function rotateRefreshToken(
   prisma: PrismaClient,
   token: string,
+  /** @internal Test seam: runs between the consume and the successor insert. Never passed by a route. */
   opts: { afterConsume?: () => Promise<void> } = {},
 ): Promise<RotateResult> {
   const row = await prisma.refreshToken.findUnique({ where: { tokenHash: hashToken(token) } });
@@ -51,13 +52,15 @@ export async function rotateRefreshToken(
   // revocation sees (and kills) the successor, or the CAS below sees the
   // revoked token and fails.
   return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${row.userId} FOR UPDATE`;
+    // NO KEY UPDATE, not UPDATE: it still conflicts with the password-change
+    // lock, but not with the KEY SHARE lock every FK insert referencing this
+    // user takes (a reset link, a membership), which FOR UPDATE would block
+    // and, with the reset-link transaction, deadlock against.
+    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${row.userId} FOR NO KEY UPDATE`;
 
     // Atomic consume: only one concurrent caller wins.
     const consumed = await tx.refreshToken.updateMany({ where: { id: row.id, consumedAt: null }, data: { consumedAt: new Date() } });
     if (consumed.count === 0) return 'reused' as const;
-    // Test seam: runs between the consume and the successor insert, so a
-    // test can start a competing password change in exactly that window.
     await opts.afterConsume?.();
 
     const next = await issueRefreshToken(tx, row.userId, row.familyId);

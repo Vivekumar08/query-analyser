@@ -5,20 +5,39 @@ import { issueRefreshToken, rotateRefreshToken, consumeRefreshToken, REFRESH_TTL
 import { issueVerificationToken, consumeVerificationToken, VERIFY_TTL_MS, RESET_TTL_MS } from './verification.js';
 import { verifyEmail, resetPasswordEmail } from '../mail/templates.js';
 import type { PrismaClient } from '../db.js';
+import type { Prisma } from '../generated/prisma/client.js';
+
+/** The lock both password writers and every refresh-token issuer take on the User row. See `rotateRefreshToken`. */
+const lockUser = (tx: Prisma.TransactionClient, userId: string) =>
+  tx.$queryRaw`SELECT id FROM "User" WHERE id = ${userId} FOR NO KEY UPDATE`;
 
 /**
  * Store a new password hash and end every way back in under the old one:
  * every refresh token and every outstanding reset link. Holds the User row
  * lock that `rotateRefreshToken` takes, so a refresh in flight cannot slip a
  * live successor in behind the revocation.
+ *
+ * With `expectedHash`, the write is a compare-and-swap: if the stored hash is
+ * no longer the one the caller verified against (another change won the
+ * race), nothing is written or revoked and this returns false.
  */
-async function replacePassword(prisma: PrismaClient, userId: string, passwordHash: string): Promise<void> {
-  await prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE`;
-    await tx.user.update({ where: { id: userId }, data: { passwordHash } });
+async function replacePassword(
+  prisma: PrismaClient,
+  userId: string,
+  passwordHash: string,
+  expectedHash?: string,
+): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    await lockUser(tx, userId);
+    const updated = await tx.user.updateMany({
+      where: { id: userId, ...(expectedHash === undefined ? {} : { passwordHash: expectedHash }) },
+      data: { passwordHash },
+    });
+    if (updated.count === 0) return false;
     const now = new Date();
     await tx.refreshToken.updateMany({ where: { userId, consumedAt: null }, data: { consumedAt: now } });
     await tx.verificationToken.updateMany({ where: { userId, purpose: 'RESET', consumedAt: null }, data: { consumedAt: now } });
+    return true;
   });
 }
 
@@ -50,7 +69,17 @@ const meSelect = { id: true, email: true, name: true, isPlatformAdmin: true, ema
 let dummyHash: string | null = null;
 const getDummyHash = async () => (dummyHash ??= await hashPassword('dummy-password-for-timing-equalisation'));
 
-export async function authRoutes(app: FastifyInstance): Promise<void> {
+/**
+ * @internal Test seams. Each runs after a password has been verified and
+ * before anything is written on the strength of it.
+ */
+export interface AuthRouteHooks {
+  afterLoginVerify?: () => Promise<void>;
+  afterPasswordVerify?: () => Promise<void>;
+}
+
+export async function authRoutes(app: FastifyInstance, opts: { hooks?: AuthRouteHooks } = {}): Promise<void> {
+  const hooks = opts.hooks ?? {};
   const setRefresh = (reply: FastifyReply, token: string) =>
     reply.setCookie(COOKIE, token, {
       httpOnly: true, sameSite: 'lax', path: '/v1/auth', secure: app.config.NODE_ENV === 'production',
@@ -116,7 +145,20 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const hash = user?.passwordHash ?? (await getDummyHash());
     const ok = await verifyPassword(hash, parsed.data.password);
     if (!user || !ok) return reply.code(401).send({ error: 'invalid credentials' });
-    const accessToken = await issue(reply, user.id);
+    await hooks.afterLoginVerify?.();
+    // Compare-and-swap against a password change: issue the refresh token
+    // under the User lock, and only if the hash is still the one just
+    // verified. Otherwise a login with the old password, racing the change,
+    // would mint a session after the change revoked them all.
+    const refresh = await app.prisma.$transaction(async (tx) => {
+      await lockUser(tx, user.id);
+      const current = await tx.user.findUnique({ where: { id: user.id }, select: { passwordHash: true } });
+      if (current?.passwordHash !== user.passwordHash) return null;
+      return issueRefreshToken(tx, user.id);
+    });
+    if (!refresh) return reply.code(401).send({ error: 'invalid credentials' });
+    setRefresh(reply, refresh.token);
+    const accessToken = await reply.jwtSign({ sub: user.id });
     return reply.send({ accessToken, user: { id: user.id, email: user.email, name: user.name, isPlatformAdmin: user.isPlatformAdmin } });
   });
 
@@ -176,10 +218,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       if (!(await verifyPassword(user.passwordHash, currentPassword))) {
         return reply.code(403).send({ error: 'wrong-password' });
       }
+      await hooks.afterPasswordVerify?.();
+
+      // Compare-and-swap on the hash just verified: a concurrent change that
+      // committed first wins, and this one writes, revokes and issues nothing.
+      if (!(await replacePassword(app.prisma, user.id, await hashPassword(newPassword), user.passwordHash))) {
+        return reply.code(409).send({ error: 'password-changed' });
+      }
 
       // The fresh session is issued only after the revocation commits, so it
       // is not caught by it.
-      await replacePassword(app.prisma, user.id, await hashPassword(newPassword));
 
       const accessToken = await issue(reply, user.id);
       return reply.send({ accessToken, user: { id: user.id, email: user.email, name: user.name, isPlatformAdmin: user.isPlatformAdmin } });
