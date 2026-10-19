@@ -4,6 +4,7 @@ import { authedFetch } from '@/src/api';
 import { rejectCrossSiteAuthPost } from '@/src/same-origin-guard';
 import { sessionOr401 } from '@/src/route-session';
 import { safeUpstreamMessage } from '@/src/upstream-errors';
+import { badParam, isSafeSegment } from '@/src/org-bff';
 
 export async function PATCH(
   request: Request,
@@ -19,6 +20,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'Invalid status.' }, { status: 400 });
   }
   const { id, adviceId } = await params;
+  if (!isSafeSegment(id) || !isSafeSegment(adviceId)) return badParam();
   const res = await authedFetch(`/v1/apps/${encodeURIComponent(id)}/advice/${encodeURIComponent(adviceId)}`, gate.session.accessToken, {
     method: 'PATCH',
     body: JSON.stringify({ status: body.status }),

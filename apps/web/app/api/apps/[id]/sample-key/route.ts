@@ -6,6 +6,7 @@ import { rejectCrossSiteAuthPost } from '@/src/same-origin-guard';
 import { sessionOr401 } from '@/src/route-session';
 import { safeUpstreamMessage } from '@/src/upstream-errors';
 import type { SampleKeyStatus } from '@/src/dashboard-types';
+import { badParam, isSafeSegment } from '@/src/org-bff';
 
 const NO_STORE = { 'cache-control': 'no-store' };
 const ADMIN_ONLY = 'Only workspace admins can change this.';
@@ -49,6 +50,7 @@ export async function GET(_request: Request, { params }: Params): Promise<Respon
   const gate = await sessionOr401();
   if ('response' in gate) return gate.response;
   const { id } = await params;
+  if (!isSafeSegment(id)) return badParam();
   const res = await authedFetch<SampleKeyStatus>(path(id), gate.session.accessToken);
   if (!res.ok) return failure(res, false);
   return NextResponse.json(res.data, { headers: NO_STORE });
@@ -64,6 +66,7 @@ export async function PUT(request: Request, { params }: Params): Promise<Respons
   const body = pickKeyBody(await request.json().catch(() => null));
   if (!body) return NextResponse.json({ error: "The key couldn't be saved. Please try again." }, { status: 400, headers: NO_STORE });
   const { id } = await params;
+  if (!isSafeSegment(id)) return badParam();
   const res = await authedFetch<{ enabled: true; publicKey: string }>(path(id), gate.session.accessToken, {
     method: 'PUT',
     body: JSON.stringify(body),
@@ -79,6 +82,7 @@ export async function DELETE(request: Request, { params }: Params): Promise<Resp
   const gate = await sessionOr401();
   if ('response' in gate) return gate.response;
   const { id } = await params;
+  if (!isSafeSegment(id)) return badParam();
   const res = await authedFetch(path(id), gate.session.accessToken, { method: 'DELETE' });
   if (!res.ok) return failure(res, true);
   return new Response(null, { status: 204, headers: NO_STORE });

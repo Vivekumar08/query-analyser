@@ -3,6 +3,7 @@ import { authedFetch } from '@/src/api';
 import { rejectCrossSiteAuthPost } from '@/src/same-origin-guard';
 import { sessionOr401 } from '@/src/route-session';
 import { safeUpstreamMessage } from '@/src/upstream-errors';
+import { badParam, isSafeSegment } from '@/src/org-bff';
 
 const NO_STORE = { 'cache-control': 'no-store' };
 
@@ -17,6 +18,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const gate = await sessionOr401();
   if ('response' in gate) return gate.response;
   const { id } = await params;
+  if (!isSafeSegment(id)) return badParam();
 
   const res = await authedFetch<{ key: string }>(`/v1/apps/${encodeURIComponent(id)}/keys`, gate.session.accessToken, { method: 'POST' });
   if (!res.ok) {
