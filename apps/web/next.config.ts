@@ -35,7 +35,11 @@ const config: NextConfig = {
     const headers = [
       { key: 'Content-Security-Policy', value: contentSecurityPolicy(isProd) },
       { key: 'X-Content-Type-Options', value: 'nosniff' },
-      { key: 'Referrer-Policy', value: 'no-referrer' },
+      // same-origin rather than no-referrer: under no-referrer some engines
+      // may send `Origin: null` on same-origin fetches, which would fail the
+      // CSRF Origin check on every BFF mutation. same-origin still sends
+      // nothing cross-origin, so tokened URLs (/invite, /verify) never leak.
+      { key: 'Referrer-Policy', value: 'same-origin' },
       { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=()' },
     ];
     // Production already assumes HTTPS: session and refresh cookies are

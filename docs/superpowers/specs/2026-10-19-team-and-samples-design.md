@@ -130,7 +130,8 @@ independently. The mobile sheet is unchanged.
 
 - Security headers on all pages via `next.config.ts` `headers()`:
   - `Content-Security-Policy` with `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'`;
-  - `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`.
+  - `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`.
+  - `same-origin`, not `no-referrer`, for Origin-header compatibility with the CSRF check: under `no-referrer` some engines may send `Origin: null` on same-origin fetches, which would reject every BFF mutation. `same-origin` still sends nothing cross-origin.
   - A nonce-based `script-src` (dropping `'unsafe-inline'`) is a recorded follow-up.
 - Homepage copy "Shapes, never values" becomes "Shapes by default. Values only if you hold the key." The privacy section adds one line about opt-in end-to-end encryption.
 

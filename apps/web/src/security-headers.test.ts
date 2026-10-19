@@ -46,10 +46,13 @@ describe('security headers', () => {
     for (const [name, value] of d) if (name !== 'script-src') expect(value).not.toContain('unsafe-eval');
   });
 
-  it('sends nosniff, no-referrer and a locked-down Permissions-Policy', async () => {
+  // same-origin, not no-referrer: no-referrer risks Origin: null on same-origin
+  // fetches in some engines, which would fail every BFF mutation's CSRF check.
+  // same-origin still sends nothing cross-origin.
+  it('sends nosniff, a same-origin Referrer-Policy and a locked-down Permissions-Policy', async () => {
     const h = await headersFor('production');
     expect(h['X-Content-Type-Options']).toBe('nosniff');
-    expect(h['Referrer-Policy']).toBe('no-referrer');
+    expect(h['Referrer-Policy']).toBe('same-origin');
     expect(h['Permissions-Policy']).toBe('camera=(), microphone=(), geolocation=()');
   });
 
