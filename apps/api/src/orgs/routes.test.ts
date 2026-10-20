@@ -3,6 +3,7 @@ import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import { settledOrBlocked } from '../test/locks.js';
 import { limitsFor } from '../plans.js';
+import { lockOrg, lockOwnersAndTarget } from './locks.js';
 import type { FastifyInstance } from 'fastify';
 
 let app: FastifyInstance;
@@ -116,6 +117,8 @@ describe('orgs', () => {
   it('OWNER can change roles but cannot demote the last OWNER', async () => {
     const a = await user('a@x.io'); const b = await user('b@x.io');
     const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(a.token), payload: { name: 'A' } })).json();
+    // ADMIN is past the free plan's roles.
+    await app.prisma.organization.update({ where: { id: org.id }, data: { plan: 'team' } });
     const mb = await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'MEMBER' } });
     const ma = await app.prisma.membership.findFirstOrThrow({ where: { userId: a.id, orgId: org.id } });
 
@@ -137,6 +140,7 @@ describe('orgs', () => {
   it('concurrent demotions of two different OWNERs never leave the org with zero owners', async () => {
     const a = await user('a@x.io'); const b = await user('b@x.io');
     const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(a.token), payload: { name: 'A' } })).json();
+    await app.prisma.organization.update({ where: { id: org.id }, data: { plan: 'team' } });
     const mb = await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'OWNER' } });
     const ma = await app.prisma.membership.findFirstOrThrow({ where: { userId: a.id, orgId: org.id } });
 
@@ -405,6 +409,8 @@ describe('owner-row lock on role changes and removal', () => {
   async function orgWithAdmin() {
     const a = await user('a@x.io'); const c = await user('c@x.io');
     const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(a.token), payload: { name: 'A' } })).json() as { id: string };
+    // VIEWER is past the free plan's roles.
+    await app.prisma.organization.update({ where: { id: org.id }, data: { plan: 'team' } });
     const mc = await app.prisma.membership.create({ data: { userId: c.id, orgId: org.id, role: 'ADMIN' } });
     return { a, c, org, mc };
   }
@@ -440,5 +446,256 @@ describe('owner-row lock on role changes and removal', () => {
     expect(done.statusCode).toBe(409);
     expect(done.json()).toEqual({ error: 'organization must keep at least one owner' });
     expect(await app.prisma.membership.count({ where: { orgId: org.id, role: 'OWNER' } })).toBe(1);
+  });
+});
+
+describe('roles and app access', () => {
+  type Res = { statusCode: number; json: () => any };
+  // Invite creation is rate-limited per req.ip (10/minute); give each its own.
+  let inviteIp = 0;
+  const patch = (orgId: string, memberId: string, token: string, role: string): Promise<Res> =>
+    app.inject({ method: 'PATCH', url: `/v1/orgs/${orgId}/members/${memberId}`, headers: as(token), payload: { role } });
+  const remove = (orgId: string, memberId: string, token: string): Promise<Res> =>
+    app.inject({ method: 'DELETE', url: `/v1/orgs/${orgId}/members/${memberId}`, headers: as(token) });
+  const leave = (orgId: string, token: string): Promise<Res> =>
+    app.inject({ method: 'DELETE', url: `/v1/orgs/${orgId}/membership`, headers: as(token) });
+  const invite = (orgId: string, token: string, payload: { email: string; role: string; appId?: string }): Promise<Res> =>
+    app.inject({ method: 'POST', url: `/v1/orgs/${orgId}/invites`, headers: as(token), remoteAddress: `10.1.0.${++inviteIp}`, payload });
+  const accept = (inviteToken: string, token: string): Promise<Res> =>
+    app.inject({ method: 'POST', url: `/v1/invites/${inviteToken}/accept`, headers: as(token) });
+  const getApp = (appId: string, token: string): Promise<Res> =>
+    app.inject({ method: 'GET', url: `/v1/apps/${appId}`, headers: as(token) });
+
+  async function orgOf(ownerEmail: string, plan: 'free' | 'team') {
+    const o = await user(ownerEmail);
+    const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(o.token), payload: { name: ownerEmail } })).json() as { id: string };
+    if (plan !== 'free') await app.prisma.organization.update({ where: { id: org.id }, data: { plan } });
+    return { o, org };
+  }
+  // Explicit, increasing createdAt so "ordered by app createdAt" is deterministic.
+  let appSeq = 0;
+  const newApp = (orgId: string, name: string) =>
+    app.prisma.app.create({ data: { orgId, name, env: 'production', createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, ++appSeq)) } });
+  const member = (userId: string, orgId: string, role: 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER') =>
+    app.prisma.membership.create({ data: { userId, orgId, role } });
+  const grant = (userId: string, appIds: string[], role: 'MEMBER' | 'VIEWER') =>
+    app.prisma.appAccess.createMany({ data: appIds.map((appId) => ({ appId, userId, role })) });
+  const rowsIn = (userId: string, orgId: string) =>
+    app.prisma.appAccess.findMany({ where: { userId, app: { orgId } }, select: { appId: true, role: true }, orderBy: { appId: 'asc' } });
+
+  it('free: a member can only be made OWNER; ADMIN and VIEWER are refused as role', async () => {
+    const { o, org } = await orgOf('o@x.io', 'free');
+    const u = await user('u@x.io');
+    const m = await member(u.id, org.id, 'MEMBER');
+    for (const role of ['ADMIN', 'VIEWER']) {
+      const res = await patch(org.id, m.id, o.token, role);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ error: 'plan-limit', limit: 'role', max: 1 });
+      expect((await app.prisma.membership.findUniqueOrThrow({ where: { id: m.id } })).role).toBe('MEMBER');
+    }
+    const res = await patch(org.id, m.id, o.token, 'OWNER');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ id: m.id, role: 'OWNER' });
+  });
+
+  it('setting the current role is always allowed (grandfathered VIEWER on free)', async () => {
+    const { o, org } = await orgOf('o@x.io', 'free');
+    const u = await user('u@x.io');
+    const m = await member(u.id, org.id, 'VIEWER');
+    const res = await patch(org.id, m.id, o.token, 'VIEWER');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ id: m.id, role: 'VIEWER' });
+  });
+
+  it('promotion to ADMIN or OWNER drops their rows in this org only', async () => {
+    const { o, org } = await orgOf('o@x.io', 'team');
+    const { org: other } = await orgOf('p@x.io', 'team');
+    const [shop, admin, elsewhere] = [await newApp(org.id, 'Shop'), await newApp(org.id, 'Admin panel'), await newApp(other.id, 'Else')];
+    for (const [email, role] of [['m1@x.io', 'ADMIN'], ['m2@x.io', 'OWNER']] as const) {
+      const u = await user(email);
+      const m = await member(u.id, org.id, 'MEMBER');
+      await member(u.id, other.id, 'MEMBER');
+      await grant(u.id, [shop.id, admin.id, elsewhere.id], 'MEMBER');
+
+      expect((await patch(org.id, m.id, o.token, role)).statusCode).toBe(200);
+      expect(await rowsIn(u.id, org.id)).toEqual([]);
+      expect(await rowsIn(u.id, other.id)).toEqual([{ appId: elsewhere.id, role: 'MEMBER' }]);
+    }
+  });
+
+  it('demotion to MEMBER or VIEWER grants every current app with the new role', async () => {
+    const { o, org } = await orgOf('o@x.io', 'team');
+    const apps = [await newApp(org.id, 'Shop'), await newApp(org.id, 'Admin panel')];
+    const expected = (role: string) => apps.map((a) => ({ appId: a.id, role })).sort((x, y) => x.appId.localeCompare(y.appId));
+    for (const [email, from, to] of [['a@x.io', 'ADMIN', 'MEMBER'], ['b@x.io', 'OWNER', 'VIEWER']] as const) {
+      const u = await user(email);
+      const m = await member(u.id, org.id, from);
+      expect((await patch(org.id, m.id, o.token, to)).statusCode).toBe(200);
+      expect(await rowsIn(u.id, org.id)).toEqual(expected(to));
+    }
+  });
+
+  it('MEMBER → VIEWER moves every row to VIEWER, and back', async () => {
+    const { o, org } = await orgOf('o@x.io', 'team');
+    const [shop, admin] = [await newApp(org.id, 'Shop'), await newApp(org.id, 'Admin panel')];
+    await newApp(org.id, 'Not theirs');
+    const u = await user('u@x.io');
+    const m = await member(u.id, org.id, 'MEMBER');
+    await grant(u.id, [shop.id, admin.id], 'MEMBER');
+    const ids = [shop.id, admin.id].sort();
+
+    expect((await patch(org.id, m.id, o.token, 'VIEWER')).statusCode).toBe(200);
+    expect(await rowsIn(u.id, org.id)).toEqual(ids.map((appId) => ({ appId, role: 'VIEWER' })));
+    expect((await patch(org.id, m.id, o.token, 'MEMBER')).statusCode).toBe(200);
+    expect(await rowsIn(u.id, org.id)).toEqual(ids.map((appId) => ({ appId, role: 'MEMBER' })));
+  });
+
+  it('being made OWNER ignores the target\'s owned-org limit', async () => {
+    const { o, org } = await orgOf('o@x.io', 'free');
+    const { o: u } = await orgOf('u@x.io', 'free'); // u already owns their own free org
+    const m = await member(u.id, org.id, 'MEMBER');
+    expect((await patch(org.id, m.id, o.token, 'OWNER')).statusCode).toBe(200);
+    expect(await app.prisma.membership.count({ where: { userId: u.id, role: 'OWNER' } })).toBe(2);
+  });
+
+  it('removing a member and leaving both delete their rows in that org', async () => {
+    const { o, org } = await orgOf('o@x.io', 'team');
+    const { org: other } = await orgOf('p@x.io', 'team');
+    const [shop, elsewhere] = [await newApp(org.id, 'Shop'), await newApp(other.id, 'Else')];
+    const r = await user('r@x.io'); const l = await user('l@x.io');
+    const mr = await member(r.id, org.id, 'MEMBER');
+    await member(l.id, org.id, 'VIEWER');
+    for (const u of [r, l]) {
+      await member(u.id, other.id, 'MEMBER');
+      await grant(u.id, [shop.id, elsewhere.id], 'MEMBER');
+    }
+
+    expect((await remove(org.id, mr.id, o.token)).statusCode).toBe(204);
+    expect((await leave(org.id, l.token)).statusCode).toBe(204);
+    for (const u of [r, l]) {
+      expect(await rowsIn(u.id, org.id)).toEqual([]);
+      expect(await rowsIn(u.id, other.id)).toEqual([{ appId: elsewhere.id, role: 'MEMBER' }]);
+    }
+  });
+
+  it('a removed member re-invited to a different app sees only that app', async () => {
+    const { o, org } = await orgOf('o@x.io', 'team');
+    const [shop, admin] = [await newApp(org.id, 'Shop'), await newApp(org.id, 'Admin panel')];
+    const u = await user('u@x.io');
+    expect((await accept((await invite(org.id, o.token, { email: 'u@x.io', role: 'MEMBER', appId: shop.id })).json().token, u.token)).statusCode).toBe(200);
+    expect((await getApp(shop.id, u.token)).statusCode).toBe(200);
+
+    const m = await app.prisma.membership.findUniqueOrThrow({ where: { userId_orgId: { userId: u.id, orgId: org.id } } });
+    expect((await remove(org.id, m.id, o.token)).statusCode).toBe(204);
+    expect((await accept((await invite(org.id, o.token, { email: 'u@x.io', role: 'MEMBER', appId: admin.id })).json().token, u.token)).statusCode).toBe(200);
+
+    expect((await getApp(admin.id, u.token)).statusCode).toBe(200);
+    const old = await getApp(shop.id, u.token);
+    expect(old.statusCode).toBe(404);
+    expect(old.json()).toEqual({ error: 'Not Found' });
+  });
+
+  // Ruling A5-1: an invite issued before an admin restricted someone must not
+  // restore what was taken away.
+  describe('pending invites go when the membership changes', () => {
+    async function memberWithPendingInvite() {
+      const { o, org } = await orgOf('o@x.io', 'team');
+      const { o: p, org: other } = await orgOf('p@x.io', 'team');
+      const [shop, admin, elsewhere] = [await newApp(org.id, 'Shop'), await newApp(org.id, 'Admin panel'), await newApp(other.id, 'Else')];
+      const u = await user('u@x.io');
+      const m = await member(u.id, org.id, 'MEMBER');
+      await grant(u.id, [shop.id], 'MEMBER');
+      // Issued in mixed case; stored lowercased.
+      const pending = (await invite(org.id, o.token, { email: 'U@x.io', role: 'MEMBER', appId: admin.id })).json().token as string;
+      const otherOrg = (await invite(other.id, p.token, { email: 'u@x.io', role: 'MEMBER', appId: elsewhere.id })).json().token as string;
+      return { o, org, u, m, pending, otherOrg };
+    }
+
+    it('a demotion deletes them; accepting afterwards 404s', async () => {
+      const { o, org, u, m, pending, otherOrg } = await memberWithPendingInvite();
+      expect((await patch(org.id, m.id, o.token, 'VIEWER')).statusCode).toBe(200);
+      expect((await accept(pending, u.token)).statusCode).toBe(404);
+      expect(await app.prisma.invite.count({ where: { orgId: org.id } })).toBe(0);
+      // Another org's invite is untouched.
+      expect((await accept(otherOrg, u.token)).statusCode).toBe(200);
+    });
+
+    it('a promotion deletes them too', async () => {
+      const { o, org, u, m, pending } = await memberWithPendingInvite();
+      expect((await patch(org.id, m.id, o.token, 'ADMIN')).statusCode).toBe(200);
+      expect((await accept(pending, u.token)).statusCode).toBe(404);
+    });
+
+    it('removal deletes them; accepting afterwards 404s', async () => {
+      const { o, org, u, m, pending, otherOrg } = await memberWithPendingInvite();
+      expect((await remove(org.id, m.id, o.token)).statusCode).toBe(204);
+      expect((await accept(pending, u.token)).statusCode).toBe(404);
+      expect(await app.prisma.membership.count({ where: { orgId: org.id, userId: u.id } })).toBe(0);
+      expect((await accept(otherOrg, u.token)).statusCode).toBe(200);
+    });
+
+    it('leaving deletes them; accepting afterwards 404s', async () => {
+      const { org, u, pending, otherOrg } = await memberWithPendingInvite();
+      expect((await leave(org.id, u.token)).statusCode).toBe(204);
+      expect((await accept(pending, u.token)).statusCode).toBe(404);
+      expect(await app.prisma.membership.count({ where: { orgId: org.id, userId: u.id } })).toBe(0);
+      expect((await accept(otherOrg, u.token)).statusCode).toBe(200);
+    });
+  });
+
+  it('lists each member with their apps', async () => {
+    const { o, org } = await orgOf('o@x.io', 'team');
+    const { org: other } = await orgOf('p@x.io', 'team');
+    const shop = await newApp(org.id, 'Shop');
+    const admin = await newApp(org.id, 'Admin panel');
+    await newApp(org.id, 'Not theirs');
+    const elsewhere = await newApp(other.id, 'Else');
+    const u = await user('u@x.io');
+    const m = await member(u.id, org.id, 'MEMBER');
+    await member(u.id, other.id, 'MEMBER');
+    // Inserted out of app order; listed by app createdAt.
+    await app.prisma.appAccess.create({ data: { appId: admin.id, userId: u.id, role: 'VIEWER' } });
+    await app.prisma.appAccess.create({ data: { appId: elsewhere.id, userId: u.id, role: 'MEMBER' } });
+    await app.prisma.appAccess.create({ data: { appId: shop.id, userId: u.id, role: 'MEMBER' } });
+
+    const res = await app.inject({ method: 'GET', url: `/v1/orgs/${org.id}/members`, headers: as(o.token) });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual([
+      expect.objectContaining({ role: 'OWNER', user: { id: o.id, email: 'o@x.io', name: 'o@x.io' }, allApps: true, apps: [] }),
+      {
+        id: m.id, role: 'MEMBER', createdAt: m.createdAt.toISOString(),
+        user: { id: u.id, email: 'u@x.io', name: 'u@x.io' },
+        allApps: false,
+        apps: [{ id: shop.id, name: 'Shop', role: 'MEMBER' }, { id: admin.id, name: 'Admin panel', role: 'VIEWER' }],
+      },
+    ]);
+  });
+
+  // Accept takes the org lock, then the membership locks. A role change,
+  // removal or leave that locked the membership rows first and the org second
+  // would deadlock against it. Pin it: the holder plays an accept that holds
+  // the org row and then asks for the owner and target rows.
+  it('a role change, removal or leave behind an accept\'s org lock waits, then completes without deadlock', async () => {
+    const { o, org } = await orgOf('o@x.io', 'team');
+    const shop = await newApp(org.id, 'Shop');
+    const n = await user('n@x.io');
+    const cases: [string, (m: { id: string }, token: string) => Promise<Res>, number][] = [
+      ['p@x.io', (m) => patch(org.id, m.id, o.token, 'VIEWER'), 200],
+      ['r@x.io', (m) => remove(org.id, m.id, o.token), 204],
+      ['l@x.io', (_m, token) => leave(org.id, token), 204],
+    ];
+    for (const [email, send, status] of cases) {
+      const u = await user(email);
+      const m = await member(u.id, org.id, 'MEMBER');
+      await grant(u.id, [shop.id], 'MEMBER');
+      let res: Promise<Res> | undefined;
+      await app.prisma.$transaction(async (tx) => {
+        await lockOrg(tx, org.id);
+        res = send(m, u.token);
+        expect(await settledOrBlocked(app.prisma, res, tx)).toBe('blocked');
+        await lockOwnersAndTarget(tx, org.id, { userId: n.id });
+      });
+      expect((await res!).statusCode).toBe(status);
+    }
   });
 });
