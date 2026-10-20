@@ -4,6 +4,7 @@ import { requireRole, requireAppRole, roleAtLeast } from '../orgs/rbac.js';
 import { generateKey } from '../ingest/keys.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { sampleKeyRoutes } from './sample-key.js';
+import { accessRoutes } from './access.js';
 import { lockOrg } from '../orgs/locks.js';
 import { limitsFor, PlanLimitError, sendPlanLimit } from '../plans.js';
 
@@ -12,6 +13,7 @@ const appSelect = { id: true, name: true, env: true, createdAt: true } as const;
 
 export async function appRoutes(app: FastifyInstance): Promise<void> {
   await app.register(sampleKeyRoutes);
+  await app.register(accessRoutes);
 
   // MEMBER and VIEWER see only the apps they hold an AppAccess row for.
   app.get('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('VIEWER')] }, async (req) =>
@@ -87,6 +89,31 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     if (!row) return reply.code(404).send({ error: 'Not Found' });
     await app.prisma.ingestKey.update({ where: { id: keyId }, data: { revokedAt: new Date() } });
     app.keys.invalidate(row.keyHash);
+    return reply.code(204).send();
+  });
+
+  // Deletes the app; the cascades take its keys, signatures (and their
+  // samples, rollups, alerts, advice), AppAccess rows and app invites.
+  //
+  // The org lock comes first, like every other writer here: an accept or a
+  // demotion inserting an AppAccess row for this app holds the org lock and
+  // then takes a KEY SHARE lock on the app row, so deleting the app row
+  // before locking the org would deadlock against the one (it also holds
+  // the claimed invite we cascade into) or leave the other inserting a row
+  // for an app that's gone (FK error). Under the lock they simply run
+  // before or after us.
+  app.delete('/v1/apps/:id', { preHandler: [app.authenticate, app.requireVerified, requireAppRole('ADMIN')] }, async (req, reply) => {
+    const appId = req.appId;
+    const hashes = await app.prisma.$transaction(async (tx) => {
+      if (!(await lockOrg(tx, req.membership.orgId))) return null;
+      const keys = await tx.ingestKey.findMany({ where: { appId }, select: { keyHash: true } });
+      const { count } = await tx.app.deleteMany({ where: { id: appId } });
+      return count === 0 ? null : keys.map((k) => k.keyHash);
+    });
+    if (!hashes) return reply.code(404).send({ error: 'Not Found' });
+    // KeyResolver caches a key for 60s; drop them so ingest 401s at once
+    // instead of writing for an app that no longer exists.
+    for (const hash of hashes) app.keys.invalidate(hash);
     return reply.code(204).send();
   });
 }
