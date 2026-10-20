@@ -28,7 +28,9 @@ export default async function QueriesPage({
   // Authorises the org↔app pairing; the app ID (not the URL value) goes to the API.
   const ctx = await getShellContext(org, app);
   const base = `/dashboard/${encodeURIComponent(org)}/${encodeURIComponent(app)}`;
-  const filters = parseFilters(sp);
+  // The plan's daily retention limits the range (a longer bookmarked range falls back to 24h).
+  const retentionDays = ctx.currentOrg.limits.dailyRetentionDays;
+  const filters = parseFilters(sp, retentionDays);
   const search = filtersToSearch(filters);
 
   const token = ctx.session.accessToken;
@@ -62,7 +64,7 @@ export default async function QueriesPage({
 
   return (
     <>
-      <PageHeader title="Queries" crumbs={[{ label: org }, { label: 'Queries' }]} actions={<RangeControl value={filters.range} />} />
+      <PageHeader title="Queries" crumbs={[{ label: org }, { label: 'Queries' }]} actions={<RangeControl value={filters.range} retentionDays={retentionDays} />} />
       <FadeIn>
       <div className="flex flex-col gap-4 p-6">
         <QueryFiltersBar models={models} ops={ops} value={filters} />

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseRange, rangeToWindow, rangeToParams } from './range';
+import { parseRange, presetAllowed, rangeToWindow, rangeToParams } from './range';
 
 const NOW = new Date('2026-10-18T12:00:00.000Z');
 
@@ -27,6 +27,34 @@ describe('parseRange', () => {
     expect(parseRange({ range: 'custom', from: '2026-10-05', to: '2026-10-05' })).toEqual({
       kind: 'custom', from: '2026-10-05T00:00:00.000Z', to: '2026-10-05T23:59:59.999Z',
     }));
+});
+
+describe('parseRange with the plan\'s retention', () => {
+  it('a preset longer than retention falls back to 24h (Review Focus)', () =>
+    expect(parseRange({ range: '30d' }, 7)).toEqual({ kind: 'preset', preset: '24h' }));
+  it('a preset within retention is kept', () => expect(parseRange({ range: '7d' }, 7)).toEqual({ kind: 'preset', preset: '7d' }));
+  it('no retention given keeps every preset', () => expect(parseRange({ range: '30d' })).toEqual({ kind: 'preset', preset: '30d' }));
+  it('a custom range starting before retention is clamped to the first kept day', () =>
+    // 7 days before 2026-10-18T12:00Z is 2026-10-11.
+    expect(parseRange({ range: 'custom', from: '2026-09-01', to: '2026-10-15' }, 7, NOW)).toEqual({
+      kind: 'custom', from: '2026-10-11T00:00:00.000Z', to: '2026-10-15T23:59:59.999Z',
+    }));
+  it('a custom range inside retention is kept', () =>
+    expect(parseRange({ range: 'custom', from: '2026-10-12', to: '2026-10-15' }, 7, NOW)).toEqual({
+      kind: 'custom', from: '2026-10-12T00:00:00.000Z', to: '2026-10-15T23:59:59.999Z',
+    }));
+  it('a custom range wholly before retention falls back to 24h', () =>
+    expect(parseRange({ range: 'custom', from: '2026-09-01', to: '2026-09-05' }, 7, NOW)).toEqual({ kind: 'preset', preset: '24h' }));
+});
+
+describe('presetAllowed', () => {
+  it('allows presets up to the retention and refuses longer ones', () => {
+    expect(presetAllowed('1h', 7)).toBe(true);
+    expect(presetAllowed('24h', 7)).toBe(true);
+    expect(presetAllowed('7d', 7)).toBe(true);
+    expect(presetAllowed('30d', 7)).toBe(false);
+    expect(presetAllowed('30d', 30)).toBe(true);
+  });
 });
 
 describe('rangeToWindow', () => {

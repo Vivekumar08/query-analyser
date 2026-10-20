@@ -6,6 +6,7 @@ const router = vi.hoisted(() => ({ refresh: vi.fn(), push: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => router }));
 
 import { OrganisationsCard } from './OrganisationsCard';
+import { PLAN_LIMIT_COPY } from '@/src/plan-limits';
 
 type Org = { id: string; slug: string; name: string; role: 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER' };
 const orgs: Org[] = [
@@ -29,7 +30,7 @@ afterEach(() => {
 
 describe('OrganisationsCard', () => {
   it('lists each org with role and an Open link to its dashboard', () => {
-    render(<OrganisationsCard orgs={orgs} />);
+    render(<OrganisationsCard orgs={orgs} canCreateOrg />);
     expect(screen.getByRole('heading', { name: 'Your organisations' })).toBeTruthy();
     expect(screen.getByText('Owner')).toBeTruthy();
     expect(screen.getByText('Member')).toBeTruthy();
@@ -40,7 +41,7 @@ describe('OrganisationsCard', () => {
 
   it('leaves only after confirming, removes the row, announces it and keeps focus off <body>', async () => {
     fetchMock.mockResolvedValueOnce(reply(204));
-    render(<OrganisationsCard orgs={orgs} />);
+    render(<OrganisationsCard orgs={orgs} canCreateOrg />);
     fireEvent.click(screen.getByRole('button', { name: 'Leave Team' }));
     expect(fetchMock).not.toHaveBeenCalled();
     expect(screen.getByRole('alertdialog').textContent).toContain('Leave Team?');
@@ -63,7 +64,7 @@ describe('OrganisationsCard', () => {
 
   it('shows the only-owner message on 409 and keeps the row', async () => {
     fetchMock.mockResolvedValueOnce(reply(409, { error: "You're the only owner. Make someone else an owner first." }));
-    render(<OrganisationsCard orgs={orgs} />);
+    render(<OrganisationsCard orgs={orgs} canCreateOrg />);
     fireEvent.click(screen.getByRole('button', { name: 'Leave Acme' }));
     fireEvent.click(screen.getByRole('button', { name: 'Leave organisation' }));
 
@@ -73,9 +74,21 @@ describe('OrganisationsCard', () => {
     expect(router.refresh).not.toHaveBeenCalled();
   });
 
+  it('Create organisation is disabled with the orgs copy when the limit is reached', () => {
+    render(<OrganisationsCard orgs={orgs} canCreateOrg={false} />);
+    expect(screen.queryByRole('link', { name: 'Create organisation' })).toBeNull();
+    const button = screen.getByRole('button', { name: 'Create organisation' });
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+    const copy = screen.getByText(PLAN_LIMIT_COPY.orgs);
+    expect(button.getAttribute('aria-describedby')).toBe(copy.id);
+    fireEvent.click(button);
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
   it('says so when the last org is gone', async () => {
     fetchMock.mockResolvedValueOnce(reply(204));
-    render(<OrganisationsCard orgs={[orgs[1]!]} />);
+    render(<OrganisationsCard orgs={[orgs[1]!]} canCreateOrg />);
     fireEvent.click(screen.getByRole('button', { name: 'Leave Team' }));
     fireEvent.click(screen.getByRole('button', { name: 'Leave organisation' }));
     expect(await screen.findByText("You're not in any organisation yet.")).toBeTruthy();
@@ -85,7 +98,7 @@ describe('OrganisationsCard', () => {
   it('disables the row while the leave is in flight, so a double click sends once', async () => {
     let resolve!: (v: unknown) => void;
     fetchMock.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
-    render(<OrganisationsCard orgs={orgs} />);
+    render(<OrganisationsCard orgs={orgs} canCreateOrg />);
     fireEvent.click(screen.getByRole('button', { name: 'Leave Team' }));
     fireEvent.click(screen.getByRole('button', { name: 'Leave organisation' }));
     const leaveTeam = await screen.findByRole('button', { name: 'Leave Team' });

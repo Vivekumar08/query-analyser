@@ -6,6 +6,7 @@ import { LAST_APP_COOKIE, orgPath, readLastApp, resolveOrgLanding } from '@/src/
 import { isSafeSegment } from '@/src/org-bff';
 import { BareShell } from '@/components/dashboard/BareShell';
 import { OrgHome } from '@/components/dashboard/OrgHome';
+import { canCreateOrg } from '@/src/plan-limits';
 
 /**
  * /dashboard/<slug>: into the org's last-used (or first) app, else the org
@@ -54,7 +55,7 @@ export default async function OrgIndex({ params }: { params: Promise<{ org: stri
   const toRef = (o: (typeof orgsRes.data)[number]) => ({ slug: o.slug, name: o.name, role: o.role });
   return (
     <BareShell>
-      <OrgHome org={toRef(org)} orgs={orgsRes.data.map(toRef)} suspended={suspended} />
+      <OrgHome org={toRef(org)} orgs={orgsRes.data.map(toRef)} suspended={suspended} canCreateOrg={canCreateOrg(orgsRes.data)} />
     </BareShell>
   );
 }

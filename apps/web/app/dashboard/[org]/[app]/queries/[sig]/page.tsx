@@ -33,13 +33,15 @@ export default async function QueryDetailPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { org, app, sig } = await params;
-  const range = parseRange(await searchParams);
+  // Authorises the org↔app pairing; the app ID (not the URL value) goes to the API.
+  const ctx = await getShellContext(org, app);
+  // The plan's daily retention limits the range (a longer bookmarked range falls back to 24h).
+  const retentionDays = ctx.currentOrg.limits.dailyRetentionDays;
+  const range = parseRange(await searchParams, retentionDays);
   const rangeQs = new URLSearchParams(rangeToParams(range)).toString();
   const base = `/dashboard/${encodeURIComponent(org)}/${encodeURIComponent(app)}`;
   const listHref = `${base}/queries${rangeQs ? `?${rangeQs}` : ''}`;
   const self = `${base}/queries/${encodeURIComponent(sig)}${rangeQs ? `?${rangeQs}` : ''}`;
-  // Authorises the org↔app pairing; the app ID (not the URL value) goes to the API.
-  const ctx = await getShellContext(org, app);
   const token = ctx.session.accessToken;
   const appId = ctx.app.id;
 
@@ -66,7 +68,7 @@ export default async function QueryDetailPage({
       <PageHeader
         title={title}
         crumbs={[{ label: org }, { label: 'Queries', href: listHref }, { label: title }]}
-        actions={<RangeControl value={range} />}
+        actions={<RangeControl value={range} retentionDays={retentionDays} />}
       />
       <FadeIn>
       <div className="flex flex-col gap-6 p-6">

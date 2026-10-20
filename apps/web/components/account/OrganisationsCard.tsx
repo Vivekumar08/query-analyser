@@ -12,12 +12,17 @@ import {
 } from '@/components/ui/alert-dialog';
 import { ROLE_LABEL, type Role } from '@/src/dashboard-types';
 import { NEW_ORG_HREF, orgPath } from '@/src/landing';
+import { BlockedAction } from '@/components/dashboard/BlockedAction';
+import { PLAN_LIMIT_COPY } from '@/src/plan-limits';
 import { GENERIC, HEADING_CLASS, JSON_HEADERS, errorOf, refreshSession } from './request';
 
 type Org = { id: string; slug: string; name: string; role: Role };
 
-/** Account → Your organisations: open one, leave one (confirmed), or create another. */
-export function OrganisationsCard({ orgs: initial }: { orgs: Org[] }) {
+/**
+ * Account → Your organisations: open one, leave one (confirmed), or create
+ * another. `canCreateOrg` false shows Create disabled with the plan's reason.
+ */
+export function OrganisationsCard({ orgs: initial, canCreateOrg }: { orgs: Org[]; canCreateOrg: boolean }) {
   const router = useRouter();
   const [orgs, setOrgs] = useState(initial);
   const [busy, setBusy] = useState<string | null>(null);
@@ -97,9 +102,13 @@ export function OrganisationsCard({ orgs: initial }: { orgs: Org[] }) {
         )}
         {left && <p role="status">You left {left}.</p>}
         {error && <p role="alert" className="text-destructive">{error}</p>}
-        <Button asChild size="sm" variant="outline" className="self-start">
-          <Link href={NEW_ORG_HREF}>Create organisation</Link>
-        </Button>
+        {canCreateOrg ? (
+          <Button asChild size="sm" variant="outline" className="self-start">
+            <Link href={NEW_ORG_HREF}>Create organisation</Link>
+          </Button>
+        ) : (
+          <BlockedAction size="sm" label="Create organisation" reason={PLAN_LIMIT_COPY.orgs} />
+        )}
       </CardContent>
 
       <AlertDialog open={confirm !== null} onOpenChange={(o) => { if (!o) setConfirm(null); }}>

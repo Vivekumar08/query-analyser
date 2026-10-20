@@ -6,6 +6,7 @@ import { BareShell } from '@/components/dashboard/BareShell';
 import { ProfileCard } from '@/components/account/ProfileCard';
 import { PasswordCard } from '@/components/account/PasswordCard';
 import { OrganisationsCard } from '@/components/account/OrganisationsCard';
+import { canCreateOrg } from '@/src/plan-limits';
 
 /**
  * /dashboard/account: name, password and the user's organisations, in the
@@ -32,7 +33,10 @@ export default async function AccountPage() {
         verified={Boolean(session.user.emailVerifiedAt)}
       />
       <PasswordCard />
-      <OrganisationsCard orgs={orgsRes.data.map(({ id, slug, name, role }) => ({ id, slug, name, role }))} />
+      <OrganisationsCard
+        orgs={orgsRes.data.map(({ id, slug, name, role }) => ({ id, slug, name, role }))}
+        canCreateOrg={canCreateOrg(orgsRes.data)}
+      />
     </BareShell>
   );
 }

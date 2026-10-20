@@ -4,6 +4,8 @@ import { parseFilters, filtersToSearch, filtersToApiQuery, optionsApiQuery, MAX_
 const NOW = new Date('2026-10-18T12:00:00.000Z');
 
 describe('parseFilters', () => {
+  it('passes the retention through to the range', () =>
+    expect(parseFilters({ range: '30d' }, 7).range).toEqual({ kind: 'preset', preset: '24h' }));
   it('defaults', () => expect(parseFilters({})).toEqual({
     range: { kind: 'preset', preset: '24h' }, sort: 'wasted', page: 1 }));
   it('single model and op', () => {
