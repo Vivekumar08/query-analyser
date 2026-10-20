@@ -3,6 +3,7 @@ import type { Session } from './auth';
 import { rejectCrossSiteAuthPost } from './same-origin-guard';
 import { sessionOr401 } from './route-session';
 import { ROLES, type Role } from './dashboard-types';
+import { planLimitCopy } from './plan-limits';
 
 /*
  * Shared plumbing for the member/invite BFF route handlers:
@@ -27,6 +28,18 @@ export const jsonError = (error: string, status: number): Response =>
   NextResponse.json({ error }, { status, headers: NO_STORE });
 
 export const badParam = (): Response => jsonError('Invalid request.', 400);
+
+/**
+ * A plan-limit refusal (`403 { error: 'plan-limit', limit }`) as its fixed
+ * copy plus the `limit`, so the UI can tell which one it hit. Null for any
+ * other failure, including a 403 naming a limit this build doesn't know.
+ */
+export function planLimitResponse(res: { status: number; error: string; limit?: string }): Response | null {
+  if (res.status !== 403 || res.error !== 'plan-limit') return null;
+  const copy = planLimitCopy(res.limit);
+  if (copy === null) return null;
+  return NextResponse.json({ error: copy, limit: res.limit }, { status: 403, headers: NO_STORE });
+}
 
 /** The session to call upstream with, or the response to return. Mutations are CSRF-checked first. */
 export async function gate(request: Request, mutation: boolean): Promise<{ session: Session } | { response: Response }> {

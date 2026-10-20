@@ -1,12 +1,16 @@
 import { NextResponse } from 'next/server';
 import { authedFetch } from '@/src/api';
-import { badParam, gate, isRole, isSafeSegment, jsonError, NO_STORE } from '@/src/org-bff';
+import { badParam, gate, isRole, isSafeSegment, jsonError, NO_STORE, planLimitResponse } from '@/src/org-bff';
 import { safeUpstreamMessage } from '@/src/upstream-errors';
 import type { Role } from '@/src/dashboard-types';
 
 type Params = { params: Promise<{ org: string; id: string }> };
 
-function failure(status: number): Response {
+function failure(res: { status: number; error: string; limit?: string }): Response {
+  // A role change the plan doesn't allow (`limit: 'role'`).
+  const limited = planLimitResponse(res);
+  if (limited) return limited;
+  const { status } = res;
   switch (status) {
     case 400: return jsonError('Choose a valid role.', 400);
     case 401: return jsonError('unauthorized', 401);
@@ -30,13 +34,13 @@ export async function PATCH(request: Request, { params }: Params): Promise<Respo
 
   const raw = (await request.json().catch(() => null)) as { role?: unknown } | null;
   const role = raw && typeof raw === 'object' ? raw.role : undefined;
-  if (!isRole(role)) return failure(400);
+  if (!isRole(role)) return jsonError('Choose a valid role.', 400);
 
   const res = await authedFetch<{ id: string; role: Role }>(path(org, id), g.session.accessToken, {
     method: 'PATCH',
     body: JSON.stringify({ role }),
   });
-  if (!res.ok) return failure(res.status);
+  if (!res.ok) return failure(res);
   return NextResponse.json({ id: res.data.id, role: res.data.role }, { headers: NO_STORE });
 }
 
@@ -48,6 +52,6 @@ export async function DELETE(request: Request, { params }: Params): Promise<Resp
   if (!isSafeSegment(org) || !isSafeSegment(id)) return badParam();
 
   const res = await authedFetch(path(org, id), g.session.accessToken, { method: 'DELETE' });
-  if (!res.ok) return failure(res.status);
+  if (!res.ok) return failure(res);
   return new Response(null, { status: 204, headers: NO_STORE });
 }

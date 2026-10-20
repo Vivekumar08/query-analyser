@@ -108,11 +108,41 @@ describe('POST invite', () => {
     expect(authedFetch).not.toHaveBeenCalled();
   });
 
-  it('upstream "only an owner can invite an owner" → a safe 403 message', async () => {
-    upstream(403, 'only an owner can invite an owner');
-    const res = await createInvite(req('POST', { email: 'a@b.co', role: 'OWNER' }), orgCtx());
+  it('forwards {email, role, appId} exactly, dropping extra keys', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({
+      ok: true,
+      data: { id: 'i1', email: 'a@b.co', role: 'MEMBER', expiresAt: 'e', token: 'tOk_en-1' },
+    });
+    const res = await createInvite(req('POST', { email: 'a@b.co', role: 'MEMBER', appId: 'app1', orgId: 'other' }), orgCtx());
+    expect(res.status).toBe(201);
+    expect(JSON.parse(call()[2]!.body as string)).toEqual({ email: 'a@b.co', role: 'MEMBER', appId: 'app1' });
+  });
+
+  it('an unsafe appId → 400, API untouched', async () => {
+    for (const appId of ['..', '.', 'a/b', '', 7]) {
+      const res = await createInvite(req('POST', { email: 'a@b.co', role: 'MEMBER', appId }), orgCtx());
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Enter a valid email address and choose a role.' });
+    }
+    expect(authedFetch).not.toHaveBeenCalled();
+  });
+
+  it('a plan-limit 403 → its copy and limit, with no-store', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 403, error: 'plan-limit', limit: 'seats' });
+    let res = await createInvite(req('POST', { email: 'a@b.co', role: 'MEMBER', appId: 'app1' }), orgCtx());
     expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'Only an owner can invite another owner.' });
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toEqual({ error: 'During the beta, you can invite one teammate. More seats with paid plans.', limit: 'seats' });
+    vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 403, error: 'plan-limit', limit: 'role' });
+    res = await createInvite(req('POST', { email: 'a@b.co', role: 'ADMIN' }), orgCtx());
+    expect(await res.json()).toEqual({ error: 'During the beta, teammates join as Members.', limit: 'role' });
+  });
+
+  it('a 404 (the app is gone) → "That app no longer exists."', async () => {
+    upstream(404, 'Not Found');
+    const res = await createInvite(req('POST', { email: 'a@b.co', role: 'MEMBER', appId: 'app1' }), orgCtx());
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'That app no longer exists.' });
   });
 
   it('any other upstream 403 → "Only workspace admins can invite teammates."', async () => {
@@ -127,13 +157,6 @@ describe('POST invite', () => {
     const res = await createInvite(req('POST', { email: 'a@b.co', role: 'MEMBER' }), orgCtx());
     expect(res.status).toBe(429);
     expect(await res.json()).toEqual({ error: 'Too many invites — try again in a minute.' });
-  });
-
-  it('409 at the pending cap → the API\'s message', async () => {
-    upstream(409, 'Too many pending invites — revoke some first.');
-    const res = await createInvite(req('POST', { email: 'a@b.co', role: 'MEMBER' }), orgCtx());
-    expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: 'Too many pending invites — revoke some first.' });
   });
 
   it('401 stays 401; 5xx → 502 without the upstream detail', async () => {
@@ -172,6 +195,13 @@ describe('PATCH member role', () => {
     expect(call()[0]).toBe('/v1/orgs/org1/members/m1');
     expect(call()[2]!.method).toBe('PATCH');
     expect(JSON.parse(call()[2]!.body as string)).toEqual({ role: 'ADMIN' });
+  });
+  it('a plan-limit role refusal → the role copy', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 403, error: 'plan-limit', limit: 'role' });
+    const res = await changeRole(req('PATCH', { role: 'VIEWER' }), idCtx('m1'));
+    expect(res.status).toBe(403);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toEqual({ error: 'During the beta, teammates join as Members.', limit: 'role' });
   });
   it('an unknown role → 400, API untouched', async () => {
     expect((await changeRole(req('PATCH', { role: 'GOD' }), idCtx('m1'))).status).toBe(400);
@@ -218,6 +248,23 @@ describe('POST accept', () => {
     expect(await res.json()).toEqual({ orgId: 'org1', slug: 'acme' });
     expect(call()[0]).toBe('/v1/invites/tOk_en-1/accept');
     expect(call()[2]!.method).toBe('POST');
+  });
+
+  it('passes appId through only when it is a safe segment', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: true, data: { orgId: 'org1', slug: 'acme', role: 'MEMBER', appId: 'app1' } });
+    expect(await (await acceptInvite(req('POST', { token: 'abc' }))).json()).toEqual({ orgId: 'org1', slug: 'acme', appId: 'app1' });
+    for (const appId of ['..', 'a/b', 7]) {
+      vi.mocked(authedFetch).mockResolvedValue({ ok: true, data: { orgId: 'org1', slug: 'acme', role: 'MEMBER', appId } });
+      expect(await (await acceptInvite(req('POST', { token: 'abc' }))).json()).toEqual({ orgId: 'org1', slug: 'acme' });
+    }
+  });
+
+  it('a plan-limit 403 → its copy and limit, not "different email"', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 403, error: 'plan-limit', limit: 'role' });
+    const res = await acceptInvite(req('POST', { token: 'abc' }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toEqual({ error: 'During the beta, teammates join as Members.', limit: 'role' });
   });
 
   it('410 and 404 (revoked) → "This invite has expired or was already used."', async () => {

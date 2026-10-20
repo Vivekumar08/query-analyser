@@ -62,6 +62,15 @@ describe('apiFetch', () => {
     });
   });
 
+  it('surfaces which plan limit a 403 plan-limit hit', async () => {
+    mockFetch(403, { error: 'plan-limit', limit: 'seats', max: 1 });
+    const res = await apiFetch('/v1/orgs/o/invites', { method: 'POST', body: '{}' });
+    expect(res).toEqual({ ok: false, status: 403, error: 'plan-limit', limit: 'seats' });
+    // Only a string is taken; anything else is left off.
+    mockFetch(403, { error: 'plan-limit', limit: 3 });
+    expect(await apiFetch('/v1/orgs')).not.toHaveProperty('limit');
+  });
+
   it('returns a failure result on 401 rather than throwing', async () => {
     // Callers branch on this to trigger the refresh redirect. A thrown error
     // would surface as a 500 page instead of a silent token rotation.

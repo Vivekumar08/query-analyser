@@ -4,6 +4,7 @@ import { listOrgs } from '@/src/dashboard-api';
 import { rejectCrossSiteAuthPost } from '@/src/same-origin-guard';
 import { sessionOr401 } from '@/src/route-session';
 import { safeUpstreamMessage } from '@/src/upstream-errors';
+import { NO_STORE, planLimitResponse } from '@/src/org-bff';
 
 /** The API requires an `env` (no default); first apps are production. */
 const FIRST_APP_ENV = 'production';
@@ -29,27 +30,30 @@ export async function POST(request: Request): Promise<Response> {
   const orgSlug = typeof body?.org === 'string' ? body.org : '';
   const name = typeof body?.name === 'string' ? body.name.trim() : '';
   if (!orgSlug || name.length < 1 || name.length > 60) {
-    return NextResponse.json({ error: 'App name must be 1–60 characters.' }, { status: 400 });
+    return NextResponse.json({ error: 'App name must be 1–60 characters.' }, { status: 400, headers: NO_STORE });
   }
 
   const orgs = await listOrgs(t);
   if (!orgs.ok) {
-    return NextResponse.json({ error: safeUpstreamMessage(orgs.status, 'generic') }, { status: orgs.status === 401 ? 401 : 502 });
+    return NextResponse.json({ error: safeUpstreamMessage(orgs.status, 'generic') }, { status: orgs.status === 401 ? 401 : 502, headers: NO_STORE });
   }
   const org = orgs.data.find((o) => o.slug === orgSlug);
-  if (!org) return NextResponse.json({ error: 'Workspace not found.' }, { status: 404 });
+  if (!org) return NextResponse.json({ error: 'Workspace not found.' }, { status: 404, headers: NO_STORE });
 
   const created = await authedFetch<{ id: string; name: string }>(`/v1/orgs/${encodeURIComponent(org.id)}/apps`, t, {
     method: 'POST',
     body: JSON.stringify({ name, env: FIRST_APP_ENV }),
   });
   if (!created.ok) {
-    return NextResponse.json({ error: safeUpstreamMessage(created.status, 'app') }, { status: created.status >= 500 || created.status === 0 ? 502 : created.status });
+    return planLimitResponse(created) ?? NextResponse.json(
+      { error: safeUpstreamMessage(created.status, 'app') },
+      { status: created.status >= 500 || created.status === 0 ? 502 : created.status, headers: NO_STORE },
+    );
   }
   const key = await authedFetch<{ key: string }>(`/v1/apps/${encodeURIComponent(created.data.id)}/keys`, t, { method: 'POST' });
 
   const appBody = { id: created.data.id, name: created.data.name };
-  const headers = { 'cache-control': 'no-store' };
+  const headers = NO_STORE;
   if (key.ok) return NextResponse.json({ app: appBody, key: key.data.key }, { status: 201, headers });
   // The app exists; the UI offers a recovery path. Creating keys needs ADMIN,
   // so a MEMBER gets 'forbidden' (no retry button), anything else 'failed'.

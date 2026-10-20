@@ -51,6 +51,20 @@ describe('POST /api/onboarding/org', () => {
     expect(body.error).toMatch(/taken/);
     expect(JSON.stringify(body)).not.toContain('internal detail');
   });
+  it('a plan-limit orgs refusal → 403 with the copy and limit, no-store', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: false, status: 403, error: 'plan-limit', limit: 'orgs' });
+    const res = await createOrg(post('/api/onboarding/org', { name: 'Acme' }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toEqual({
+      error: 'During the beta, each account can create one organisation. More with paid plans.', limit: 'orgs',
+    });
+  });
+  it('every reply is no-store', async () => {
+    vi.mocked(authedFetch).mockResolvedValue({ ok: true, data: { slug: 'acme', name: 'Acme' } });
+    expect((await createOrg(post('/api/onboarding/org', { name: 'Acme' }))).headers.get('cache-control')).toBe('no-store');
+    expect((await createOrg(post('/api/onboarding/org', { name: 'A' }))).headers.get('cache-control')).toBe('no-store');
+  });
 });
 
 const orgs = [{ id: 'org-id-1', slug: 'acme', name: 'Acme', plan: 'free', createdAt: 'x', role: 'OWNER' }];
@@ -114,8 +128,22 @@ describe('POST /api/onboarding/app', () => {
     const res = await createApp(post('/api/onboarding/app', { org: 'acme', name: 'svc' }));
     expect(await res.json()).toEqual({ app: { id: 'a1', name: 'svc' }, key: null, keyError: 'forbidden' });
   });
+  it('a plan-limit apps refusal → 403 with the copy and limit, no-store, and no key', async () => {
+    vi.mocked(authedFetch)
+      .mockResolvedValueOnce({ ok: true, data: orgs })
+      .mockResolvedValueOnce({ ok: false, status: 403, error: 'plan-limit', limit: 'apps' });
+    const res = await createApp(post('/api/onboarding/app', { org: 'acme', name: 'svc' }));
+    expect(res.status).toBe(403);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toEqual({
+      error: 'During the beta, each organisation has one app. Delete it to connect a different one, or upgrade later.', limit: 'apps',
+    });
+    expect(authedFetch).toHaveBeenCalledTimes(2);
+  });
   it('rejects an invalid body', async () => {
-    expect((await createApp(post('/api/onboarding/app', { org: '', name: '' }))).status).toBe(400);
+    const res = await createApp(post('/api/onboarding/app', { org: '', name: '' }));
+    expect(res.status).toBe(400);
+    expect(res.headers.get('cache-control')).toBe('no-store');
   });
 });
 

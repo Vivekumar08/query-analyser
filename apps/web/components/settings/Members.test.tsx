@@ -4,9 +4,9 @@ import { cleanup, render, screen, fireEvent, within } from '@testing-library/rea
 import { Members } from './Members';
 import type { Member, PendingInvite } from '@/src/dashboard-types';
 
-const me: Member = { id: 'm-me', role: 'OWNER', createdAt: 'c', user: { id: 'u-me', email: 'me@x.co', name: 'Me' } };
-const ada: Member = { id: 'm-ada', role: 'MEMBER', createdAt: 'c', user: { id: 'u-ada', email: 'ada@x.co', name: 'Ada' } };
-const invite: PendingInvite = { id: 'i1', email: 'new@x.co', role: 'VIEWER', expiresAt: '2026-10-26T00:00:00Z', createdAt: 'c' };
+const me: Member = { id: 'm-me', role: 'OWNER', createdAt: 'c', user: { id: 'u-me', email: 'me@x.co', name: 'Me' }, allApps: true, apps: [] };
+const ada: Member = { id: 'm-ada', role: 'MEMBER', createdAt: 'c', user: { id: 'u-ada', email: 'ada@x.co', name: 'Ada' }, allApps: false, apps: [{ id: 'a1', name: 'Shop', role: 'MEMBER' }] };
+const invite: PendingInvite = { id: 'i1', email: 'new@x.co', role: 'VIEWER', appId: 'a1', expiresAt: '2026-10-26T00:00:00Z', createdAt: 'c' };
 
 let fetchMock: ReturnType<typeof vi.fn>;
 const reply = (status: number, body?: unknown) => ({ ok: status < 300, status, json: async () => body ?? {} });
