@@ -18,6 +18,8 @@ vi.mock('./jobs.js', async (importOriginal) => ({
   })),
 }));
 import { buildApp } from '../app.js';
+import { loadConfig } from '../config.js';
+import { runNightlyJobs } from './jobs.js';
 import { withJobLock, msUntilNextHourAt, msUntilNextUtcMidnight } from './scheduler.js';
 import type { FastifyInstance } from 'fastify';
 
@@ -144,5 +146,13 @@ describe('scheduler registration', () => {
     const busy = await buildApp({ startScheduler: true });
     expect(busy.analysisTimers.length).toBeGreaterThan(0);
     await busy.close();
+  });
+
+  it('passes the configured retention grace to the nightly job', async () => {
+    const graceUntil = new Date('2026-11-15T00:00:00.000Z');
+    vi.mocked(runNightlyJobs).mockClear();
+    const busy = await buildApp({ startScheduler: true, config: { ...loadConfig(), RETENTION_GRACE_UNTIL: graceUntil } });
+    await busy.close(); // awaits the startup catch-up run
+    expect(runNightlyJobs).toHaveBeenCalledWith(expect.objectContaining({ retentionGraceUntil: graceUntil }));
   });
 });

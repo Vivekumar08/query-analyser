@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { randomBytes } from 'node:crypto';
 import { requireRole } from './rbac.js';
 import { Prisma } from '../generated/prisma/client.js';
-import { limitsFor, PlanLimitError, sendPlanLimit } from '../plans.js';
+import { effectiveRetentionDays, limitsFor, PlanLimitError, sendPlanLimit } from '../plans.js';
 import { lockOrg, lockOwnersAndTarget, lockUser } from './locks.js';
 
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
@@ -26,7 +26,17 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
       select: { role: true, org: { select: { id: true, name: true, slug: true, plan: true, createdAt: true } } },
       orderBy: { createdAt: 'asc' },
     });
-    return rows.map((r) => ({ ...r.org, role: r.role, limits: limitsFor(r.org.plan) }));
+    // Retention is the effective value (the grace included), so the web's
+    // range cap matches what the nightly prune keeps.
+    const now = new Date();
+    return rows.map((r) => ({
+      ...r.org,
+      role: r.role,
+      limits: {
+        ...limitsFor(r.org.plan),
+        dailyRetentionDays: effectiveRetentionDays(r.org.plan, now, app.config.RETENTION_GRACE_UNTIL),
+      },
+    }));
   });
 
   app.post('/v1/orgs', { preHandler: [app.authenticate, app.requireVerified] }, async (req, reply) => {

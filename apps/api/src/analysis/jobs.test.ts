@@ -15,7 +15,7 @@ vi.mock('./compaction.js', async (importOriginal) => {
     ...actual,
     compactDay: vi.fn(async () => 0),
     pruneHourly: vi.fn(async () => 0),
-    pruneDaily: vi.fn(async () => 0),
+    pruneDailyByPlan: vi.fn(async () => 0),
   };
 });
 
@@ -32,7 +32,7 @@ beforeEach(async () => {
   // can never leak into the next test's default behaviour.
   vi.mocked(compaction.compactDay).mockReset().mockResolvedValue(0);
   vi.mocked(compaction.pruneHourly).mockReset().mockResolvedValue(0);
-  vi.mocked(compaction.pruneDaily).mockReset().mockResolvedValue(0);
+  vi.mocked(compaction.pruneDailyByPlan).mockReset().mockResolvedValue(0);
 });
 
 afterAll(async () => {
@@ -93,7 +93,7 @@ describe('runNightlyJobs', () => {
       order.push('prune');
       return 0;
     });
-    vi.mocked(compaction.pruneDaily).mockImplementation(async () => 0);
+    vi.mocked(compaction.pruneDailyByPlan).mockImplementation(async () => 0);
 
     await runNightlyJobs({ prisma: app.prisma, now: new Date('2026-09-20T02:00:00.000Z') });
 
@@ -101,7 +101,7 @@ describe('runNightlyJobs', () => {
     expect(order.indexOf('compact')).toBeLessThan(order.indexOf('prune'));
   });
 
-  it('prunes hourly at 7 days and daily at 90 days from now', async () => {
+  it('prunes hourly at 7 days and daily by plan', async () => {
     await seedRollup(new Date('2026-09-19T03:00:00.000Z'));
 
     const seen: Date[] = [];
@@ -110,20 +110,29 @@ describe('runNightlyJobs', () => {
       seen.push(before);
       return 0;
     });
-    vi.mocked(compaction.pruneDaily).mockImplementation(async (_p, before) => {
-      seen.push(before);
-      return 0;
-    });
 
     const now = new Date('2026-09-20T02:00:00.000Z');
-    await runNightlyJobs({ prisma: app.prisma, now });
+    const graceUntil = new Date('2026-12-01T00:00:00.000Z');
+    await runNightlyJobs({ prisma: app.prisma, now, retentionGraceUntil: graceUntil });
 
     // Truncated to UTC midnight, NOT `now - 7 days`: hourly rows may only ever
     // be deleted in whole days, or the oldest retained day is left as a
     // fragment that the next night's compaction writes over its own correct
     // daily row. Retention is therefore 7-8 days rather than exactly 7.
     expect(seen[0]?.toISOString()).toBe('2026-09-13T00:00:00.000Z');
-    expect(seen[1]?.toISOString()).toBe('2026-06-22T02:00:00.000Z');
+    // By identity: deep equality on the Prisma client proxy never terminates.
+    const [prisma, at, grace] = vi.mocked(compaction.pruneDailyByPlan).mock.calls[0] ?? [];
+    expect(prisma).toBe(app.prisma);
+    expect(at).toBe(now);
+    expect(grace).toBe(graceUntil);
+  });
+
+  it('defaults the retention grace to 2027-01-31 when the caller passes none', async () => {
+    const now = new Date('2026-09-20T02:00:00.000Z');
+    await runNightlyJobs({ prisma: app.prisma, now });
+    const [, at, grace] = vi.mocked(compaction.pruneDailyByPlan).mock.calls[0] ?? [];
+    expect(at).toBe(now);
+    expect(grace?.toISOString()).toBe('2027-01-31T00:00:00.000Z');
   });
 });
 

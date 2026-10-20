@@ -1,4 +1,6 @@
 import type { PrismaClient } from '../db.js';
+import { Prisma } from '../generated/prisma/client.js';
+import { effectiveRetentionDays, PLAN_LIMITS } from '../plans.js';
 
 /**
  * Recomputes one whole day from the hourly rollups that still exist and
@@ -64,8 +66,27 @@ export async function pruneHourly(prisma: PrismaClient, before: Date): Promise<n
   return r.count;
 }
 
-/** Deletes daily rollups strictly older than `before`. Retention: 90 days. */
-export async function pruneDaily(prisma: PrismaClient, before: Date): Promise<number> {
-  const r = await prisma.queryDailyRollup.deleteMany({ where: { day: { lt: before } } });
-  return r.count;
+/**
+ * Deletes each org's daily rollups strictly older than `now` minus that org's
+ * effective retention (its plan's days, at least 90 before `graceUntil`).
+ * A plan this code doesn't know is pruned as `free`.
+ *
+ * One statement for every org: the cutoff is picked per row from the owning
+ * org's plan, so the cost doesn't grow with the number of orgs and no row ids
+ * are ever loaded into this process. Prisma's `deleteMany` with a relation
+ * filter would select the matching ids first.
+ *
+ * @returns the number of daily rows deleted
+ */
+export async function pruneDailyByPlan(prisma: PrismaClient, now: Date, graceUntil: Date): Promise<number> {
+  const cutoff = (plan: string) => new Date(now.getTime() - effectiveRetentionDays(plan, now, graceUntil) * 86_400_000);
+  const known = Object.keys(PLAN_LIMITS).map((plan) => Prisma.sql`WHEN o.plan = ${plan} THEN ${cutoff(plan)}::timestamptz`);
+  return prisma.$executeRaw`
+    DELETE FROM "QueryDailyRollup" d
+    USING "QuerySignature" s, "App" a, "Organization" o
+    WHERE s.id = d."signatureId"
+      AND a.id = s."appId"
+      AND o.id = a."orgId"
+      AND d.day < CASE ${Prisma.join(known, ' ')} ELSE ${cutoff('free')}::timestamptz END
+  `;
 }

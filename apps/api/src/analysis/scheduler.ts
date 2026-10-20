@@ -132,7 +132,8 @@ export default fp(async function schedulerPlugin(
   };
 
   const hourly = tick('hourly', HOURLY_LOCK, () => runHourlyJobs({ prisma: app.prisma }));
-  const nightly = tick('nightly', NIGHTLY_LOCK, () => runNightlyJobs({ prisma: app.prisma }));
+  const nightly = tick('nightly', NIGHTLY_LOCK, () =>
+    runNightlyJobs({ prisma: app.prisma, retentionGraceUntil: app.config.RETENTION_GRACE_UNTIL }));
 
   /**
    * Both jobs are scheduled on the WALL CLOCK, not on an interval counted

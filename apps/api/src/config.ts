@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_RETENTION_GRACE_UNTIL } from './plans.js';
 
 const schema = z.object({
   DATABASE_URL: z.string().url(),
@@ -30,7 +31,20 @@ const schema = z.object({
   // to the web server as a whole. Unset (or empty): every limit keys on
   // req.ip, as before. Must match WEB_PROXY_SECRET on the web service.
   WEB_PROXY_SECRET: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(32).optional()),
+  // UTC date (YYYY-MM-DD) until which every org keeps at least 90 days of
+  // daily data, whatever its plan. Empty or unset: the default.
+  RETENTION_GRACE_UNTIL: z
+    .preprocess((v) => (v === '' ? undefined : v), z.string().default(DEFAULT_RETENTION_GRACE_UNTIL))
+    .refine(isUtcDate, 'expected a YYYY-MM-DD date')
+    .transform((v) => new Date(`${v}T00:00:00.000Z`)),
 });
+
+/** A real calendar date in `YYYY-MM-DD` form. `Date` rolls 2027-02-30 over into March, so round-trip it. */
+function isUtcDate(v: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00.000Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
 
 export type Config = z.infer<typeof schema>;
 

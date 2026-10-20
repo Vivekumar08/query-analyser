@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { buildApp } from '../app.js';
-import { compactDay, pruneHourly, pruneDaily } from './compaction.js';
+import { compactDay, pruneHourly, pruneDailyByPlan } from './compaction.js';
 import { runNightlyJobs } from './jobs.js';
 import { resetDb } from '../test/db.js';
 import type { FastifyInstance } from 'fastify';
@@ -162,20 +162,90 @@ describe('pruning', () => {
     expect(left[0]?.bucketHour.toISOString()).toBe('2026-09-20T00:00:00.000Z');
   });
 
-  it('deletes daily rollups older than the cutoff', async () => {
-    await app.prisma.queryDailyRollup.create({
+});
+
+describe('pruneDailyByPlan', () => {
+  const DAY = 86_400_000;
+  const now = new Date('2026-10-20T02:00:00.000Z');
+  const midnight = new Date('2026-10-20T00:00:00.000Z');
+  const graceOver = new Date('2026-10-01T00:00:00.000Z');
+  const graceOn = new Date('2027-01-31T00:00:00.000Z');
+
+  /** An org on `plan` with one signature, and a daily row `ago` UTC midnights before 2026-10-20. */
+  async function orgWithDays(plan: string, ago: number[]) {
+    const org = await app.prisma.organization.create({ data: { name: plan, slug: `prune-${plan}`, plan } });
+    const a = await app.prisma.app.create({ data: { orgId: org.id, name: plan, env: 'production' } });
+    const sig = await app.prisma.querySignature.create({
       data: {
-        signatureId,
-        day: new Date('2026-01-01T00:00:00.000Z'),
-        count: 1,
-        totalMs: 1n,
-        maxMs: 1,
-        hist: [1, 0, 0, 0, 0, 0, 0, 0],
+        appId: a.id, hash: plan.padEnd(16, '0').slice(0, 16), signature: 's', model: 'm', operation: 'find',
+        filterShape: [], sortKeys: [], stages: [],
       },
     });
+    await app.prisma.queryDailyRollup.createMany({
+      data: ago.map((n) => ({
+        signatureId: sig.id, day: new Date(midnight.getTime() - n * DAY),
+        count: 1, totalMs: 1n, maxMs: 1, hist: [1, 0, 0, 0, 0, 0, 0, 0],
+      })),
+    });
+    return sig.id;
+  }
 
-    const deleted = await pruneDaily(app.prisma, new Date('2026-06-01T00:00:00.000Z'));
-    expect(deleted).toBe(1);
+  /** Which of the seeded days are still there, as days-ago numbers, newest first. */
+  async function keptDays(signatureId: string) {
+    const rows = await app.prisma.queryDailyRollup.findMany({ where: { signatureId }, orderBy: { day: 'desc' } });
+    return rows.map((r) => Math.round((midnight.getTime() - r.day.getTime()) / DAY));
+  }
+
+  const AGES = [29, 31, 89, 91, 364, 366];
+
+  beforeEach(async () => { await resetDb(app.prisma); });
+
+  it('after the grace, each org keeps its own plan\'s days (unknown plans keep free\'s)', async () => {
+    const free = await orgWithDays('free', AGES);
+    const pro = await orgWithDays('pro', AGES);
+    const team = await orgWithDays('team', AGES);
+    const unknown = await orgWithDays('legacy-unknown', AGES);
+
+    const deleted = await pruneDailyByPlan(app.prisma, now, graceOver);
+
+    expect(deleted).toBe(5 + 3 + 1 + 5);
+    expect(await keptDays(free)).toEqual([29]);
+    expect(await keptDays(pro)).toEqual([29, 31, 89]);
+    expect(await keptDays(team)).toEqual([29, 31, 89, 91, 364]);
+    expect(await keptDays(unknown)).toEqual([29]);
+  });
+
+  it('inside the grace, every org keeps at least 90 days and team keeps 365', async () => {
+    const free = await orgWithDays('free', AGES);
+    const pro = await orgWithDays('pro', AGES);
+    const team = await orgWithDays('team', AGES);
+    const unknown = await orgWithDays('legacy-unknown', AGES);
+
+    const deleted = await pruneDailyByPlan(app.prisma, now, graceOn);
+
+    expect(deleted).toBe(3 + 3 + 1 + 3);
+    expect(await keptDays(free)).toEqual([29, 31, 89]);
+    expect(await keptDays(pro)).toEqual([29, 31, 89]);
+    expect(await keptDays(team)).toEqual([29, 31, 89, 91, 364]);
+    expect(await keptDays(unknown)).toEqual([29, 31, 89]);
+  });
+
+  it('keeps a row exactly at the cutoff and deletes the day before it', async () => {
+    const free = await orgWithDays('free', [30, 31]);
+    const team = await orgWithDays('team', [365, 366]);
+    expect(await pruneDailyByPlan(app.prisma, midnight, graceOver)).toBe(2);
+    expect(await keptDays(free)).toEqual([30]);
+    expect(await keptDays(team)).toEqual([365]);
+
+    await resetDb(app.prisma);
+    const graced = await orgWithDays('free', [90, 91]);
+    expect(await pruneDailyByPlan(app.prisma, midnight, graceOn)).toBe(1);
+    expect(await keptDays(graced)).toEqual([90]);
+  });
+
+  it('does nothing when no org has data past its retention', async () => {
+    await orgWithDays('free', [0, 29]);
+    expect(await pruneDailyByPlan(app.prisma, now, graceOver)).toBe(0);
   });
 });
 

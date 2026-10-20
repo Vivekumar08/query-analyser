@@ -3,6 +3,7 @@ import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import { settledOrBlocked } from '../test/locks.js';
 import { limitsFor } from '../plans.js';
+import { loadConfig } from '../config.js';
 import { lockOrg, lockOwnersAndTarget } from './locks.js';
 import type { FastifyInstance } from 'fastify';
 
@@ -271,7 +272,29 @@ describe('org limit', () => {
     const u = await user('u@x.io');
     const org = (await create(u.token, 'Mine')).json() as { id: string };
     const list = await app.inject({ method: 'GET', url: '/v1/orgs', headers: as(u.token) });
-    expect(list.json()).toEqual([expect.objectContaining({ id: org.id, plan: 'free', role: 'OWNER', limits: limitsFor('free') })]);
+    // Inside the default retention grace (until 2027-01-31) free keeps 90 days.
+    expect(list.json()).toEqual([expect.objectContaining({
+      id: org.id, plan: 'free', role: 'OWNER', limits: { ...limitsFor('free'), dailyRetentionDays: 90 },
+    })]);
+  });
+
+  it('lists the plan\'s own retention once the grace has passed', async () => {
+    const after = await buildApp({ logger: false, config: { ...loadConfig(), RETENTION_GRACE_UNTIL: new Date('2026-01-01T00:00:00.000Z') } });
+    try {
+      const u = await user('g@x.io');
+      const org = (await create(u.token, 'Mine')).json() as { id: string };
+      await app.prisma.organization.create({
+        data: { name: 'Big', slug: 'big', plan: 'team', memberships: { create: { userId: u.id, role: 'MEMBER' } } },
+      });
+      const list = await after.inject({ method: 'GET', url: '/v1/orgs', headers: as(u.token) });
+      expect(list.json()).toEqual([
+        expect.objectContaining({ id: org.id, limits: limitsFor('free') }),
+        expect.objectContaining({ slug: 'big', limits: limitsFor('team') }),
+      ]);
+      expect(limitsFor('free').dailyRetentionDays).toBe(30);
+    } finally {
+      await after.close();
+    }
   });
 });
 

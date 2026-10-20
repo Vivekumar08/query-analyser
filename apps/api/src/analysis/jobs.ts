@@ -1,7 +1,8 @@
 import type { PrismaClient } from '../db.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { isForeignKeyViolation } from '../db-errors.js';
-import { compactDay, pruneHourly, pruneDaily } from './compaction.js';
+import { compactDay, pruneHourly, pruneDailyByPlan } from './compaction.js';
+import { DEFAULT_RETENTION_GRACE_UNTIL } from '../plans.js';
 import { detectRegression, type HourPoint } from './regression.js';
 import { percentileFromHist } from './percentile.js';
 import { adviceFor, type SuggestionField } from './advice.js';
@@ -20,13 +21,14 @@ function asJsonArray(suggestion: SuggestionField[]): Prisma.InputJsonArray {
 }
 
 const HOURLY_RETENTION_DAYS = 7;
-const DAILY_RETENTION_DAYS = 90;
 const TRAILING_DAYS = 7;
 
 export interface JobDeps {
   prisma: PrismaClient;
   /** Injectable for tests. Defaults to the wall clock. */
   now?: Date;
+  /** `RETENTION_GRACE_UNTIL` from config. Defaults to its default. */
+  retentionGraceUntil?: Date;
 }
 
 export interface HourlyResult {
@@ -150,14 +152,15 @@ export async function runNightlyJobs(deps: JobDeps): Promise<NightlyResult> {
   // recomputation from the fragment; the night after, the rest of the day is
   // pruned and the day is never revisited, so the undercount (count, totalMs,
   // hist and maxMs, which also drags the p95 floor down) is permanent for the
-  // full 90-day daily retention. Truncating makes retention 7-8 days instead
+  // full daily retention (30-365 days by plan). Truncating makes retention 7-8 days instead
   // of exactly 7, which still satisfies the spec and only strengthens the
   // 7-day trailing median the regression rule depends on.
   const hourlyPruned = await pruneHourly(
     deps.prisma,
     startOfUtcDay(daysAgo(now, HOURLY_RETENTION_DAYS)),
   );
-  const dailyPruned = await pruneDaily(deps.prisma, daysAgo(now, DAILY_RETENTION_DAYS));
+  const graceUntil = deps.retentionGraceUntil ?? new Date(`${DEFAULT_RETENTION_GRACE_UNTIL}T00:00:00.000Z`);
+  const dailyPruned = await pruneDailyByPlan(deps.prisma, now, graceUntil);
 
   return { daysCompacted, hourlyPruned, dailyPruned, adviceWritten, newExpensive };
 }

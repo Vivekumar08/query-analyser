@@ -67,4 +67,21 @@ describe('loadConfig', () => {
     expect(loadConfig({ ...base, WEB_PROXY_SECRET: 'p'.repeat(32) }).WEB_PROXY_SECRET).toBe('p'.repeat(32));
     expect(() => loadConfig({ ...base, WEB_PROXY_SECRET: 'too-short' })).toThrow(/WEB_PROXY_SECRET/);
   });
+
+  describe('RETENTION_GRACE_UNTIL', () => {
+    it('defaults to 2027-01-31 UTC when unset or empty', () => {
+      expect(loadConfig(base).RETENTION_GRACE_UNTIL.toISOString()).toBe('2027-01-31T00:00:00.000Z');
+      expect(loadConfig({ ...base, RETENTION_GRACE_UNTIL: '' }).RETENTION_GRACE_UNTIL.toISOString())
+        .toBe('2027-01-31T00:00:00.000Z');
+    });
+
+    it('parses an ISO date', () => {
+      expect(loadConfig({ ...base, RETENTION_GRACE_UNTIL: '2026-12-01' }).RETENTION_GRACE_UNTIL.toISOString())
+        .toBe('2026-12-01T00:00:00.000Z');
+    });
+
+    it.each(['soon', '2027-01-31T00:00:00Z', '2027-02-30', '2027-13-01', '31/01/2027', '1'])('rejects %j, naming the variable', (v) => {
+      expect(() => loadConfig({ ...base, RETENTION_GRACE_UNTIL: v })).toThrow(/RETENTION_GRACE_UNTIL/);
+    });
+  });
 });
