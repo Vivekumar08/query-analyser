@@ -34,6 +34,7 @@ async function setup() {
   const member = async (email: string, role: 'ADMIN' | 'MEMBER' | 'VIEWER') => {
     const u = await verifiedUser(email);
     await app.prisma.membership.create({ data: { userId: u.id, orgId: org.id, role } });
+    if (role !== 'ADMIN') await app.prisma.appAccess.create({ data: { appId: a.id, userId: u.id, role } });
     return u.h;
   };
   return { ownerH: o.h, appId: a.id as string, member };

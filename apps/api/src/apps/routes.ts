@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireRole, requireAppRole } from '../orgs/rbac.js';
+import { requireRole, requireAppRole, roleAtLeast } from '../orgs/rbac.js';
 import { generateKey } from '../ingest/keys.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { sampleKeyRoutes } from './sample-key.js';
@@ -13,8 +13,16 @@ const appSelect = { id: true, name: true, env: true, createdAt: true } as const;
 export async function appRoutes(app: FastifyInstance): Promise<void> {
   await app.register(sampleKeyRoutes);
 
+  // MEMBER and VIEWER see only the apps they hold an AppAccess row for.
   app.get('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('VIEWER')] }, async (req) =>
-    app.prisma.app.findMany({ where: { orgId: req.membership.orgId }, select: appSelect, orderBy: { createdAt: 'asc' } }));
+    app.prisma.app.findMany({
+      where: {
+        orgId: req.membership.orgId,
+        ...(roleAtLeast(req.membership.role, 'ADMIN') ? {} : { access: { some: { userId: req.user.id } } }),
+      },
+      select: appSelect,
+      orderBy: { createdAt: 'asc' },
+    }));
 
   app.post('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req, reply) => {
     const parsed = createSchema.safeParse(req.body);
