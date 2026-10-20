@@ -33,6 +33,11 @@ class InviteGoneError extends Error {}
 // seat instead of lingering forever. Mapped to a 409 outside.
 const ALREADY = Symbol('already-a-member');
 
+// Returned (never thrown), like ALREADY, when an app invite's role is no
+// longer one the org's plan can invite (the plan dropped since it was
+// issued). The invite is consumed; the caller gets 403 plan-limit role.
+const ROLE_LIMIT = Symbol('role-limit');
+
 export async function inviteRoutes(app: FastifyInstance): Promise<void> {
   app.post('/v1/orgs/:org/invites', {
     preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')],
@@ -151,13 +156,17 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
   // - OWNER/ADMIN (org-wide): a membership with that role. An ADMIN invite to
   //   an existing MEMBER/VIEWER promotes them to ADMIN and drops their
   //   AppAccess rows in this org (ADMIN sees every app). Anyone else already
-  //   in the org gets 409 (a legacy OWNER invite never promotes).
+  //   in the org gets 409 (a legacy OWNER invite never promotes). These are
+  //   honoured as issued, even if the plan has since dropped.
+  // - An app invite whose role the org's plan can no longer invite (it was
+  //   downgraded after issue) is refused with 403 plan-limit role, before
+  //   anything else is decided, and is consumed.
   // - MEMBER/VIEWER: AppAccess with the invite's role to its app or, for a
   //   legacy invite issued before invites carried an app (appId null), to
-  //   every app in the org. A newcomer also gets a membership with that role;
-  //   an existing member keeps theirs (the app role may exceed it). An OWNER
-  //   or ADMIN already sees every app: 409. So does a member who already has
-  //   every row with that role.
+  //   every app in the org that existed when it was issued. A newcomer also
+  //   gets a membership with that role; an existing member keeps theirs
+  //   (the app role may exceed it). An OWNER or ADMIN already sees every
+  //   app: 409. So does a member who already has every row with that role.
   app.post('/v1/invites/:token/accept', { preHandler: [app.authenticate, app.requireVerified] }, async (req, reply) => {
     const { token } = req.params as { token: string };
     const inv = await app.prisma.invite.findUnique({
@@ -192,7 +201,10 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
         // FOR UPDATE conflicts with, so two accepts that each inserted
         // before locking would wait on each other (deadlock). It also
         // serialises this with invites, role changes and app creation.
-        await lockOrg(tx, orgId);
+        //
+        // Only the deadlock test ('an accept holding the org lock does not
+        // deadlock…') pins this ordering; keep it first.
+        const org = await lockOrg(tx, orgId);
 
         // Acceptance must be single-use even under concurrent requests for
         // the same token (two tabs, a retried request). `updateMany` with
@@ -203,7 +215,10 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
           where: { id: inv.id, acceptedAt: null, expiresAt: { gt: new Date() } },
           data: { acceptedAt: new Date() },
         });
-        if (claimed.count === 0) throw new InviteGoneError();
+        if (claimed.count === 0 || !org) throw new InviteGoneError();
+
+        const limits = limitsFor(org.plan);
+        if (inv.appId !== null && !limits.invitableRoles.includes(inv.role)) return { refused: ROLE_LIMIT, max: limits.invitableRoles.length } as const;
 
         const { row } = await lockOwnersAndTarget(tx, orgId, { userId });
         const role = inv.role;
@@ -221,7 +236,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
           if (row && (row.role === 'OWNER' || row.role === 'ADMIN')) return ALREADY;
           const targets = inv.appId !== null
             ? [inv.appId]
-            : (await tx.app.findMany({ where: { orgId }, select: { id: true } })).map((a) => a.id);
+            : (await tx.app.findMany({ where: { orgId, createdAt: { lte: inv.createdAt } }, select: { id: true } })).map((a) => a.id);
           if (!row) await tx.membership.create({ data: { userId, orgId, role } });
           const existing = await tx.appAccess.findMany({ where: { userId, appId: { in: targets } }, select: { appId: true, role: true } });
           const current = new Map(existing.map((r) => [r.appId, r.role]));
@@ -237,16 +252,17 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
       if (err instanceof InviteGoneError) {
         return reply.code(410).send({ error: 'invite no longer valid' });
       }
-      // Belt-and-braces: the org lock serialises accepts into one org, so a
-      // duplicate membership or AppAccess row shouldn't happen; if one ever
-      // does, the unique constraints still protect the data and it reads as
-      // the same 409, not a 500.
+      // Belt-and-braces, unreachable today: accepts into one org serialise
+      // on the org lock and decide from rows read under it, so a concurrent
+      // accept can't insert a duplicate under us. If one ever is, the unique constraints
+      // still protect the data and it reads as the same 409, not a 500.
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         return reply.code(409).send({ error: 'already a member' });
       }
       throw err;
     }
     if (result === ALREADY) return reply.code(409).send({ error: 'already a member' });
+    if (result.refused === ROLE_LIMIT) return sendPlanLimit(reply, new PlanLimitError('role', result.max));
     return result;
   });
 }

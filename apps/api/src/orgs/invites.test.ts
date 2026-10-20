@@ -655,6 +655,105 @@ describe('accept', () => {
     expect(await membershipRole(org.id, m.id)).toBe('MEMBER');
   });
 
+  it('an existing MEMBER row is lowered to VIEWER by a VIEWER invite to that app', async () => {
+    const { o, org, appId } = await orgWithOwner();
+    const n = await user('n@x.io');
+    await app.prisma.membership.create({ data: { userId: n.id, orgId: org.id, role: 'MEMBER' } });
+    await app.prisma.appAccess.create({ data: { userId: n.id, appId, role: 'MEMBER' } });
+    const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'VIEWER', appId })).json();
+    const res = await accept(token, n.h);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'VIEWER', appId });
+    expect(await membershipRole(org.id, n.id)).toBe('MEMBER');
+    expect(await rows(n.id)).toEqual([['Shop', 'VIEWER']]);
+  });
+
+  describe('the role is re-checked against the plan at accept (app invites only)', () => {
+    const refused = { error: 'plan-limit', limit: 'role', max: 1 };
+
+    it('a VIEWER app invite issued on team is refused after the org drops to free, and is consumed', async () => {
+      const { o, org, appId } = await orgWithOwner();
+      const { token, id } = (await invite(org, o.h, { email: 'n@x.io', role: 'VIEWER', appId })).json();
+      await app.prisma.organization.update({ where: { id: org.id }, data: { plan: 'free' } });
+      const n = await user('n@x.io');
+      const res = await accept(token, n.h);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(refused);
+      expect((await app.prisma.invite.findUniqueOrThrow({ where: { id } })).acceptedAt).not.toBeNull();
+      expect(await membershipRole(org.id, n.id)).toBeUndefined();
+      expect(await rows(n.id)).toEqual([]);
+      expect((await accept(token, n.h)).statusCode).toBe(410);
+    });
+
+    it('a VIEWER app invite to an existing MEMBER on free is refused before the 409/role decisions, row unchanged', async () => {
+      const { o, org, appId } = await orgWithOwner();
+      const n = await user('n@x.io');
+      await app.prisma.membership.create({ data: { userId: n.id, orgId: org.id, role: 'MEMBER' } });
+      await app.prisma.appAccess.create({ data: { userId: n.id, appId, role: 'MEMBER' } });
+      const { token, id } = (await invite(org, o.h, { email: 'n@x.io', role: 'VIEWER', appId })).json();
+      await app.prisma.organization.update({ where: { id: org.id }, data: { plan: 'free' } });
+      const res = await accept(token, n.h);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(refused);
+      expect((await app.prisma.invite.findUniqueOrThrow({ where: { id } })).acceptedAt).not.toBeNull();
+      expect(await rows(n.id)).toEqual([['Shop', 'MEMBER']]);
+    });
+
+    it('a MEMBER app invite on free accepts', async () => {
+      const { o, org, appId } = await orgWithOwner('A', 'free');
+      const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'MEMBER', appId })).json();
+      const n = await user('n@x.io');
+      const res = await accept(token, n.h);
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'MEMBER', appId });
+      expect(await rows(n.id)).toEqual([['Shop', 'MEMBER']]);
+    });
+
+    it('legacy OWNER and ADMIN invites (appId null) are honoured as issued on free', async () => {
+      const { org } = await orgWithOwner('A', 'free');
+      for (const [email, role] of [['n1@x.io', 'OWNER'], ['n2@x.io', 'ADMIN']] as const) {
+        const { token } = await legacyInvite(org.id, email, role);
+        const u = await user(email);
+        const res = await accept(token, u.h);
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role });
+        expect(await membershipRole(org.id, u.id)).toBe(role);
+      }
+    });
+  });
+
+  describe('a legacy MEMBER/VIEWER invite grants only apps that existed when it was issued', () => {
+    // Shop is backdated, the invite is issued now, and Admin panel is created
+    // a minute later, so the ordering never depends on clock resolution.
+    async function setup() {
+      const { org, appId } = await orgWithOwner();
+      await app.prisma.app.update({ where: { id: appId }, data: { createdAt: new Date(Date.now() - 60_000) } });
+      const legacy = await legacyInvite(org.id, 'n@x.io', 'MEMBER');
+      const newer = (await app.prisma.app.create({ data: { orgId: org.id, name: 'Admin panel', env: 'production', createdAt: new Date(Date.now() + 60_000) }, select: { id: true } })).id;
+      return { org, appId, newer, ...legacy };
+    }
+
+    it('a newcomer gets only the older app', async () => {
+      const { org, token } = await setup();
+      const n = await user('n@x.io');
+      const res = await accept(token, n.h);
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'MEMBER' });
+      expect(await rows(n.id)).toEqual([['Shop', 'MEMBER']]);
+    });
+
+    it('an existing member who already holds the older app gets 409, the invite is consumed, and no newer row', async () => {
+      const { org, appId, token, id } = await setup();
+      const n = await user('n@x.io');
+      await app.prisma.membership.create({ data: { userId: n.id, orgId: org.id, role: 'MEMBER' } });
+      await app.prisma.appAccess.create({ data: { userId: n.id, appId, role: 'MEMBER' } });
+      const res = await accept(token, n.h);
+      expect(res.statusCode).toBe(409);
+      expect((await app.prisma.invite.findUniqueOrThrow({ where: { id } })).acceptedAt).not.toBeNull();
+      expect(await rows(n.id)).toEqual([['Shop', 'MEMBER']]);
+    });
+  });
+
   it('an invite to a deleted app 404s', async () => {
     const { o, org, appId } = await orgWithOwner();
     const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'MEMBER', appId })).json();
