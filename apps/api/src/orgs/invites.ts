@@ -4,7 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { requireRole } from './rbac.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { inviteEmail } from '../mail/templates.js';
-import { lockOrg } from './locks.js';
+import { lockOrg, lockOwnersAndTarget } from './locks.js';
 import { seatState } from './seats.js';
 import { limitsFor, PlanLimitError, sendPlanLimit } from '../plans.js';
 
@@ -26,6 +26,12 @@ const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
 // claim below, and mapped to a 410 outside it — mirroring the LastOwnerError
 // pattern in orgs/routes.ts.
 class InviteGoneError extends Error {}
+
+// Returned (never thrown) from the acceptance transaction when the invite
+// grants nothing the user doesn't already have. Returning lets the claim
+// commit, so the invite is consumed: it leaves the pending list and frees its
+// seat instead of lingering forever. Mapped to a 409 outside.
+const ALREADY = Symbol('already-a-member');
 
 export async function inviteRoutes(app: FastifyInstance): Promise<void> {
   app.post('/v1/orgs/:org/invites', {
@@ -137,8 +143,21 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
 
   // A URL token must never reach a mutation without being resolved and
   // gated first: we look the invite up by its hash before doing anything
-  // else, and every failure mode below (404 unknown, 410 expired/used, 403
-  // wrong email, 409 already a member) is checked before any write.
+  // else, and 404 unknown, 410 expired/used and 403 suspended or wrong email
+  // are all checked before any write. Whether the user already has what the
+  // invite grants (409) is decided inside the transaction, under the locks.
+  //
+  // What an accepted invite grants:
+  // - OWNER/ADMIN (org-wide): a membership with that role. An ADMIN invite to
+  //   an existing MEMBER/VIEWER promotes them to ADMIN and drops their
+  //   AppAccess rows in this org (ADMIN sees every app). Anyone else already
+  //   in the org gets 409 (a legacy OWNER invite never promotes).
+  // - MEMBER/VIEWER: AppAccess with the invite's role to its app or, for a
+  //   legacy invite issued before invites carried an app (appId null), to
+  //   every app in the org. A newcomer also gets a membership with that role;
+  //   an existing member keeps theirs (the app role may exceed it). An OWNER
+  //   or ADMIN already sees every app: 409. So does a member who already has
+  //   every row with that role.
   app.post('/v1/invites/:token/accept', { preHandler: [app.authenticate, app.requireVerified] }, async (req, reply) => {
     const { token } = req.params as { token: string };
     const inv = await app.prisma.invite.findUnique({
@@ -163,44 +182,71 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(403).send({ error: 'invite was issued to a different email' });
     }
 
-    const already = await app.prisma.membership.findUnique({
-      where: { userId_orgId: { userId: req.user.id, orgId: inv.orgId } },
-    });
-    if (already) return reply.code(409).send({ error: 'already a member' });
-
+    const userId = req.user.id;
+    const orgId = inv.orgId;
+    let result;
     try {
-      return await app.prisma.$transaction(async (tx) => {
+      result = await app.prisma.$transaction(async (tx) => {
+        // The org lock comes first, before any insert referencing the org:
+        // such an insert takes a KEY SHARE lock on the org row, which this
+        // FOR UPDATE conflicts with, so two accepts that each inserted
+        // before locking would wait on each other (deadlock). It also
+        // serialises this with invites, role changes and app creation.
+        await lockOrg(tx, orgId);
+
         // Acceptance must be single-use even under concurrent requests for
-        // the same token (two tabs, a retried request). A plain
-        // check-then-write (read acceptedAt, then write) has exactly the
-        // race this repo was bitten by in Task 8's last-OWNER bug: two
-        // concurrent transactions could both observe acceptedAt === null
-        // and both proceed to create a membership. `updateMany` with the
-        // guard in its `where` clause is atomic — Postgres takes the row
-        // lock on the UPDATE itself, so only one concurrent transaction can
-        // ever see `count === 1`; every other one gets `count === 0` and is
-        // told the invite is gone, without any explicit `FOR UPDATE`.
+        // the same token (two tabs, a retried request). `updateMany` with
+        // the guard in its own `where` is atomic: only one transaction ever
+        // sees `count === 1`; every other one is told the invite is gone.
+        // (An org deleted meanwhile cascades its invites, so it lands here.)
         const claimed = await tx.invite.updateMany({
           where: { id: inv.id, acceptedAt: null, expiresAt: { gt: new Date() } },
           data: { acceptedAt: new Date() },
         });
         if (claimed.count === 0) throw new InviteGoneError();
 
-        await tx.membership.create({ data: { userId: req.user.id, orgId: inv.orgId, role: inv.role } });
-        return { orgId: inv.orgId, slug: inv.org.slug, role: inv.role };
+        const { row } = await lockOwnersAndTarget(tx, orgId, { userId });
+        const role = inv.role;
+
+        if (role === 'OWNER' || role === 'ADMIN') {
+          if (!row) {
+            await tx.membership.create({ data: { userId, orgId, role } });
+          } else if (role === 'ADMIN' && (row.role === 'MEMBER' || row.role === 'VIEWER')) {
+            await tx.membership.update({ where: { id: row.id }, data: { role } });
+            await tx.appAccess.deleteMany({ where: { userId, app: { orgId } } });
+          } else {
+            return ALREADY;
+          }
+        } else {
+          if (row && (row.role === 'OWNER' || row.role === 'ADMIN')) return ALREADY;
+          const targets = inv.appId !== null
+            ? [inv.appId]
+            : (await tx.app.findMany({ where: { orgId }, select: { id: true } })).map((a) => a.id);
+          if (!row) await tx.membership.create({ data: { userId, orgId, role } });
+          const existing = await tx.appAccess.findMany({ where: { userId, appId: { in: targets } }, select: { appId: true, role: true } });
+          const current = new Map(existing.map((r) => [r.appId, r.role]));
+          const missing = targets.filter((id) => !current.has(id));
+          const differing = targets.filter((id) => current.has(id) && current.get(id) !== role);
+          if (missing.length) await tx.appAccess.createMany({ data: missing.map((appId) => ({ appId, userId, role })) });
+          if (differing.length) await tx.appAccess.updateMany({ where: { userId, appId: { in: differing } }, data: { role } });
+          if (row && !missing.length && !differing.length) return ALREADY;
+        }
+        return { orgId, slug: inv.org.slug, role, ...(inv.appId !== null ? { appId: inv.appId } : {}) };
       });
     } catch (err) {
       if (err instanceof InviteGoneError) {
         return reply.code(410).send({ error: 'invite no longer valid' });
       }
-      // Belt-and-braces: if a concurrent accept of a *different* invite to
-      // the same org somehow raced past the `already` check above, the
-      // membership unique constraint still protects the data — report it
-      // the same way the pre-check does, as 409, rather than 500.
+      // Belt-and-braces: the org lock serialises accepts into one org, so a
+      // duplicate membership or AppAccess row shouldn't happen; if one ever
+      // does, the unique constraints still protect the data and it reads as
+      // the same 409, not a 500.
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         return reply.code(409).send({ error: 'already a member' });
       }
       throw err;
     }
+    if (result === ALREADY) return reply.code(409).send({ error: 'already a member' });
+    return result;
   });
 }

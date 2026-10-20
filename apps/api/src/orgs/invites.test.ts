@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import { Writable } from 'node:stream';
+import { createHash } from 'node:crypto';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import { settledOrBlocked } from '../test/locks.js';
+import { lockOrg } from './locks.js';
 import type { FastifyInstance } from 'fastify';
 
 let app: FastifyInstance;
@@ -37,7 +39,7 @@ describe('invites', () => {
     const n = await user('n@x.io');
     const acc = await app.inject({ method: 'POST', url: `/v1/invites/${token}/accept`, headers: n.h });
     expect(acc.statusCode).toBe(200);
-    expect(acc.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'MEMBER' });
+    expect(acc.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'MEMBER', appId });
     expect(await app.prisma.membership.count({ where: { orgId: org.id, userId: n.id } })).toBe(1);
 
     expect((await app.inject({ method: 'POST', url: `/v1/invites/${token}/accept`, headers: n.h })).statusCode).toBe(410);
@@ -87,17 +89,14 @@ describe('invites', () => {
     expect(await app.prisma.membership.count({ where: { orgId: org.id, userId: n.id } })).toBe(1);
   });
 
-  // Covers the P2002 fallback at the bottom of the accept route's catch
-  // block: the pre-transaction `already` check only guards against the
-  // *same* invite being accepted twice by the same user for the same org —
-  // it doesn't stop two different, still-valid invites into the *same* org
-  // for the same user racing each other's membership-create. Fire both
-  // concurrently and require that exactly one becomes a member (either via
-  // the pre-check 409 or the P2002-mapped 409), never two memberships.
+  // Two different, still-valid invites for the same user to the same app,
+  // accepted at once: the org lock serialises them, so exactly one grants
+  // the access and the other finds it already there (409). Both invites are
+  // consumed, so neither lingers in the pending list.
   it('409s one of two concurrent accepts of different invites into the same org for the same user', async () => {
     const { o, org, appId } = await orgWithOwner();
-    const { token: t1 } = (await app.inject({ method: 'POST', remoteAddress: ip(), url: `/v1/orgs/${org.id}/invites`, headers: o.h, payload: { email: 'n@x.io', role: 'MEMBER', appId } })).json();
-    const { token: t2 } = (await app.inject({ method: 'POST', remoteAddress: ip(), url: `/v1/orgs/${org.id}/invites`, headers: o.h, payload: { email: 'n@x.io', role: 'VIEWER', appId } })).json();
+    const { token: t1, id: i1 } = (await app.inject({ method: 'POST', remoteAddress: ip(), url: `/v1/orgs/${org.id}/invites`, headers: o.h, payload: { email: 'n@x.io', role: 'MEMBER', appId } })).json();
+    const { token: t2, id: i2 } = (await app.inject({ method: 'POST', remoteAddress: ip(), url: `/v1/orgs/${org.id}/invites`, headers: o.h, payload: { email: 'n@x.io', role: 'MEMBER', appId } })).json();
     const n = await user('n@x.io');
 
     const [r1, r2] = await Promise.all([
@@ -107,6 +106,8 @@ describe('invites', () => {
     const statuses = [r1.statusCode, r2.statusCode].sort();
     expect(statuses).toEqual([200, 409]);
     expect(await app.prisma.membership.count({ where: { orgId: org.id, userId: n.id } })).toBe(1);
+    expect(await app.prisma.appAccess.count({ where: { userId: n.id } })).toBe(1);
+    expect(await app.prisma.invite.count({ where: { id: { in: [i1, i2] }, acceptedAt: { not: null } } })).toBe(2);
   });
 
   it('403s acceptance for a suspended org', async () => {
@@ -478,5 +479,237 @@ describe('invite creation limits', () => {
     const mail = app.sentMail.at(-1)!;
     expect(mail.text).toContain(`expires in ${days} days`);
     expect(mail.html).toContain(`expires in ${days} days`);
+  });
+});
+
+describe('accept', () => {
+  const invite = (org: { id: string }, h: Record<string, string>, payload: Record<string, unknown>) =>
+    app.inject({ method: 'POST', remoteAddress: ip(), url: `/v1/orgs/${org.id}/invites`, headers: h, payload });
+  const accept = (token: string, h: Record<string, string>) =>
+    app.inject({ method: 'POST', url: `/v1/invites/${token}/accept`, headers: h });
+  const rows = async (userId: string) =>
+    (await app.prisma.appAccess.findMany({ where: { userId }, select: { role: true, app: { select: { name: true } } }, orderBy: { app: { name: 'asc' } } }))
+      .map((r) => [r.app.name, r.role]);
+  const membershipRole = async (orgId: string, userId: string) =>
+    (await app.prisma.membership.findUnique({ where: { userId_orgId: { userId, orgId } }, select: { role: true } }))?.role;
+  const secondApp = async (orgId: string) =>
+    (await app.prisma.app.create({ data: { orgId, name: 'Admin panel', env: 'production' }, select: { id: true } })).id;
+  // An invite written straight to the table, as a pre-deploy (legacy) invite
+  // with no appId would be.
+  let legacySeq = 0;
+  const legacyInvite = async (orgId: string, email: string, role: 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER') => {
+    const token = `legacy-${++legacySeq}-${'t'.repeat(32)}`;
+    const { id } = await app.prisma.invite.create({
+      data: { orgId, email, role, appId: null, tokenHash: createHash('sha256').update(token).digest('hex'), expiresAt: new Date(Date.now() + 3600_000) },
+      select: { id: true },
+    });
+    return { token, id };
+  };
+
+  it('a new user joins as MEMBER with access to that app only', async () => {
+    const { o, org, appId } = await orgWithOwner();
+    await secondApp(org.id);
+    const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'MEMBER', appId })).json();
+    const n = await user('n@x.io');
+    const res = await accept(token, n.h);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'MEMBER', appId });
+    expect(await membershipRole(org.id, n.id)).toBe('MEMBER');
+    expect(await rows(n.id)).toEqual([['Shop', 'MEMBER']]);
+  });
+
+  it('an app-scoped member invited to a second app keeps their membership and gains it with the invite role', async () => {
+    const { o, org, appId } = await orgWithOwner();
+    const admin = await secondApp(org.id);
+    const n = await user('n@x.io');
+    await app.prisma.membership.create({ data: { userId: n.id, orgId: org.id, role: 'VIEWER' } });
+    await app.prisma.appAccess.create({ data: { userId: n.id, appId, role: 'VIEWER' } });
+    const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'MEMBER', appId: admin })).json();
+    const res = await accept(token, n.h);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'MEMBER', appId: admin });
+    expect(await membershipRole(org.id, n.id)).toBe('VIEWER');
+    expect(await rows(n.id)).toEqual([['Admin panel', 'MEMBER'], ['Shop', 'VIEWER']]);
+  });
+
+  it('the same access again is 409 and still consumes the invite (Review Focus)', async () => {
+    const { o, org, appId } = await orgWithOwner();
+    const n = await user('n@x.io');
+    await app.prisma.membership.create({ data: { userId: n.id, orgId: org.id, role: 'MEMBER' } });
+    await app.prisma.appAccess.create({ data: { userId: n.id, appId, role: 'MEMBER' } });
+    const { token, id } = (await invite(org, o.h, { email: 'n@x.io', role: 'MEMBER', appId })).json();
+    const res = await accept(token, n.h);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: 'already a member' });
+    expect((await app.prisma.invite.findUniqueOrThrow({ where: { id } })).acceptedAt).not.toBeNull();
+    const list = (await app.inject({ method: 'GET', url: `/v1/orgs/${org.id}/invites`, headers: o.h })).json() as { id: string }[];
+    expect(list.map((i) => i.id)).not.toContain(id);
+    expect((await accept(token, n.h)).statusCode).toBe(410);
+    expect(await rows(n.id)).toEqual([['Shop', 'MEMBER']]);
+  });
+
+  it('a row with a different role is set to the invite role', async () => {
+    const { o, org, appId } = await orgWithOwner();
+    const n = await user('n@x.io');
+    await app.prisma.membership.create({ data: { userId: n.id, orgId: org.id, role: 'VIEWER' } });
+    await app.prisma.appAccess.create({ data: { userId: n.id, appId, role: 'VIEWER' } });
+    const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'MEMBER', appId })).json();
+    const res = await accept(token, n.h);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'MEMBER', appId });
+    expect(await membershipRole(org.id, n.id)).toBe('VIEWER');
+    expect(await rows(n.id)).toEqual([['Shop', 'MEMBER']]);
+  });
+
+  it('an OWNER or ADMIN accepting an app invite is 409 and the invite is consumed', async () => {
+    const { o, org, appId } = await orgWithOwner();
+    const a = await user('a@x.io');
+    await app.prisma.membership.create({ data: { userId: a.id, orgId: org.id, role: 'ADMIN' } });
+    for (const [who, email, role] of [[o, 'o@x.io', 'OWNER'], [a, 'a@x.io', 'ADMIN']] as const) {
+      const { token, id } = (await invite(org, o.h, { email, role: 'MEMBER', appId })).json();
+      const res = await accept(token, who.h);
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({ error: 'already a member' });
+      expect((await app.prisma.invite.findUniqueOrThrow({ where: { id } })).acceptedAt).not.toBeNull();
+      expect(await membershipRole(org.id, who.id)).toBe(role);
+      expect(await rows(who.id)).toEqual([]);
+    }
+  });
+
+  it('an ADMIN invite promotes an existing MEMBER and drops their rows', async () => {
+    const { o, org, appId } = await orgWithOwner();
+    const admin = await secondApp(org.id);
+    const n = await user('n@x.io');
+    await app.prisma.membership.create({ data: { userId: n.id, orgId: org.id, role: 'MEMBER' } });
+    await app.prisma.appAccess.createMany({ data: [{ userId: n.id, appId, role: 'MEMBER' }, { userId: n.id, appId: admin, role: 'VIEWER' }] });
+    // A row in another org is untouched.
+    const b = await user('b@x.io');
+    const orgB = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: b.h, payload: { name: 'B' } })).json();
+    const other = await app.prisma.app.create({ data: { orgId: orgB.id, name: 'Other', env: 'production' }, select: { id: true } });
+    await app.prisma.membership.create({ data: { userId: n.id, orgId: orgB.id, role: 'MEMBER' } });
+    await app.prisma.appAccess.create({ data: { userId: n.id, appId: other.id, role: 'MEMBER' } });
+
+    const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'ADMIN' })).json();
+    const res = await accept(token, n.h);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'ADMIN' });
+    expect(await membershipRole(org.id, n.id)).toBe('ADMIN');
+    expect(await rows(n.id)).toEqual([['Other', 'MEMBER']]);
+  });
+
+  it('an ADMIN invite to an existing ADMIN or OWNER is 409 and changes nothing', async () => {
+    const { o, org } = await orgWithOwner();
+    const a = await user('a@x.io');
+    await app.prisma.membership.create({ data: { userId: a.id, orgId: org.id, role: 'ADMIN' } });
+    for (const [who, email, role] of [[o, 'o@x.io', 'OWNER'], [a, 'a@x.io', 'ADMIN']] as const) {
+      const { token, id } = (await invite(org, o.h, { email, role: 'ADMIN' })).json();
+      const res = await accept(token, who.h);
+      expect(res.statusCode).toBe(409);
+      expect((await app.prisma.invite.findUniqueOrThrow({ where: { id } })).acceptedAt).not.toBeNull();
+      expect(await membershipRole(org.id, who.id)).toBe(role);
+    }
+  });
+
+  it('a legacy MEMBER invite (appId null) grants every app in the org', async () => {
+    const { org } = await orgWithOwner();
+    await secondApp(org.id);
+    const { token } = await legacyInvite(org.id, 'n@x.io', 'MEMBER');
+    const n = await user('n@x.io');
+    const res = await accept(token, n.h);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'MEMBER' });
+    expect(await membershipRole(org.id, n.id)).toBe('MEMBER');
+    expect(await rows(n.id)).toEqual([['Admin panel', 'MEMBER'], ['Shop', 'MEMBER']]);
+  });
+
+  it('a legacy VIEWER invite to an existing member adds the apps they lack', async () => {
+    const { org, appId } = await orgWithOwner();
+    await secondApp(org.id);
+    const n = await user('n@x.io');
+    await app.prisma.membership.create({ data: { userId: n.id, orgId: org.id, role: 'VIEWER' } });
+    await app.prisma.appAccess.create({ data: { userId: n.id, appId, role: 'VIEWER' } });
+    const { token } = await legacyInvite(org.id, 'n@x.io', 'VIEWER');
+    expect((await accept(token, n.h)).statusCode).toBe(200);
+    expect(await rows(n.id)).toEqual([['Admin panel', 'VIEWER'], ['Shop', 'VIEWER']]);
+    // Everything already there: 409.
+    const again = await legacyInvite(org.id, 'n@x.io', 'VIEWER');
+    expect((await accept(again.token, n.h)).statusCode).toBe(409);
+  });
+
+  it('a legacy OWNER invite accepts as before', async () => {
+    const { org } = await orgWithOwner();
+    const { token } = await legacyInvite(org.id, 'n@x.io', 'OWNER');
+    const n = await user('n@x.io');
+    const res = await accept(token, n.h);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'OWNER' });
+    expect(await membershipRole(org.id, n.id)).toBe('OWNER');
+    expect(await rows(n.id)).toEqual([]);
+
+    const m = await user('m@x.io');
+    await app.prisma.membership.create({ data: { userId: m.id, orgId: org.id, role: 'MEMBER' } });
+    const forM = await legacyInvite(org.id, 'm@x.io', 'OWNER');
+    const res2 = await accept(forM.token, m.h);
+    expect(res2.statusCode).toBe(409);
+    expect((await app.prisma.invite.findUniqueOrThrow({ where: { id: forM.id } })).acceptedAt).not.toBeNull();
+    expect(await membershipRole(org.id, m.id)).toBe('MEMBER');
+  });
+
+  it('an invite to a deleted app 404s', async () => {
+    const { o, org, appId } = await orgWithOwner();
+    const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'MEMBER', appId })).json();
+    await app.prisma.app.delete({ where: { id: appId } });
+    const n = await user('n@x.io');
+    expect((await accept(token, n.h)).statusCode).toBe(404);
+    expect(await membershipRole(org.id, n.id)).toBeUndefined();
+  });
+
+  it('waits on the org lock', async () => {
+    // FOR NO KEY UPDATE conflicts with the route's `lockOrg` (FOR UPDATE) but
+    // not with the KEY SHARE lock a membership insert takes on the org row,
+    // so "blocked" means the route took the org lock itself.
+    const { o, org, appId } = await orgWithOwner();
+    const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'MEMBER', appId })).json();
+    const n = await user('n@x.io');
+    let res: Promise<{ statusCode: number }> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${org.id} FOR NO KEY UPDATE`;
+      res = accept(token, n.h);
+      expect(await settledOrBlocked(app.prisma, res, tx)).toBe('blocked');
+    });
+    expect((await res!).statusCode).toBe(200);
+  });
+
+  it('two accepts into the same org by different people both complete, without deadlock', async () => {
+    // Each accept inserts rows referencing the org (a KEY SHARE lock on its
+    // row) and takes the org lock (FOR UPDATE). Taking the org lock first is
+    // what keeps two of them from each waiting on the other's KEY SHARE.
+    const { o, org, appId } = await orgWithOwner();
+    const people = ['n1@x.io', 'n2@x.io', 'n3@x.io'];
+    const tokens: string[] = [];
+    for (const email of people) tokens.push((await invite(org, o.h, { email, role: 'MEMBER', appId })).json().token as string);
+    const users = await Promise.all(people.map((email) => user(email)));
+    const results = await Promise.all(users.map((u, i) => accept(tokens[i]!, u.h)));
+    expect(results.map((r) => r.statusCode)).toEqual([200, 200, 200]);
+    expect(await app.prisma.membership.count({ where: { orgId: org.id } })).toBe(4);
+    expect(await app.prisma.appAccess.count({ where: { appId } })).toBe(3);
+  });
+
+  it('an accept holding the org lock does not deadlock against a concurrent one', async () => {
+    // Pin the interleaving that deadlocks when an accept inserts before it
+    // locks the org: this transaction plays an accept that has inserted a
+    // membership (KEY SHARE on the org row) and then asks for the org lock.
+    const { o, org, appId } = await orgWithOwner();
+    const { token } = (await invite(org, o.h, { email: 'n@x.io', role: 'MEMBER', appId })).json();
+    const n = await user('n@x.io');
+    const m = await user('m@x.io');
+    let res: Promise<{ statusCode: number }> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.membership.create({ data: { userId: m.id, orgId: org.id, role: 'MEMBER' } });
+      res = accept(token, n.h);
+      expect(await settledOrBlocked(app.prisma, res, tx)).toBe('blocked');
+      await lockOrg(tx, org.id);
+    });
+    expect((await res!).statusCode).toBe(200);
   });
 });
