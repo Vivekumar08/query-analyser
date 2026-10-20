@@ -18,9 +18,9 @@ Teammates are invited **to an app, not to the whole organisation**. The user wan
 
 | Plan (`Organization.plan`) | Orgs you can own | Apps per org | Invite seats | Invitable roles | Daily data kept |
 |---|---|---|---|---|---|
-| `free` (beta; the existing default) | 1 | 1 | 1 | `MEMBER` | 7 days |
-| `pro` | 1 | 3 | 5 | `ADMIN`, `MEMBER`, `VIEWER` | 30 days |
-| `team` | 3 | 10 | 20 | `ADMIN`, `MEMBER`, `VIEWER` | 90 days |
+| `free` (beta; the existing default) | 1 | 1 | 1 | `MEMBER` | 30 days |
+| `pro` | 1 | 3 | 5 | `ADMIN`, `MEMBER`, `VIEWER` | 90 days |
+| `team` | 3 | 10 | 20 | `ADMIN`, `MEMBER`, `VIEWER` | 365 days |
 
 - One module, `apps/api/src/plans.ts`, exports `PLAN_LIMITS` and `limitsFor(plan: string)`. An unknown plan string gets `free` limits.
 - `pro` and `team` exist as data only. Nothing sells or assigns them yet; ops can set `Organization.plan` by hand.
@@ -28,7 +28,12 @@ Teammates are invited **to an app, not to the whole organisation**. The user wan
 - **Seats:** see "Role changes…" below: all memberships plus pending unexpired invites (distinct emails), minus one owner. Revoking an invite or removing a member frees a seat.
 - **Invitable roles:** an invite with a role outside the plan's list is refused. OWNER is never invitable, by any plan, through this route.
 - **Retention:** the daily-rollup pruning (`apps/api/src/analysis/jobs.ts`, `DAILY_RETENTION_DAYS` today) becomes per org plan. Hourly retention stays at 7 days. The dashboard's range presets must not offer ranges longer than the plan keeps; longer ones are shown disabled with "Kept for N days on your plan".
-- **Existing data is grandfathered:** nothing is deleted or demoted because an org is already over a limit; the org just can't add more. The one exception is retention, which applies to everyone on the next prune.
+- **Retention grace (user's decision, 2026-10-20):**
+  - Existing history is left alone: until `RETENTION_GRACE_UNTIL`, effective daily retention is `max(plan days, 90)`, which is today's rule. The setting is an env var that defaults to `2027-01-31`, roughly 90 days after ship.
+  - After that date, each plan's own value applies.
+  - Hourly retention stays 7 days for everyone.
+  - The dashboard range cap uses the same effective value, so ranges the data still covers stay selectable during the grace.
+- **Existing data is grandfathered:** nothing is deleted or demoted because an org is already over a limit; the org just can't add more. Retention follows the grace rule below.
 - **Refusal shape:** a limit refusal is `403 { error: 'plan-limit', limit: 'orgs' | 'apps' | 'seats' | 'role', max: number }`. The web maps each to plain copy:
   - orgs: "During the beta, each account can create one organisation. More with paid plans."
   - apps: "During the beta, each organisation has one app. Delete it to connect a different one, or upgrade later."
