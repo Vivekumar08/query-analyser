@@ -36,6 +36,7 @@ model User {
   memberships        Membership[]
   refreshTokens      RefreshToken[]
   verificationTokens VerificationToken[]
+  createdOrgs        Organization[]      @relation("OrgCreatedBy")
 }
 
 model Organization {
@@ -44,6 +45,9 @@ model Organization {
   slug        String       @unique
   plan        String       @default("free")
   suspendedAt DateTime?    @db.Timestamptz(3)
+  /// Who created the org. Their owned-orgs allowance counts it; promotion to OWNER elsewhere never does.
+  createdById String?
+  createdBy   User?        @relation("OrgCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   createdAt   DateTime     @default(now()) @db.Timestamptz(3)
   memberships Membership[]
   apps        App[]

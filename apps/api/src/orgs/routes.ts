@@ -35,44 +35,43 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     const taken = RESERVED_SLUGS.has(base) || (await app.prisma.organization.findUnique({ where: { slug: base } }));
     const slug = taken ? `${base}-${randomBytes(2).toString('hex')}` : base;
 
-    // The org is created only while the caller owns fewer orgs than the
-    // largest `ownedOrgs` among the plans of the orgs they already own
-    // (`free` when they own none). The user-row lock serialises one user's
-    // concurrent creates, so two can't both pass the count.
+    // The org is created only while the caller has created fewer orgs than
+    // the largest `ownedOrgs` among the plans of the orgs they created
+    // (`free` when they created none). Orgs they were invited into, or
+    // promoted to OWNER of, never count and never raise the allowance. The
+    // user-row lock serialises one user's concurrent creates, so two can't
+    // both pass the count.
     const userId = req.user.id;
-    const createOwnedOrg = (slug: string) =>
+    const createOwnedOrg = (orgSlug: string) =>
       app.prisma.$transaction(async (tx) => {
         await lockUser(tx, userId);
-        const owned = await tx.membership.findMany({ where: { userId, role: 'OWNER' }, select: { org: { select: { plan: true } } } });
-        const max = owned.length === 0
+        const created = await tx.organization.findMany({ where: { createdById: userId }, select: { plan: true } });
+        const max = created.length === 0
           ? limitsFor('free').ownedOrgs
-          : Math.max(...owned.map((m) => limitsFor(m.org.plan).ownedOrgs));
-        if (owned.length >= max) throw new PlanLimitError('orgs', max);
+          : Math.max(...created.map((o) => limitsFor(o.plan).ownedOrgs));
+        if (created.length >= max) throw new PlanLimitError('orgs', max);
         return tx.organization.create({
-          data: { name: parsed.data.name, slug, memberships: { create: { userId, role: 'OWNER' } } },
+          data: { name: parsed.data.name, slug: orgSlug, createdById: userId, memberships: { create: { userId, role: 'OWNER' } } },
           select: { id: true, name: true, slug: true, plan: true, createdAt: true },
         });
       });
+    const slugTaken = (err: unknown) =>
+      err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && (err.meta?.target as string[] | undefined)?.includes('slug');
 
     // The findUnique-then-create above is itself a check-then-act: two
     // concurrent requests choosing the same base slug (or, much more
     // unlikely, colliding on the same random suffix) can both pass the
     // `taken` check and then both attempt to INSERT that slug, so the
     // second `create` fails its unique constraint. Rather than 500 in that
-    // case, retry once with a fresh random suffix — a second collision
-    // right after the first is exceedingly unlikely and not worth looping
-    // indefinitely over.
+    // case, retry once with a fresh random suffix, in a new transaction that
+    // checks the limit again — a second collision right after the first is
+    // exceedingly unlikely and not worth looping indefinitely over.
     try {
-      try {
-        const org = await createOwnedOrg(slug);
-        return reply.code(201).send({ ...org, role: 'OWNER' });
-      } catch (err) {
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && (err.meta?.target as string[] | undefined)?.includes('slug')) {
-          const org = await createOwnedOrg(`${base}-${randomBytes(2).toString('hex')}`);
-          return reply.code(201).send({ ...org, role: 'OWNER' });
-        }
+      const org = await createOwnedOrg(slug).catch((err: unknown) => {
+        if (slugTaken(err)) return createOwnedOrg(`${base}-${randomBytes(2).toString('hex')}`);
         throw err;
-      }
+      });
+      return reply.code(201).send({ ...org, role: 'OWNER' });
     } catch (err) {
       if (err instanceof PlanLimitError) return sendPlanLimit(reply, err);
       throw err;

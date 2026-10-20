@@ -214,9 +214,10 @@ describe('org limit', () => {
     expect((await create(u.token, 'Mine')).statusCode).toBe(201);
   });
 
-  it('the largest limit among owned orgs applies', async () => {
+  it('the largest limit among orgs the user created applies', async () => {
     const u = await user('u@x.io');
     const first = (await create(u.token, 'One')).json() as { id: string };
+    expect((await app.prisma.organization.findUniqueOrThrow({ where: { id: first.id } })).createdById).toBe(u.id);
     await app.prisma.organization.update({ where: { id: first.id }, data: { plan: 'team' } });
     expect((await create(u.token, 'Two')).statusCode).toBe(201);
     expect((await create(u.token, 'Three')).statusCode).toBe(201);
@@ -225,11 +226,41 @@ describe('org limit', () => {
     expect(res.json()).toEqual({ error: 'plan-limit', limit: 'orgs', max: 3 });
   });
 
+  it('a free user promoted to OWNER of a team org still cannot create a second free org', async () => {
+    const a = await user('a@x.io'); const u = await user('u@x.io');
+    const team = (await create(a.token, 'Team')).json() as { id: string };
+    await app.prisma.organization.update({ where: { id: team.id }, data: { plan: 'team' } });
+    expect((await create(u.token, 'Mine')).statusCode).toBe(201);
+    const m = await app.prisma.membership.create({ data: { userId: u.id, orgId: team.id, role: 'MEMBER' } });
+    expect((await app.inject({ method: 'PATCH', url: `/v1/orgs/${team.id}/members/${m.id}`, headers: as(a.token), payload: { role: 'OWNER' } })).statusCode).toBe(200);
+    const res = await create(u.token, 'Mine2');
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'plan-limit', limit: 'orgs', max: 1 });
+  });
+
   it('two concurrent creates by a free user make exactly one org', async () => {
     const u = await user('u@x.io');
     const [r1, r2] = await Promise.all([create(u.token, 'One'), create(u.token, 'Two')]);
     expect([r1.statusCode, r2.statusCode].sort()).toEqual([201, 403]);
     expect(await app.prisma.membership.count({ where: { userId: u.id, role: 'OWNER' } })).toBe(1);
+  });
+
+  it('a create waits on the user-row lock, then sees the org created meanwhile', async () => {
+    // In-process Promise.all doesn't reliably interleave (see the demotion
+    // test above), so pin the lock: this transaction plays a concurrent
+    // create by the same user, holding their User row.
+    const u = await user('u@x.io');
+    let res: Promise<{ statusCode: number; json: () => unknown }> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${u.id} FOR NO KEY UPDATE`;
+      res = create(u.token, 'Second');
+      expect(await settledOrBlocked(app.prisma, res, tx)).toBe('blocked');
+      await tx.organization.create({ data: { name: 'First', slug: 'first', createdById: u.id, memberships: { create: { userId: u.id, role: 'OWNER' } } } });
+    });
+    const done = await res!;
+    expect(done.statusCode).toBe(403);
+    expect(done.json()).toEqual({ error: 'plan-limit', limit: 'orgs', max: 1 });
+    expect(await app.prisma.organization.count({ where: { createdById: u.id } })).toBe(1);
   });
 
   it('lists each org with its plan limits', async () => {

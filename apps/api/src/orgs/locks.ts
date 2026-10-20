@@ -3,8 +3,8 @@
  *
  * Lock order is always: the `Organization` row first, then `Membership`
  * rows. Every caller follows it, so two transactions can never wait on each
- * other in a cycle. `lockUser` guards the per-user orgs limit and is never
- * taken together with an org lock.
+ * other in a cycle. The `User` row lock (`lockUser`) is always a
+ * transaction's first lock and is never taken together with an org lock.
  */
 import { Prisma } from '../generated/prisma/client.js';
 
@@ -14,9 +14,18 @@ export async function lockOrg(tx: Prisma.TransactionClient, orgId: string): Prom
   return rows[0] ?? null;
 }
 
-/** Locks the user row, serialising that user's org creations. */
+/**
+ * The one User-row lock. Password writers, every refresh-token issuer (see
+ * `rotateRefreshToken`) and org creation (the owned-orgs limit) take it, so
+ * each of those serialises per user.
+ *
+ * NO KEY UPDATE, not UPDATE: it still conflicts with itself, but not with the
+ * KEY SHARE lock every FK insert referencing this user takes (a reset link, a
+ * membership), which FOR UPDATE would block and, with the reset-link
+ * transaction, deadlock against.
+ */
 export async function lockUser(tx: Prisma.TransactionClient, userId: string): Promise<void> {
-  await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${userId} FOR UPDATE`;
+  await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${userId} FOR NO KEY UPDATE`;
 }
 
 /**

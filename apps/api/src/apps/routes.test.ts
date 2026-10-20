@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import { hashKey } from '../ingest/keys.js';
+import { settledOrBlocked } from '../test/locks.js';
 import type { FastifyInstance } from 'fastify';
 
 let app: FastifyInstance;
@@ -116,6 +117,23 @@ describe('apps', () => {
     const results = await Promise.all(['a', 'b'].map((name) =>
       app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name, env: 'production' } })));
     expect(results.map((r) => r.statusCode).sort()).toEqual([201, 403]);
+    expect(await app.prisma.app.count({ where: { orgId: o.orgId } })).toBe(1);
+  });
+
+  it('a create waits on the org-row lock, then sees the app created meanwhile', async () => {
+    // In-process Promise.all serialises, so pin the lock: this transaction
+    // plays a concurrent create of a different app, holding the org row.
+    const o = await owner();
+    let res: Promise<{ statusCode: number; json: () => unknown }> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Organization" WHERE id = ${o.orgId} FOR UPDATE`;
+      res = app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'b', env: 'production' } });
+      expect(await settledOrBlocked(app.prisma, res, tx)).toBe('blocked');
+      await tx.app.create({ data: { orgId: o.orgId, name: 'a', env: 'production' } });
+    });
+    const done = await res!;
+    expect(done.statusCode).toBe(403);
+    expect(done.json()).toEqual({ error: 'plan-limit', limit: 'apps', max: 1 });
     expect(await app.prisma.app.count({ where: { orgId: o.orgId } })).toBe(1);
   });
 
