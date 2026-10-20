@@ -4,14 +4,21 @@ import { createHash, randomBytes } from 'node:crypto';
 import { requireRole } from './rbac.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { inviteEmail } from '../mail/templates.js';
+import { lockOrg, lockOwnersAndTarget } from './locks.js';
+import { seatState } from './seats.js';
+import { limitsFor, PlanLimitError, sendPlanLimit } from '../plans.js';
 
 const INVITE_TTL_MS = 7 * 24 * 3600 * 1000;
-// Every invite now sends mail from the product's sender, so creation is
-// throttled like the other mail-sending routes (auth/routes.ts), and an org
-// can hold at most this many distinct pending invitees (Ruling C9-1).
-const MAX_PENDING_INVITES = 50;
+// Every invite sends mail from the product's sender, so creation is
+// throttled like the other mail-sending routes (auth/routes.ts). How many
+// people an org can have pending is bounded by its plan's seats, checked
+// under the org lock below.
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
-const createSchema = z.object({ email: z.string().email().max(200), role: z.enum(ROLES) });
+const createSchema = z.object({
+  email: z.string().email().max(200),
+  role: z.enum(ROLES),
+  appId: z.string().min(1).max(64).nullish(),
+});
 const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
 
 // Sentinel thrown inside the acceptance transaction when the invite was
@@ -20,6 +27,17 @@ const hashToken = (t: string) => createHash('sha256').update(t).digest('hex');
 // pattern in orgs/routes.ts.
 class InviteGoneError extends Error {}
 
+// Returned (never thrown) from the acceptance transaction when the invite
+// grants nothing the user doesn't already have. Returning lets the claim
+// commit, so the invite is consumed: it leaves the pending list and frees its
+// seat instead of lingering forever. Mapped to a 409 outside.
+const ALREADY = Symbol('already-a-member');
+
+// Returned (never thrown), like ALREADY, when an app invite's role is no
+// longer one the org's plan can invite (the plan dropped since it was
+// issued). The invite is consumed; the caller gets 403 plan-limit role.
+const ROLE_LIMIT = Symbol('role-limit');
+
 export async function inviteRoutes(app: FastifyInstance): Promise<void> {
   app.post('/v1/orgs/:org/invites', {
     preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')],
@@ -27,39 +45,50 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
   }, async (req, reply) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
-    // Privilege-escalation gate: an ADMIN who could mint an OWNER invite
-    // (and then accept it themselves via a second account, or hand it to an
-    // ally) could promote past their own rank. Only an existing OWNER may
-    // invite another OWNER.
-    if (parsed.data.role === 'OWNER' && req.membership.role !== 'OWNER') {
-      return reply.code(403).send({ error: 'only an owner can invite an owner' });
-    }
+    // MEMBER/VIEWER are invited to one app; OWNER/ADMIN are org-wide. The
+    // database doesn't enforce this, so the API does, before any DB work.
+    const { role } = parsed.data;
+    const appId = parsed.data.appId ?? null;
+    const appScoped = role === 'MEMBER' || role === 'VIEWER';
+    if (appScoped !== (appId !== null)) return reply.code(400).send({ error: 'invalid body' });
     const email = parsed.data.email.toLowerCase();
-    // Count distinct pending invitees, not rows: re-inviting an address that
-    // already has a pending invite adds a second row (unchanged behaviour)
-    // but no new invitee, so it is never refused by the cap. Check-then-insert
-    // can overshoot by a few under concurrent creates, which the rate limit
-    // above bounds; the cap is a mail-abuse brake, not an invariant.
-    const pending = { orgId: req.membership.orgId, acceptedAt: null, expiresAt: { gt: new Date() } };
-    const alreadyPending = await app.prisma.invite.findFirst({ where: { ...pending, email }, select: { id: true } });
-    if (!alreadyPending) {
-      const invitees = await app.prisma.invite.findMany({ where: pending, distinct: ['email'], select: { email: true } });
-      if (invitees.length >= MAX_PENDING_INVITES) {
-        return reply.code(409).send({ error: 'Too many pending invites — revoke some first.' });
-      }
-    }
+    const orgId = req.membership.orgId;
     const token = randomBytes(32).toString('base64url');
-    const row = await app.prisma.invite.create({
-      data: {
-        orgId: req.membership.orgId,
-        email,
-        role: parsed.data.role,
-        tokenHash: hashToken(token),
-        expiresAt: new Date(Date.now() + INVITE_TTL_MS),
-      },
-      select: { id: true, email: true, role: true, expiresAt: true, org: { select: { name: true } } },
-    });
-    const { org, ...invite } = row;
+
+    // One transaction under the org-row lock, so the plan read here is the
+    // committed one and two concurrent invites of new emails can't both take
+    // the last seat. OWNER is in no plan's invitable roles, so the
+    // privilege-escalation gate (an ADMIN minting an OWNER invite) holds on
+    // every plan.
+    const NOT_FOUND = Symbol('not-found');
+    let row;
+    try {
+      row = await app.prisma.$transaction(async (tx) => {
+        const org = await lockOrg(tx, orgId);
+        if (!org) return NOT_FOUND; // deleted after requireRole passed
+        const limits = limitsFor(org.plan);
+        if (!limits.invitableRoles.includes(role)) throw new PlanLimitError('role', limits.invitableRoles.length);
+        // Another org's app 404s exactly like a nonexistent one.
+        if (appId !== null && !(await tx.app.findFirst({ where: { id: appId, orgId }, select: { id: true } }))) return NOT_FOUND;
+        // A seat is a distinct person: re-inviting a pending email, or
+        // inviting an existing member to another app, adds nobody.
+        const seats = await seatState(tx, orgId);
+        if (!seats.emails.has(email) && seats.used >= limits.seats) throw new PlanLimitError('seats', limits.seats);
+        return tx.invite.create({
+          data: { orgId, appId, email, role, tokenHash: hashToken(token), expiresAt: new Date(Date.now() + INVITE_TTL_MS) },
+          select: {
+            id: true, email: true, role: true, appId: true, expiresAt: true,
+            org: { select: { name: true } },
+            app: { select: { name: true } },
+          },
+        });
+      });
+    } catch (err) {
+      if (err instanceof PlanLimitError) return sendPlanLimit(reply, err);
+      throw err;
+    }
+    if (row === NOT_FOUND) return reply.code(404).send({ error: 'Not Found' });
+    const { org, app: invitedTo, ...invite } = row;
 
     // A mail failure must never fail the invite: the admin still gets the
     // token below and can copy the link by hand. `mailer.send` swallows SMTP
@@ -69,8 +98,8 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
     link.searchParams.set('token', token);
     const href = link.toString();
     try {
-      // The org and inviter names are user-controlled; the template escapes
-      // them for the html and flattens them for the subject header.
+      // The org, app and inviter names are user-controlled; the template
+      // escapes them for the html and flattens them for the subject header.
       const inviter = await app.prisma.user.findUnique({ where: { id: req.user.id }, select: { name: true, email: true } });
       await app.mailer.send({
         to: invite.email,
@@ -80,6 +109,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
           inviterName: inviter?.name?.trim() || inviter?.email || 'A teammate',
           role: invite.role,
           ttlMs: INVITE_TTL_MS,
+          appName: invitedTo?.name,
         }),
       });
     } catch (err) {
@@ -99,7 +129,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
   app.get('/v1/orgs/:org/invites', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req) =>
     app.prisma.invite.findMany({
       where: { orgId: req.membership.orgId, acceptedAt: null, expiresAt: { gt: new Date() } },
-      select: { id: true, email: true, role: true, expiresAt: true, createdAt: true },
+      select: { id: true, email: true, role: true, appId: true, expiresAt: true, createdAt: true },
       orderBy: { createdAt: 'desc' },
     }));
 
@@ -118,8 +148,25 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
 
   // A URL token must never reach a mutation without being resolved and
   // gated first: we look the invite up by its hash before doing anything
-  // else, and every failure mode below (404 unknown, 410 expired/used, 403
-  // wrong email, 409 already a member) is checked before any write.
+  // else, and 404 unknown, 410 expired/used and 403 suspended or wrong email
+  // are all checked before any write. Whether the user already has what the
+  // invite grants (409) is decided inside the transaction, under the locks.
+  //
+  // What an accepted invite grants:
+  // - OWNER/ADMIN (org-wide): a membership with that role. An ADMIN invite to
+  //   an existing MEMBER/VIEWER promotes them to ADMIN and drops their
+  //   AppAccess rows in this org (ADMIN sees every app). Anyone else already
+  //   in the org gets 409 (a legacy OWNER invite never promotes). These are
+  //   honoured as issued, even if the plan has since dropped.
+  // - An app invite whose role the org's plan can no longer invite (it was
+  //   downgraded after issue) is refused with 403 plan-limit role, before
+  //   anything else is decided, and is consumed.
+  // - MEMBER/VIEWER: AppAccess with the invite's role to its app or, for a
+  //   legacy invite issued before invites carried an app (appId null), to
+  //   every app in the org that existed when it was issued. A newcomer also
+  //   gets a membership with that role; an existing member keeps theirs
+  //   (the app role may exceed it). An OWNER or ADMIN already sees every
+  //   app: 409. So does a member who already has every row with that role.
   app.post('/v1/invites/:token/accept', { preHandler: [app.authenticate, app.requireVerified] }, async (req, reply) => {
     const { token } = req.params as { token: string };
     const inv = await app.prisma.invite.findUnique({
@@ -144,44 +191,78 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(403).send({ error: 'invite was issued to a different email' });
     }
 
-    const already = await app.prisma.membership.findUnique({
-      where: { userId_orgId: { userId: req.user.id, orgId: inv.orgId } },
-    });
-    if (already) return reply.code(409).send({ error: 'already a member' });
-
+    const userId = req.user.id;
+    const orgId = inv.orgId;
+    let result;
     try {
-      return await app.prisma.$transaction(async (tx) => {
+      result = await app.prisma.$transaction(async (tx) => {
+        // The org lock comes first, before any insert referencing the org:
+        // such an insert takes a KEY SHARE lock on the org row, which this
+        // FOR UPDATE conflicts with, so two accepts that each inserted
+        // before locking would wait on each other (deadlock). It also
+        // serialises this with invites, role changes and app creation.
+        //
+        // Only the deadlock test ('an accept holding the org lock does not
+        // deadlock…') pins this ordering; keep it first.
+        const org = await lockOrg(tx, orgId);
+
         // Acceptance must be single-use even under concurrent requests for
-        // the same token (two tabs, a retried request). A plain
-        // check-then-write (read acceptedAt, then write) has exactly the
-        // race this repo was bitten by in Task 8's last-OWNER bug: two
-        // concurrent transactions could both observe acceptedAt === null
-        // and both proceed to create a membership. `updateMany` with the
-        // guard in its `where` clause is atomic — Postgres takes the row
-        // lock on the UPDATE itself, so only one concurrent transaction can
-        // ever see `count === 1`; every other one gets `count === 0` and is
-        // told the invite is gone, without any explicit `FOR UPDATE`.
+        // the same token (two tabs, a retried request). `updateMany` with
+        // the guard in its own `where` is atomic: only one transaction ever
+        // sees `count === 1`; every other one is told the invite is gone.
+        // (An org deleted meanwhile cascades its invites, so it lands here.)
         const claimed = await tx.invite.updateMany({
           where: { id: inv.id, acceptedAt: null, expiresAt: { gt: new Date() } },
           data: { acceptedAt: new Date() },
         });
-        if (claimed.count === 0) throw new InviteGoneError();
+        if (claimed.count === 0 || !org) throw new InviteGoneError();
 
-        await tx.membership.create({ data: { userId: req.user.id, orgId: inv.orgId, role: inv.role } });
-        return { orgId: inv.orgId, slug: inv.org.slug, role: inv.role };
+        const limits = limitsFor(org.plan);
+        if (inv.appId !== null && !limits.invitableRoles.includes(inv.role)) return { refused: ROLE_LIMIT, max: limits.invitableRoles.length } as const;
+
+        const { row } = await lockOwnersAndTarget(tx, orgId, { userId });
+        const role = inv.role;
+
+        if (role === 'OWNER' || role === 'ADMIN') {
+          if (!row) {
+            await tx.membership.create({ data: { userId, orgId, role } });
+          } else if (role === 'ADMIN' && (row.role === 'MEMBER' || row.role === 'VIEWER')) {
+            await tx.membership.update({ where: { id: row.id }, data: { role } });
+            await tx.appAccess.deleteMany({ where: { userId, app: { orgId } } });
+          } else {
+            return ALREADY;
+          }
+        } else {
+          if (row && (row.role === 'OWNER' || row.role === 'ADMIN')) return ALREADY;
+          const targets = inv.appId !== null
+            ? [inv.appId]
+            : (await tx.app.findMany({ where: { orgId, createdAt: { lte: inv.createdAt } }, select: { id: true } })).map((a) => a.id);
+          if (!row) await tx.membership.create({ data: { userId, orgId, role } });
+          const existing = await tx.appAccess.findMany({ where: { userId, appId: { in: targets } }, select: { appId: true, role: true } });
+          const current = new Map(existing.map((r) => [r.appId, r.role]));
+          const missing = targets.filter((id) => !current.has(id));
+          const differing = targets.filter((id) => current.has(id) && current.get(id) !== role);
+          if (missing.length) await tx.appAccess.createMany({ data: missing.map((appId) => ({ appId, userId, role })) });
+          if (differing.length) await tx.appAccess.updateMany({ where: { userId, appId: { in: differing } }, data: { role } });
+          if (row && !missing.length && !differing.length) return ALREADY;
+        }
+        return { orgId, slug: inv.org.slug, role, ...(inv.appId !== null ? { appId: inv.appId } : {}) };
       });
     } catch (err) {
       if (err instanceof InviteGoneError) {
         return reply.code(410).send({ error: 'invite no longer valid' });
       }
-      // Belt-and-braces: if a concurrent accept of a *different* invite to
-      // the same org somehow raced past the `already` check above, the
-      // membership unique constraint still protects the data — report it
-      // the same way the pre-check does, as 409, rather than 500.
+      // Belt-and-braces, unreachable today: accepts into one org serialise
+      // on the org lock and decide from rows read under it, so a concurrent
+      // accept can't insert a duplicate under us. If one ever is, the unique constraints
+      // still protect the data and it reads as the same 409, not a 500.
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         return reply.code(409).send({ error: 'already a member' });
       }
       throw err;
     }
+    if (result === ALREADY) return reply.code(409).send({ error: 'already a member' });
+    if (result.refused === ROLE_LIMIT) return sendPlanLimit(reply, new PlanLimitError('role', result.max));
+    return result;
   });
 }

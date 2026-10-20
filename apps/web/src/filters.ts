@@ -24,7 +24,8 @@ export interface QueryFilters {
 
 type Params = URLSearchParams | Record<string, string | string[] | undefined>;
 
-export function parseFilters(p: Params): QueryFilters {
+/** `retentionDays` is the plan's daily retention; the range is limited to it (see parseRange). */
+export function parseFilters(p: Params, retentionDays?: number): QueryFilters {
   const sort = getParam(p, 'sort');
   const rawPage = getParam(p, 'page');
   const n = rawPage !== undefined && /^\d+$/.test(rawPage) ? Number(rawPage) : 1;
@@ -32,7 +33,7 @@ export function parseFilters(p: Params): QueryFilters {
   const model = firstValue(getParams(p, 'model'));
   const op = firstValue(getParams(p, 'op'));
   return {
-    range: parseRange(p),
+    range: parseRange(p, retentionDays),
     ...(model !== undefined && { model }),
     ...(op !== undefined && { op }),
     sort: SORTS.includes(sort as SortKey) ? (sort as SortKey) : 'wasted',
@@ -49,8 +50,8 @@ export function filtersToSearch(f: QueryFilters): string {
   return s.toString();
 }
 
-export function filtersToApiQuery(f: QueryFilters, now: Date = new Date()): string {
-  const { from, to } = rangeToWindow(f.range, now);
+export function filtersToApiQuery(f: QueryFilters, now: Date = new Date(), retentionDays = Infinity): string {
+  const { from, to } = rangeToWindow(f.range, now, retentionDays);
   const s = new URLSearchParams({ from, to, sort: f.sort, limit: String(PAGE_SIZE), offset: String((f.page - 1) * PAGE_SIZE) });
   if (f.model) s.set('model', f.model);
   if (f.op) s.set('op', f.op);
@@ -58,7 +59,7 @@ export function filtersToApiQuery(f: QueryFilters, now: Date = new Date()): stri
 }
 
 /** Unfiltered top-by-wasted window used to fill the model/op dropdowns. */
-export function optionsApiQuery(range: RangeState, now: Date = new Date()): string {
-  const { from, to } = rangeToWindow(range, now);
+export function optionsApiQuery(range: RangeState, now: Date = new Date(), retentionDays = Infinity): string {
+  const { from, to } = rangeToWindow(range, now, retentionDays);
   return new URLSearchParams({ from, to, sort: 'wasted', limit: String(MAX_LIMIT) }).toString();
 }

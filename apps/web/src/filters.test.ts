@@ -4,6 +4,8 @@ import { parseFilters, filtersToSearch, filtersToApiQuery, optionsApiQuery, MAX_
 const NOW = new Date('2026-10-18T12:00:00.000Z');
 
 describe('parseFilters', () => {
+  it('passes the retention through to the range', () =>
+    expect(parseFilters({ range: '30d' }, 7).range).toEqual({ kind: 'preset', preset: '24h' }));
   it('defaults', () => expect(parseFilters({})).toEqual({
     range: { kind: 'preset', preset: '24h' }, sort: 'wasted', page: 1 }));
   it('single model and op', () => {
@@ -47,6 +49,11 @@ describe('filtersToSearch', () => {
 });
 
 describe('filtersToApiQuery', () => {
+  it('starts a preset equal to retention at the first whole kept day (list and options alike)', () => {
+    const f = parseFilters({ range: '30d' }, 30);
+    expect(new URLSearchParams(filtersToApiQuery(f, NOW, 30)).get('from')).toBe('2026-09-19T00:00:00.000Z');
+    expect(new URLSearchParams(optionsApiQuery(f.range, NOW, 30)).get('from')).toBe('2026-09-19T00:00:00.000Z');
+  });
   it('maps to the API params', () => {
     const q = new URLSearchParams(filtersToApiQuery(parseFilters(new URLSearchParams('range=1h&model=Order&sort=count')), NOW));
     expect(q.get('from')).toBe('2026-10-18T11:00:00.000Z');

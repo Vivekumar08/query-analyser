@@ -51,6 +51,7 @@ describe('AcceptInviteClient', () => {
     [410, 'This invite has expired or was already used.'],
     [403, 'This invite was sent to a different email address.'],
     [409, "You're already a member."],
+    [403, 'During the beta, teammates join as Members.'],
   ])('a %i shows the BFF message in an alert and stays put', async (status, error) => {
     fetchMock.mockResolvedValue(reply(status, { error }));
     render(<AcceptInviteClient />);
@@ -69,6 +70,34 @@ describe('AcceptInviteClient', () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad'); } });
     render(<AcceptInviteClient />);
     await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard'));
+  });
+
+  it('lands on the app the invite was for when the reply names one', async () => {
+    fetchMock.mockResolvedValue(reply(200, { orgId: 'org1', slug: 'acme', appId: 'a1' }));
+    render(<AcceptInviteClient />);
+    await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard/acme/a1/queries'));
+  });
+
+  it('without a usable appId it stays on /dashboard/<slug>', async () => {
+    for (const appId of [undefined, '', '..', 'a/b', 7]) {
+      cleanup();
+      router.replace.mockReset();
+      window.history.replaceState(null, '', '/invite?token=tOk_en-1');
+      fetchMock.mockResolvedValue(reply(200, { orgId: 'org1', slug: 'acme', appId }));
+      render(<AcceptInviteClient />);
+      await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard/acme'));
+    }
+  });
+
+  it('an unusable slug falls back to /dashboard, even with an appId', async () => {
+    for (const slug of ['.', '..']) {
+      cleanup();
+      router.replace.mockReset();
+      window.history.replaceState(null, '', '/invite?token=tOk_en-1');
+      fetchMock.mockResolvedValue(reply(200, { orgId: 'org1', slug, appId: 'a1' }));
+      render(<AcceptInviteClient />);
+      await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard'));
+    }
   });
 
   it('encodes the slug in the redirect', async () => {

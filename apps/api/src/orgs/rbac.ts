@@ -44,8 +44,17 @@ export function requireRole(min: Role) {
 
 /**
  * Like requireRole, but the org is found through the app named by `:id`
- * rather than an `:org` param directly. Same non-enumeration and
- * suspended-org behaviour as requireRole.
+ * rather than an `:org` param directly.
+ *
+ * OWNER and ADMIN reach every app in their org. MEMBER and VIEWER reach only
+ * the apps they hold an `AppAccess` row for, and on those apps their
+ * effective role is the row's role, not the membership's: `req.membership.role`
+ * is set to that effective role.
+ *
+ * A non-member, and a MEMBER/VIEWER without a row, get the same 404 as a
+ * nonexistent app, so app ids can't be enumerated. Access is checked before
+ * suspension for the same reason: a suspended org 403s only callers who could
+ * see the app anyway, so the 403 never confirms that an app exists.
  */
 export function requireAppRole(min: Role) {
   return async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
@@ -62,15 +71,27 @@ export function requireAppRole(min: Role) {
       await reply.code(404).send({ error: 'Not Found' });
       return;
     }
+    let role = m.role;
+    if (!roleAtLeast(m.role, 'ADMIN')) {
+      const access = await req.server.prisma.appAccess.findUnique({
+        where: { appId_userId: { appId, userId: req.user.id } },
+        select: { role: true },
+      });
+      if (!access) {
+        await reply.code(404).send({ error: 'Not Found' });
+        return;
+      }
+      role = access.role;
+    }
     if (m.org.suspendedAt) {
       await reply.code(403).send({ error: 'organization suspended' });
       return;
     }
-    if (!roleAtLeast(m.role, min)) {
+    if (!roleAtLeast(role, min)) {
       await reply.code(403).send({ error: 'insufficient role' });
       return;
     }
-    req.membership = { orgId: m.orgId, role: m.role };
+    req.membership = { orgId: m.orgId, role };
     req.appId = appId;
   };
 }

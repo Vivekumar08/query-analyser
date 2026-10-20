@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Building2, Check, ChevronsUpDown, Plus, UserRound } from 'lucide-react';
@@ -10,17 +10,37 @@ import { ROLE_LABEL } from '@/src/dashboard-types';
 import { ACCOUNT_HREF, NEW_ORG_HREF } from '@/src/landing';
 import type { groupForSwitcher, orgsForSwitcher } from './switcher';
 
+/**
+ * A create item the plan doesn't allow: visible, disabled, never a link, with
+ * the plan's reason as its description. The API is the real gate.
+ */
+function BlockedItem({ value, icon, label, reason }: { value: string; icon: React.ReactNode; label: string; reason: string }) {
+  const id = useId();
+  return (
+    <CommandItem disabled value={value} aria-describedby={id} className="flex-col items-start gap-0.5">
+      <span className="flex items-center gap-2">{icon} {label}</span>
+      <span id={id} className="text-xs text-muted-foreground">{reason}</span>
+    </CommandItem>
+  );
+}
+
 export function AppSwitcher({
   groups,
   orgs,
   currentLabel,
-  newAppHref,
+  newApp,
+  newOrgBlocked,
 }: {
   groups: ReturnType<typeof groupForSwitcher>;
   orgs: ReturnType<typeof orgsForSwitcher>;
   currentLabel: { org: string; app: string };
-  /** null hides New app (the caller's role in this org cannot create apps). */
-  newAppHref: string | null;
+  /**
+   * null hides New app (the caller's role in this org cannot create apps);
+   * `blocked` is the plan-limit copy when the org has no room for another app.
+   */
+  newApp: { href: string; blocked: string | null } | null;
+  /** The plan-limit copy when the user can't create another organisation, else null. */
+  newOrgBlocked: string | null;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -76,18 +96,24 @@ export function AppSwitcher({
             ))}
             <CommandSeparator />
             <CommandGroup>
-              {newAppHref && (
-                <CommandItem value="new-app" onSelect={() => go(newAppHref)}>
-                  <Link href={newAppHref} onClick={close} className="flex flex-1 items-center gap-2">
+              {newApp && (newApp.blocked ? (
+                <BlockedItem value="new-app" icon={<Plus className="size-4" aria-hidden />} label="New app" reason={newApp.blocked} />
+              ) : (
+                <CommandItem value="new-app" onSelect={() => go(newApp.href)}>
+                  <Link href={newApp.href} onClick={close} className="flex flex-1 items-center gap-2">
                     <Plus className="size-4" aria-hidden /> New app
                   </Link>
                 </CommandItem>
+              ))}
+              {newOrgBlocked ? (
+                <BlockedItem value="new-org" icon={<Building2 className="size-4" aria-hidden />} label="New organisation" reason={newOrgBlocked} />
+              ) : (
+                <CommandItem value="new-org" onSelect={() => go(NEW_ORG_HREF)}>
+                  <Link href={NEW_ORG_HREF} onClick={close} className="flex flex-1 items-center gap-2">
+                    <Building2 className="size-4" aria-hidden /> New organisation
+                  </Link>
+                </CommandItem>
               )}
-              <CommandItem value="new-org" onSelect={() => go(NEW_ORG_HREF)}>
-                <Link href={NEW_ORG_HREF} onClick={close} className="flex flex-1 items-center gap-2">
-                  <Building2 className="size-4" aria-hidden /> New organisation
-                </Link>
-              </CommandItem>
               <CommandItem value="account" onSelect={() => go(ACCOUNT_HREF)}>
                 <Link href={ACCOUNT_HREF} onClick={close} className="flex flex-1 items-center gap-2">
                   <UserRound className="size-4" aria-hidden /> Account

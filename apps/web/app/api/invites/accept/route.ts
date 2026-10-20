@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authedFetch } from '@/src/api';
-import { gate, isSafeSegment, jsonError, NO_STORE } from '@/src/org-bff';
+import { gate, isSafeSegment, jsonError, NO_STORE, planLimitResponse } from '@/src/org-bff';
 import { safeUpstreamMessage } from '@/src/upstream-errors';
 
 const GONE = 'This invite has expired or was already used.';
@@ -18,13 +18,20 @@ export async function POST(request: Request): Promise<Response> {
   const token = raw && typeof raw === 'object' ? raw.token : undefined;
   if (!isSafeSegment(token)) return jsonError('This invite link is incomplete. Use the link from your email.', 400);
 
-  const res = await authedFetch<{ orgId: string; slug?: string }>(`/v1/invites/${token}/accept`, g.session.accessToken, { method: 'POST' });
-  // The slug lets the invitee land on the team they just joined.
-  if (res.ok) return NextResponse.json({ orgId: res.data.orgId, slug: res.data.slug }, { headers: NO_STORE });
+  const res = await authedFetch<{ orgId: string; slug?: string; appId?: unknown }>(`/v1/invites/${token}/accept`, g.session.accessToken, { method: 'POST' });
+  if (res.ok) {
+    // The slug (and, for an app invite, the app) lets the invitee land where they were invited.
+    const { orgId, slug, appId } = res.data;
+    return NextResponse.json({ orgId, slug, ...(isSafeSegment(appId) ? { appId } : {}) }, { headers: NO_STORE });
+  }
 
+  // Checked before the 403 switch, whose fallthrough would say "different email".
+  const limited = planLimitResponse(res);
+  if (limited) return limited;
   switch (res.status) {
     case 401: return jsonError('unauthorized', 401);
-    // 404 is a revoked (deleted) or unknown token: to the invitee, the same as used/expired.
+    // 404 is a revoked or unknown token, or one deleted because the invitee's
+    // role or access changed: to the invitee, the same as used/expired.
     case 404:
     case 410: return jsonError(GONE, 410);
     case 403:

@@ -36,6 +36,8 @@ model User {
   memberships        Membership[]
   refreshTokens      RefreshToken[]
   verificationTokens VerificationToken[]
+  createdOrgs        Organization[]      @relation("OrgCreatedBy")
+  appAccess          AppAccess[]
 }
 
 model Organization {
@@ -44,6 +46,9 @@ model Organization {
   slug        String       @unique
   plan        String       @default("free")
   suspendedAt DateTime?    @db.Timestamptz(3)
+  /// Who created the org. Their owned-orgs allowance counts it; promotion to OWNER elsewhere never does.
+  createdById String?
+  createdBy   User?        @relation("OrgCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   createdAt   DateTime     @default(now()) @db.Timestamptz(3)
   memberships Membership[]
   apps        App[]
@@ -72,9 +77,27 @@ model Invite {
   expiresAt  DateTime     @db.Timestamptz(3)
   acceptedAt DateTime?    @db.Timestamptz(3)
   createdAt  DateTime     @default(now()) @db.Timestamptz(3)
+  /// Set for an app invite (grants AppAccess to this app); null for an org-wide invite.
+  appId      String?
   org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  app        App?         @relation(fields: [appId], references: [id], onDelete: Cascade)
 
   @@index([orgId])
+  @@index([appId])
+}
+
+model AppAccess {
+  id        String   @id @default(uuid())
+  appId     String
+  userId    String
+  /// MEMBER or VIEWER only (CHECK constraint in the migration).
+  role      Role
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  app       App      @relation(fields: [appId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, userId])
+  @@index([userId])
 }
 
 model RefreshToken {
@@ -105,6 +128,8 @@ model App {
   org              Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
   keys             IngestKey[]
   signatures       QuerySignature[]
+  access           AppAccess[]
+  invites          Invite[]
 
   @@unique([orgId, name, env])
   @@index([orgId])

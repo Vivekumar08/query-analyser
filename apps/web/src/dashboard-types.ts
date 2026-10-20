@@ -8,8 +8,23 @@ import type { EncryptedSample, PercentileResult, RankedQueryRow, Serialized, Wra
 
 export type Role = 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER';
 
+/**
+ * The org's plan limits, as GET /v1/orgs sends them (apps/api/src/plans.ts).
+ * `dailyRetentionDays` is the effective value (it includes any grace period).
+ */
+export interface PlanLimits {
+  ownedOrgs: number;
+  apps: number;
+  seats: number;
+  invitableRoles: Role[];
+  dailyRetentionDays: number;
+}
+
 /** GET /v1/orgs → OrgSummary[] (a bare array). */
-export interface OrgSummary { id: string; name: string; slug: string; plan: string; createdAt: string; role: Role }
+/** `createdByMe`: the caller created this org (what the org limit counts, not ownership). */
+export interface OrgSummary {
+  id: string; name: string; slug: string; plan: string; createdAt: string; role: Role; createdByMe: boolean; limits: PlanLimits;
+}
 
 export const ROLES: readonly Role[] = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'];
 
@@ -20,11 +35,31 @@ export function isAdminRole(role: Role): boolean {
   return role === 'OWNER' || role === 'ADMIN';
 }
 
-/** GET /v1/orgs/:orgId/members (ADMIN+) → Member[]. `id` is the membership id. */
-export interface Member { id: string; role: Role; createdAt: string; user: { id: string; email: string; name: string | null } }
+/** One app a MEMBER/VIEWER can open, with their role on it. */
+export interface MemberApp { id: string; name: string; role: Role }
 
-/** GET /v1/orgs/:orgId/invites (ADMIN+) → PendingInvite[]. Never carries the token. */
-export interface PendingInvite { id: string; email: string; role: Role; expiresAt: string; createdAt: string }
+/**
+ * GET /v1/orgs/:orgId/members (ADMIN+) → Member[]. `id` is the membership id.
+ * `allApps` is true for OWNER/ADMIN (org-wide, `apps` empty); otherwise `apps`
+ * lists the apps they were given.
+ */
+export interface Member {
+  id: string; role: Role; createdAt: string; user: { id: string; email: string; name: string | null };
+  allApps: boolean; apps: MemberApp[];
+}
+
+/** GET /v1/orgs/:orgId/invites (ADMIN+) → PendingInvite[]. Never carries the token. `appId` is null for org-wide invites. */
+export interface PendingInvite { id: string; email: string; role: Role; appId: string | null; expiresAt: string; createdAt: string }
+
+/** One person who can open an app. OWNER/ADMIN have `allApps`; the rest have a row for this app, with its role. */
+export interface AppPerson { userId: string; name: string | null; email: string; role: Role; allApps: boolean }
+
+/** GET /v1/apps/:id/access (ADMIN+): who can open the app, its pending invites, and the org's seats. */
+export interface AppAccessList {
+  people: AppPerson[];
+  invites: Omit<PendingInvite, 'createdAt' | 'appId'>[];
+  seats: { used: number; max: number };
+}
 
 /** GET /v1/orgs/:orgId/apps → AppSummary[] (a bare array). */
 export interface AppSummary { id: string; name: string; env: string; createdAt: string }

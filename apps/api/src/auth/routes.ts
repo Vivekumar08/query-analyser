@@ -6,10 +6,7 @@ import { issueVerificationToken, consumeVerificationToken, VERIFY_TTL_MS, RESET_
 import { verifyEmail, resetPasswordEmail } from '../mail/templates.js';
 import type { PrismaClient } from '../db.js';
 import type { Prisma } from '../generated/prisma/client.js';
-
-/** The lock both password writers and every refresh-token issuer take on the User row. See `rotateRefreshToken`. */
-const lockUser = (tx: Prisma.TransactionClient, userId: string) =>
-  tx.$queryRaw`SELECT id FROM "User" WHERE id = ${userId} FOR NO KEY UPDATE`;
+import { lockUser } from '../orgs/locks.js';
 
 /**
  * Store a new password hash and end every way back in under the old one:

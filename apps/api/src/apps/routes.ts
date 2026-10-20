@@ -1,34 +1,60 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireRole, requireAppRole } from '../orgs/rbac.js';
+import { requireRole, requireAppRole, roleAtLeast } from '../orgs/rbac.js';
 import { generateKey } from '../ingest/keys.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { sampleKeyRoutes } from './sample-key.js';
+import { accessRoutes } from './access.js';
+import { lockOrg } from '../orgs/locks.js';
+import { limitsFor, PlanLimitError, sendPlanLimit } from '../plans.js';
 
 const createSchema = z.object({ name: z.string().min(1).max(100), env: z.string().min(1).max(40) });
 const appSelect = { id: true, name: true, env: true, createdAt: true } as const;
 
 export async function appRoutes(app: FastifyInstance): Promise<void> {
   await app.register(sampleKeyRoutes);
+  await app.register(accessRoutes);
 
+  // MEMBER and VIEWER see only the apps they hold an AppAccess row for.
   app.get('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('VIEWER')] }, async (req) =>
-    app.prisma.app.findMany({ where: { orgId: req.membership.orgId }, select: appSelect, orderBy: { createdAt: 'asc' } }));
+    app.prisma.app.findMany({
+      where: {
+        orgId: req.membership.orgId,
+        ...(roleAtLeast(req.membership.role, 'ADMIN') ? {} : { access: { some: { userId: req.user.id } } }),
+      },
+      select: appSelect,
+      orderBy: { createdAt: 'asc' },
+    }));
 
   app.post('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req, reply) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
-    const exists = await app.prisma.app.findUnique({ where: { orgId_name_env: { orgId: req.membership.orgId, ...parsed.data } } });
-    if (exists) return reply.code(409).send({ error: 'app already exists for this env' });
-    // The findUnique-then-create above is itself a check-then-act: two
-    // concurrent requests for the same (orgId, name, env) can both pass the
-    // `exists` check and then both attempt to INSERT, so the second `create`
-    // fails its unique constraint. Prisma's P2002 carries no `statusCode`, so
-    // without this catch it would fall through to the generic error handler
-    // as a 500 instead of the spec'd 409.
+    const orgId = req.membership.orgId;
+    const DUPLICATE = Symbol('duplicate');
+    const GONE = Symbol('gone');
+    // One transaction under the org-row lock, so concurrent creates of
+    // different apps can't both pass the count. The duplicate check comes
+    // first: a repeated (name, env) is a 409 whatever the plan.
+    //
+    // The duplicate check is still a check-then-act for the same
+    // (orgId, name, env) on its own, so keep the P2002 catch: Prisma's P2002
+    // carries no `statusCode`, and without it a lost race would fall through
+    // to the generic error handler as a 500 instead of the spec'd 409.
     try {
-      const created = await app.prisma.app.create({ data: { orgId: req.membership.orgId, ...parsed.data }, select: appSelect });
+      const created = await app.prisma.$transaction(async (tx) => {
+        const org = await lockOrg(tx, orgId);
+        if (!org) return GONE; // deleted after requireRole passed
+        const exists = await tx.app.findUnique({ where: { orgId_name_env: { orgId, ...parsed.data } } });
+        if (exists) return DUPLICATE;
+        const max = limitsFor(org.plan).apps;
+        if ((await tx.app.count({ where: { orgId } })) >= max) throw new PlanLimitError('apps', max);
+        return tx.app.create({ data: { orgId, ...parsed.data }, select: appSelect });
+      });
+      if (created === GONE) return reply.code(404).send({ error: 'Not Found' });
+      if (created === DUPLICATE) return reply.code(409).send({ error: 'app already exists for this env' });
       return reply.code(201).send(created);
     } catch (err) {
+      if (err instanceof PlanLimitError) return sendPlanLimit(reply, err);
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         return reply.code(409).send({ error: 'app already exists for this env' });
       }
@@ -63,6 +89,31 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
     if (!row) return reply.code(404).send({ error: 'Not Found' });
     await app.prisma.ingestKey.update({ where: { id: keyId }, data: { revokedAt: new Date() } });
     app.keys.invalidate(row.keyHash);
+    return reply.code(204).send();
+  });
+
+  // Deletes the app; the cascades take its keys, signatures (and their
+  // samples, rollups, alerts, advice), AppAccess rows and app invites.
+  //
+  // The org lock comes first, like every other writer here: an accept or a
+  // demotion inserting an AppAccess row for this app holds the org lock and
+  // then takes a KEY SHARE lock on the app row, so deleting the app row
+  // before locking the org would deadlock against the one (it also holds
+  // the claimed invite we cascade into) or leave the other inserting a row
+  // for an app that's gone (FK error). Under the lock they simply run
+  // before or after us.
+  app.delete('/v1/apps/:id', { preHandler: [app.authenticate, app.requireVerified, requireAppRole('ADMIN')] }, async (req, reply) => {
+    const appId = req.appId;
+    const hashes = await app.prisma.$transaction(async (tx) => {
+      if (!(await lockOrg(tx, req.membership.orgId))) return null;
+      const keys = await tx.ingestKey.findMany({ where: { appId }, select: { keyHash: true } });
+      const { count } = await tx.app.deleteMany({ where: { id: appId } });
+      return count === 0 ? null : keys.map((k) => k.keyHash);
+    });
+    if (!hashes) return reply.code(404).send({ error: 'Not Found' });
+    // KeyResolver caches a key for 60s; drop them so ingest 401s at once
+    // instead of writing for an app that no longer exists.
+    for (const hash of hashes) app.keys.invalidate(hash);
     return reply.code(204).send();
   });
 }

@@ -28,11 +28,13 @@ export default async function QueriesPage({
   // Authorises the org↔app pairing; the app ID (not the URL value) goes to the API.
   const ctx = await getShellContext(org, app);
   const base = `/dashboard/${encodeURIComponent(org)}/${encodeURIComponent(app)}`;
-  const filters = parseFilters(sp);
+  // The plan's daily retention limits the range (a longer bookmarked range falls back to 24h).
+  const retentionDays = ctx.currentOrg.limits.dailyRetentionDays;
+  const filters = parseFilters(sp, retentionDays);
   const search = filtersToSearch(filters);
 
   const token = ctx.session.accessToken;
-  const res = await listQueries(token, ctx.app.id, filtersToApiQuery(filters));
+  const res = await listQueries(token, ctx.app.id, filtersToApiQuery(filters, undefined, retentionDays));
   if (!res.ok && res.status === 401) redirect(`/api/auth/refresh?next=${encodeURIComponent(`${base}/queries${search ? `?${search}` : ''}`)}`);
   const outcome = listOutcome(res);
   if (outcome === 'error') throw new Error('Could not load queries');
@@ -46,7 +48,7 @@ export default async function QueriesPage({
   // rows are all one model/op, so one extra unfiltered call supplies the rest.
   let optionRows = items;
   if (filtered) {
-    const all = await listQueries(token, ctx.app.id, optionsApiQuery(filters.range));
+    const all = await listQueries(token, ctx.app.id, optionsApiQuery(filters.range, undefined, retentionDays));
     if (all.ok) optionRows = all.data.items;
   }
   const models = [...new Set([...optionRows.map((r) => r.model), ...(filters.model ? [filters.model] : [])])].sort();
@@ -62,7 +64,7 @@ export default async function QueriesPage({
 
   return (
     <>
-      <PageHeader title="Queries" crumbs={[{ label: org }, { label: 'Queries' }]} actions={<RangeControl value={filters.range} />} />
+      <PageHeader title="Queries" crumbs={[{ label: org }, { label: 'Queries' }]} actions={<RangeControl value={filters.range} retentionDays={retentionDays} />} />
       <FadeIn>
       <div className="flex flex-col gap-4 p-6">
         <QueryFiltersBar models={models} ops={ops} value={filters} />

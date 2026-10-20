@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { ingestPayloadSchema, type IngestPayload } from '@query-analyser/contract';
 import { writeBatch } from './writer.js';
+import { hashKey } from './keys.js';
+import { isForeignKeyViolation } from '../db-errors.js';
 
 const SIGNATURE_QUOTA = 5000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -85,6 +87,17 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
       try {
         ({ signatures } = await writeBatch(app.prisma, resolved.appId, payload));
       } catch (err) {
+        // A key cached (here, for up to 60s) for an app deleted since: on
+        // another replica, or by a delete that committed after this request
+        // resolved its key. Either of writeBatch's statements then fails on
+        // its foreign key. If the app really is gone, the key is dead: evict
+        // it and refuse it like any unknown key, rather than 500 until the
+        // cache entry expires.
+        if (isForeignKeyViolation(err) && !(await app.prisma.app.findUnique({ where: { id: resolved.appId }, select: { id: true } }))) {
+          app.keys.invalidate(hashKey(key));
+          app.ingestStats.rejected401 += 1;
+          return reply.code(401).send({ error: 'invalid ingest key' });
+        }
         req.log.error({ err }, 'writeBatch failed');
         return reply.code(500).send({ error: 'Internal Server Error' });
       }

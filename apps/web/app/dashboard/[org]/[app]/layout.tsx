@@ -5,6 +5,7 @@ import { MobileNav } from '@/components/dashboard/MobileNav';
 import { RememberApp } from '@/components/dashboard/RememberApp';
 import { Sidebar, SidebarAccount, SidebarNav } from '@/components/dashboard/Sidebar';
 import { isAdminRole } from '@/src/dashboard-types';
+import { PLAN_LIMIT_COPY, canCreateApp, canCreateOrg } from '@/src/plan-limits';
 import { LogoutButton } from '@/app/_components/LogoutButton';
 
 export default async function AppShell({
@@ -18,15 +19,24 @@ export default async function AppShell({
   const base = `/dashboard/${encodeURIComponent(org)}/${encodeURIComponent(app)}`;
   const { session, currentOrg, app: appData, orgs, appsByOrg } = await getShellContext(org, app);
   const groups = groupForSwitcher(orgs, appsByOrg, { org, app });
+  // Settings and New app are ADMIN+ only; limits are hints, the API is the gate.
+  const isAdmin = isAdminRole(currentOrg.role);
+  const newApp = isAdmin
+    ? {
+        href: `/onboarding?org=${encodeURIComponent(org)}`,
+        blocked: canCreateApp(currentOrg.limits, (appsByOrg[org] ?? []).length) ? null : PLAN_LIMIT_COPY.apps,
+      }
+    : null;
   const switcher = (
     <AppSwitcher
       groups={groups}
       orgs={orgsForSwitcher(orgs, org)}
       currentLabel={{ org: currentOrg.name, app: appData.name }}
-      newAppHref={isAdminRole(currentOrg.role) ? `/onboarding?org=${encodeURIComponent(org)}` : null}
+      newApp={newApp}
+      newOrgBlocked={canCreateOrg(orgs) ? null : PLAN_LIMIT_COPY.orgs}
     />
   );
-  const nav = <SidebarNav base={base} />;
+  const nav = <SidebarNav base={base} showSettings={isAdmin} />;
   const footer = (
     <div className="flex flex-col gap-2 text-sm">
       <SidebarAccount name={session.user.name} email={session.user.email} />

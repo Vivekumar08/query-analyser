@@ -174,27 +174,40 @@ export function inviteEmail(o: {
   inviterName: string;
   role: Role;
   ttlMs: number;
+  /** The app an app-scoped invite grants; omitted for an org-wide invite. */
+  appName?: string;
 }): RenderedMail {
   const expiry = formatTtl(o.ttlMs);
   const org = oneLine(o.orgName);
   const inviter = oneLine(o.inviterName);
   const role = roleLabel(o.role);
+  const app = o.appName === undefined ? undefined : oneLine(o.appName);
+  const subject = app === undefined
+    ? `You're invited to ${org} on Query Analyser`
+    : `You're invited to ${app} in ${org} on Query Analyser`;
+  const sentence = app === undefined
+    ? `${inviter} invited you as ${role} to see which MongoDB queries are slowing ${org} down, and why.`
+    : `${inviter} invited you to ${app} in ${org} as ${role}, to see which MongoDB queries are slowing it down, and why.`;
   return {
-    subject: oneLine(`You're invited to ${org} on Query Analyser`),
+    subject: oneLine(subject),
     html: layout({
-      preheader: `${inviter} invited you to ${org} on Query Analyser.`,
+      preheader: app === undefined
+        ? `${inviter} invited you to ${org} on Query Analyser.`
+        : `${inviter} invited you to ${app} in ${org} on Query Analyser.`,
       eyebrow: 'Team invite',
       headlineHtml: `Join ${accentEm(escapeHtml(org))} on query·analyser`,
-      bodyHtml: `${strong(escapeHtml(inviter))} invited you as ${strong(role)} to see which MongoDB queries are slowing ${escapeHtml(org)} down, and why.`,
+      bodyHtml: app === undefined
+        ? `${strong(escapeHtml(inviter))} invited you as ${strong(role)} to see which MongoDB queries are slowing ${escapeHtml(org)} down, and why.`
+        : `${strong(escapeHtml(inviter))} invited you to ${strong(escapeHtml(app))} in ${strong(escapeHtml(org))} as ${strong(role)}, to see which MongoDB queries are slowing it down, and why.`,
       cta: 'Accept invite',
       href: o.href,
       expiry,
       footer: 'You got this because someone invited this address. Not expecting it? Ignore this email.',
     }),
     text: [
-      `You're invited to ${org} on Query Analyser`,
+      subject,
       '',
-      `${inviter} invited you as ${role} to see which MongoDB queries are slowing ${org} down, and why.`,
+      sentence,
       '',
       'Accept the invite:',
       '',

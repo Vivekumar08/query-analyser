@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PrismaClient } from '../db.js';
 import type { Prisma } from '../generated/prisma/client.js';
+import { lockUser } from '../orgs/locks.js';
 
 /** The client itself, or a transaction handle from `prisma.$transaction(async (tx) => …)`. */
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -52,11 +53,10 @@ export async function rotateRefreshToken(
   // revocation sees (and kills) the successor, or the CAS below sees the
   // revoked token and fails.
   return prisma.$transaction(async (tx) => {
-    // NO KEY UPDATE, not UPDATE: it still conflicts with the password-change
-    // lock, but not with the KEY SHARE lock every FK insert referencing this
-    // user takes (a reset link, a membership), which FOR UPDATE would block
-    // and, with the reset-link transaction, deadlock against.
-    await tx.$queryRaw`SELECT id FROM "User" WHERE id = ${row.userId} FOR NO KEY UPDATE`;
+    // The password-change lock. NO KEY UPDATE, so it doesn't block (or, with
+    // the reset-link transaction, deadlock against) FK inserts that reference
+    // this user; see `lockUser`.
+    await lockUser(tx, row.userId);
 
     // Atomic consume: only one concurrent caller wins.
     const consumed = await tx.refreshToken.updateMany({ where: { id: row.id, consumedAt: null }, data: { consumedAt: new Date() } });

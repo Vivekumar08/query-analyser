@@ -20,12 +20,14 @@ const LINKS: { name: string; segment: string; icon: LucideIcon }[] = [
  * Client-side so the shared layout (which never re-renders on soft
  * navigation and can't see the path) still marks the current page.
  */
-export function SidebarNav({ base }: { base: string }) {
+export function SidebarNav({ base, showSettings }: { base: string; showSettings: boolean }) {
   const pathname = usePathname() ?? '';
+  // Settings are ADMIN+ only; the page itself 404s for anyone else.
+  const links = showSettings ? LINKS : LINKS.filter((l) => l.segment !== 'settings');
   const isActive = (segment: string) => pathname === `${base}/${segment}` || pathname.startsWith(`${base}/${segment}/`);
   return (
     <nav className="flex flex-col gap-0.5 px-2 text-sm">
-      {LINKS.map(({ name, segment, icon: Icon }) => {
+      {links.map(({ name, segment, icon: Icon }) => {
         const active = isActive(segment);
         return (
           <Link

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { clearPendingInvite, savePendingInvite } from '@/src/pending-invite';
-import { orgPath } from '@/src/landing';
+import { appPath, orgPath } from '@/src/landing';
 
 type State =
   | { kind: 'pending' }
@@ -18,6 +18,17 @@ const isFinal = (status: number, code: string | undefined) =>
   status === 400 || status === 404 || status === 409 || status === 410 || (status === 403 && code !== 'email_not_verified');
 
 const LINK_CLASS = 'font-medium text-accent-text underline underline-offset-4';
+
+/** A slug to put in a path: encoded on use, but `.` and `..` would still collapse it. */
+const isSlug = (v: unknown): v is string => typeof v === 'string' && v !== '' && v !== '.' && v !== '..';
+/** App ids are uuids; the BFF only passes safe segments, and this checks again. */
+const isAppId = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_-]{1,512}$/.test(v);
+
+/** The app the invite was for, else the team, else /dashboard (which picks a landing itself). */
+function landing(data: { slug?: unknown; appId?: unknown }): string {
+  if (!isSlug(data.slug)) return '/dashboard';
+  return isAppId(data.appId) ? appPath(data.slug, data.appId) : orgPath(data.slug);
+}
 
 /**
  * Accepts the invite in `?token=`. The token is read here, in the browser —
@@ -58,9 +69,8 @@ export function AcceptInviteClient() {
         if (res.ok) {
           clearPendingInvite();
           setState({ kind: 'done' });
-          const data = (await res.json().catch(() => ({}))) as { slug?: unknown };
-          // Straight to the team just joined; /dashboard picks a landing without a slug.
-          router.replace(typeof data.slug === 'string' && data.slug ? orgPath(data.slug) : '/dashboard');
+          const data = (await res.json().catch(() => ({}))) as { slug?: unknown; appId?: unknown } | null;
+          router.replace(landing(data ?? {}));
           return;
         }
         if (res.status === 401) {

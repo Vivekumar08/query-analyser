@@ -14,14 +14,16 @@ vi.mock('next/link', () => ({
 vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 Element.prototype.scrollIntoView = () => {};
 import { AppSwitcher } from './AppSwitcher';
+import { PLAN_LIMIT_COPY } from '@/src/plan-limits';
 
 const groups = [{ org: { slug: 'o', name: 'Org' }, apps: [{ id: 'a1', name: 'Shop', env: 'prod', href: '/dashboard/o/a1/queries', current: false }] }];
 const orgs = [
   { slug: 'o', name: 'Org', role: 'OWNER' as const, href: '/dashboard/o', current: true },
   { slug: 't', name: 'Team', role: 'MEMBER' as const, href: '/dashboard/t', current: false },
 ];
-const open = (newAppHref: string | null = '/onboarding?org=o') => {
-  render(<AppSwitcher groups={groups as never} orgs={orgs} currentLabel={{ org: 'Org', app: 'Cur' }} newAppHref={newAppHref} />);
+type NewApp = { href: string; blocked: string | null } | null;
+const open = (newApp: NewApp = { href: '/onboarding?org=o', blocked: null }, newOrgBlocked: string | null = null) => {
+  render(<AppSwitcher groups={groups as never} orgs={orgs} currentLabel={{ org: 'Org', app: 'Cur' }} newApp={newApp} newOrgBlocked={newOrgBlocked} />);
   fireEvent.click(screen.getByRole('button'));
 };
 
@@ -77,5 +79,40 @@ describe('AppSwitcher', () => {
   it('shows New app for admins', () => {
     open();
     expect(screen.getByText('New app').closest('a')?.getAttribute('href')).toBe('/onboarding?org=o');
+  });
+  it('a blocked New app stays visible, disabled, with the apps copy and no link', () => {
+    open({ href: '/onboarding?org=o', blocked: PLAN_LIMIT_COPY.apps });
+    expect(screen.getByText('New app').closest('a')).toBeNull();
+    const item = screen.getByText('New app').closest('[aria-disabled="true"]') as HTMLElement;
+    expect(item).toBeTruthy();
+    const copy = screen.getByText(PLAN_LIMIT_COPY.apps);
+    expect(item.contains(copy)).toBe(true);
+    // The copy is the item's description, not only nearby text.
+    expect(item.getAttribute('aria-describedby')).toBe(copy.id);
+    fireEvent.click(screen.getByText('New app'));
+    expect(push).not.toHaveBeenCalled();
+  });
+  it('a blocked New organisation likewise shows the orgs copy and never navigates', () => {
+    open(null, PLAN_LIMIT_COPY.orgs);
+    expect(screen.getByText('New organisation').closest('a')).toBeNull();
+    const item = screen.getByText('New organisation').closest('[aria-disabled="true"]') as HTMLElement;
+    expect(item).toBeTruthy();
+    const copy = screen.getByText(PLAN_LIMIT_COPY.orgs);
+    expect(item.getAttribute('aria-describedby')).toBe(copy.id);
+    // Account still works.
+    expect(screen.getByText('Account').closest('a')?.getAttribute('href')).toBe('/dashboard/account');
+    // Keyboard selection never lands on it, so Enter can't navigate there.
+    const root = item.closest('[cmdk-root]') as HTMLElement;
+    for (let i = 0; i < 6; i++) {
+      fireEvent.keyDown(root, { key: 'ArrowDown' });
+      expect(item.getAttribute('aria-selected')).toBe('false');
+    }
+    fireEvent.keyDown(root, { key: 'Enter' });
+    expect(push).not.toHaveBeenCalledWith('/onboarding?new=org');
+  });
+  it('an unblocked New organisation has no limit copy', () => {
+    open();
+    expect(screen.queryByText(PLAN_LIMIT_COPY.orgs)).toBeNull();
+    expect(screen.queryByText(PLAN_LIMIT_COPY.apps)).toBeNull();
   });
 });

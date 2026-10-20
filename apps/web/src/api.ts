@@ -2,7 +2,7 @@ import { loadWebEnv } from './env';
 
 export type ApiResult<T> =
   | { ok: true; data: T }
-  | { ok: false; status: number; code?: string; error: string };
+  | { ok: false; status: number; code?: string; error: string; limit?: string };
 
 /**
  * Resolves the API origin on EVERY call.
@@ -64,12 +64,14 @@ export async function apiFetch<T>(
 
   if (res.ok) return { ok: true, data: parsed as T };
 
-  const body = (parsed ?? {}) as { error?: string; code?: string };
+  const body = (parsed ?? {}) as { error?: string; code?: string; limit?: unknown };
   return {
     ok: false,
     status: res.status,
     code: body.code,
     error: body.error ?? `request failed with ${res.status}`,
+    // Which plan limit a 403 `plan-limit` hit; the BFF maps it to copy.
+    ...(typeof body.limit === 'string' ? { limit: body.limit } : {}),
   };
 }
 

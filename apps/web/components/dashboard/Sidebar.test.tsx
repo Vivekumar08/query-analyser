@@ -11,7 +11,7 @@ afterEach(cleanup);
 
 describe('SidebarNav', () => {
   it('Queries and Settings are links; the other C2 pages are disabled with a Soon badge', () => {
-    render(<SidebarNav base="/dashboard/acme/a1" />);
+    render(<SidebarNav base="/dashboard/acme/a1" showSettings />);
     expect(screen.getByRole('link', { name: /queries/i }).getAttribute('href')).toBe('/dashboard/acme/a1/queries');
     expect(screen.getByRole('link', { name: /settings/i }).getAttribute('href')).toBe('/dashboard/acme/a1/settings');
     for (const name of ['Overview', 'Alerts']) {
@@ -21,13 +21,20 @@ describe('SidebarNav', () => {
     expect(screen.getAllByText('Soon')).toHaveLength(2);
   });
 
+  it('hides Settings when showSettings is false', () => {
+    render(<SidebarNav base="/dashboard/o/a" showSettings={false} />);
+    expect(screen.queryByRole('link', { name: /Settings/ })).toBeNull();
+    expect(screen.queryByText('Settings')).toBeNull();
+    expect(screen.getByRole('link', { name: /Queries/ })).toBeTruthy();
+  });
+
   it('marks the current page', () => {
     nav.pathname = '/dashboard/acme/a1/queries/h1';
-    const { rerender } = render(<SidebarNav base="/dashboard/acme/a1" />);
+    const { rerender } = render(<SidebarNav base="/dashboard/acme/a1" showSettings />);
     expect(screen.getByRole('link', { name: /queries/i }).getAttribute('aria-current')).toBe('page');
     expect(screen.getByRole('link', { name: /settings/i }).getAttribute('aria-current')).toBeNull();
     nav.pathname = '/dashboard/acme/a1/settings';
-    rerender(<SidebarNav base="/dashboard/acme/a1" />);
+    rerender(<SidebarNav base="/dashboard/acme/a1" showSettings />);
     expect(screen.getByRole('link', { name: /settings/i }).getAttribute('aria-current')).toBe('page');
     expect(screen.getByRole('link', { name: /queries/i }).getAttribute('aria-current')).toBeNull();
   });
@@ -38,7 +45,7 @@ describe('Sidebar', () => {
     const { container } = render(
       <Sidebar
         switcher={<span>switch</span>}
-        nav={<SidebarNav base="/dashboard/acme/a1" />}
+        nav={<SidebarNav base="/dashboard/acme/a1" showSettings />}
         footer={<span>foot</span>}
       />,
     );

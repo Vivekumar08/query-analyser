@@ -251,6 +251,7 @@ describe('alerts and advice', () => {
     await app.prisma.membership.create({
       data: { userId: viewer.id, orgId, role: 'VIEWER' },
     });
+    await app.prisma.appAccess.create({ data: { appId, userId: viewer.id, role: 'VIEWER' } });
 
     const a = await app.inject({
       method: 'PATCH',

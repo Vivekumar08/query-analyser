@@ -112,3 +112,31 @@ describe('inviteEmail', () => {
     expect(odd.html).toContain('href="https://x.test/invite?token=a&amp;b=&quot;c&quot;"');
   });
 });
+
+describe('inviteEmail for an app', () => {
+  const base = { href: INVITE, orgName: 'Acme', inviterName: 'Grace Hopper', role: 'MEMBER' as const, ttlMs: 7 * 24 * 3600 * 1000 };
+
+  it('names the app and the org in the subject, preheader and body', () => {
+    const m = inviteEmail({ ...base, appName: 'Shop' });
+    expect(m.subject).toBe("You're invited to Shop in Acme on Query Analyser");
+    expect(m.html).toContain('Grace Hopper invited you to Shop in Acme on Query Analyser.');
+    expect(m.html).toContain('<strong');
+    expect(m.text).toContain('Grace Hopper invited you to Shop in Acme as Member, to see which MongoDB queries are slowing it down, and why.');
+  });
+
+  it('escapes the app name in html and flattens it in the subject', () => {
+    const m = inviteEmail({ ...base, appName: 'Shop <b>\r\nBcc: a@b.c' });
+    expect(m.html).toContain('Shop &lt;b&gt;');
+    expect(m.html).not.toContain('Shop <b>');
+    expect(m.subject).not.toMatch(/[\r\n]/);
+    expect(m.text).not.toMatch(/\r/);
+  });
+
+  it('without appName, the output is unchanged', () => {
+    const withUndefined = inviteEmail({ ...base, appName: undefined });
+    const without = inviteEmail(base);
+    expect(withUndefined).toEqual(without);
+    expect(without.subject).toBe("You're invited to Acme on Query Analyser");
+    expect(without.text).toContain('Grace Hopper invited you as Member to see which MongoDB queries are slowing Acme down, and why.');
+  });
+});
