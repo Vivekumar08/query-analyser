@@ -3,11 +3,16 @@ import { redirect } from 'next/navigation';
 import { requireSession } from '@/src/auth';
 import { getApp, listApps, listOrgs } from '@/src/dashboard-api';
 import { resolveOnboardingStart } from '@/src/onboarding-state';
+import { isAdminRole } from '@/src/dashboard-types';
+import { NEW_ORG_HREF } from '@/src/landing';
 import { OnboardingFlow } from '@/components/onboarding/OnboardingFlow';
 
-export default async function OnboardingPage({ searchParams }: { searchParams: Promise<{ org?: string }> }) {
-  const { org: targetOrg } = await searchParams;
-  const path = targetOrg ? `/onboarding?org=${encodeURIComponent(targetOrg)}` : '/onboarding';
+export default async function OnboardingPage({ searchParams }: { searchParams: Promise<{ org?: string; new?: string }> }) {
+  const sp = await searchParams;
+  const targetOrg = sp.org;
+  // "Create your own organisation": start at the org step even with orgs.
+  const newOrg = sp.new === 'org';
+  const path = newOrg ? NEW_ORG_HREF : targetOrg ? `/onboarding?org=${encodeURIComponent(targetOrg)}` : '/onboarding';
   const session = await requireSession(path);
   const refresh = `/api/auth/refresh?next=${encodeURIComponent(path)}`;
   const verified = Boolean(session.user.emailVerifiedAt);
@@ -17,9 +22,10 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
   if (orgsRes && !orgsRes.ok) throw new Error('Could not load workspaces');
   const orgs = orgsRes?.ok ? orgsRes.data : [];
   // A returning user (reload, or back after leaving): find an app that never
-  // reported. Skipped for "+ New app" (?org=), which always means a new app.
+  // reported. Skipped for "+ New app" (?org=), which always means a new app,
+  // for a new org (?new=org), and when the first org's role can't add apps.
   let apps: { id: string; name: string; lastSeenAt: string | null }[] | undefined;
-  if (verified && !targetOrg && orgs[0]) {
+  if (verified && !targetOrg && !newOrg && orgs[0] && isAdminRole(orgs[0].role)) {
     const list = await listApps(session.accessToken, orgs[0].id);
     if (!list.ok && list.status === 401) redirect(refresh);
     if (!list.ok) throw new Error('Could not load apps');
@@ -31,7 +37,7 @@ export default async function OnboardingPage({ searchParams }: { searchParams: P
       return { id: a.id, name: a.name, lastSeenAt: d.ok ? d.data.ingest.lastSeenAt : 'unknown' };
     });
   }
-  const start = resolveOnboardingStart({ emailVerified: verified, orgs, targetOrg, apps });
+  const start = resolveOnboardingStart({ emailVerified: verified, orgs, targetOrg, newOrg, apps });
   if (start === 'done') redirect('/dashboard');
 
   return (

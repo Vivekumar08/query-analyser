@@ -124,7 +124,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
     const { token } = req.params as { token: string };
     const inv = await app.prisma.invite.findUnique({
       where: { tokenHash: hashToken(token) },
-      include: { org: { select: { suspendedAt: true } } },
+      include: { org: { select: { suspendedAt: true, slug: true } } },
     });
     if (!inv) return reply.code(404).send({ error: 'Not Found' });
     if (inv.acceptedAt || inv.expiresAt < new Date()) {
@@ -168,7 +168,7 @@ export async function inviteRoutes(app: FastifyInstance): Promise<void> {
         if (claimed.count === 0) throw new InviteGoneError();
 
         await tx.membership.create({ data: { userId: req.user.id, orgId: inv.orgId, role: inv.role } });
-        return { orgId: inv.orgId, role: inv.role };
+        return { orgId: inv.orgId, slug: inv.org.slug, role: inv.role };
       });
     } catch (err) {
       if (err instanceof InviteGoneError) {

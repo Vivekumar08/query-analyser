@@ -4,6 +4,7 @@ import { usePathname } from 'next/navigation';
 import { BarChart3, Bell, LayoutDashboard, Settings, type LucideIcon } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
+import { ACCOUNT_HREF } from '@/src/landing';
 
 const SOON = [
   { name: 'Overview', icon: LayoutDashboard },
@@ -47,6 +48,16 @@ export function SidebarNav({ base }: { base: string }) {
         </div>
       ))}
     </nav>
+  );
+}
+
+/** The signed-in user at the foot of the sidebar; links to the Account page. */
+export function SidebarAccount({ name, email }: { name: string; email: string }) {
+  return (
+    <Link href={ACCOUNT_HREF} className="flex min-w-0 flex-col rounded-md px-2 py-1.5 text-sm hover:bg-muted">
+      <span className="truncate font-medium">{name}</span>
+      <span className="truncate text-muted-foreground">{email}</span>
+    </Link>
   );
 }
 

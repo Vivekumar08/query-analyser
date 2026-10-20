@@ -5,7 +5,7 @@ import { render, screen, cleanup } from '@testing-library/react';
 const nav = vi.hoisted(() => ({ pathname: '/dashboard/acme/a1/queries' }));
 vi.mock('next/navigation', () => ({ usePathname: () => nav.pathname }));
 
-import { Sidebar, SidebarNav } from './Sidebar';
+import { Sidebar, SidebarAccount, SidebarNav } from './Sidebar';
 
 afterEach(cleanup);
 
@@ -48,5 +48,14 @@ describe('Sidebar', () => {
     expect(classes).toEqual(expect.arrayContaining(['sticky', 'top-0', 'h-dvh']));
     const navWrapper = aside!.querySelector('nav')!.parentElement!;
     expect(navWrapper.className.split(/\s+/)).toContain('overflow-y-auto');
+  });
+});
+
+describe('SidebarAccount', () => {
+  it('links the name and email to the account page', () => {
+    render(<SidebarAccount name="Ada" email="ada@x.io" />);
+    const link = screen.getByRole('link', { name: /Ada/ });
+    expect(link.getAttribute('href')).toBe('/dashboard/account');
+    expect(link.textContent).toContain('ada@x.io');
   });
 });

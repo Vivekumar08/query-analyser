@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyError } from 'fastify';
 import { loadConfig, type Config } from './config.js';
 import { ingestRoutes } from './ingest/routes.js';
-import { authRoutes } from './auth/routes.js';
+import { authRoutes, type AuthRouteHooks } from './auth/routes.js';
 import { orgRoutes } from './orgs/routes.js';
 import { appRoutes } from './apps/routes.js';
 import { inviteRoutes } from './orgs/invites.js';
@@ -31,6 +31,11 @@ export interface BuildOptions {
    * work; `server.ts` passes `true`.
    */
   startScheduler?: boolean;
+  /**
+   * @internal Test-only seams inside the auth routes, so a test can land a
+   * competing request in an exact window. Never set outside tests.
+   */
+  authHooks?: AuthRouteHooks;
 }
 
 /**
@@ -204,7 +209,7 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   });
   await app.register(import('./plugins/auth.js'));
   await app.register(ingestRoutes, { rateLimitMax: opts.rateLimitMax });
-  await app.register(authRoutes);
+  await app.register(authRoutes, { hooks: opts.authHooks });
   await app.register(orgRoutes);
   await app.register(appRoutes);
   await app.register(inviteRoutes);

@@ -18,7 +18,7 @@ const reply = (status: number, body?: unknown) => ({ ok: status < 300, status, j
 beforeEach(() => {
   router.replace.mockReset();
   router.push.mockReset();
-  fetchMock = vi.fn().mockResolvedValue(reply(200, { orgId: 'org1', role: 'MEMBER' }));
+  fetchMock = vi.fn().mockResolvedValue(reply(200, { orgId: 'org1', slug: 'acme', role: 'MEMBER' }));
   vi.stubGlobal('fetch', fetchMock);
   window.history.replaceState(null, '', '/invite?token=tOk_en-1');
   localStorage.clear();
@@ -30,10 +30,10 @@ afterEach(() => {
 });
 
 describe('AcceptInviteClient', () => {
-  it('scrubs ?token= with history.replaceState, POSTs it exactly once (StrictMode) and goes to /dashboard', async () => {
+  it('scrubs ?token= with history.replaceState, POSTs it exactly once (StrictMode) and goes to the team at /dashboard/<slug>', async () => {
     const scrub = vi.spyOn(window.history, 'replaceState');
     render(<StrictMode><AcceptInviteClient /></StrictMode>);
-    await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard'));
+    await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard/acme'));
 
     expect(scrub).toHaveBeenCalledWith(null, '', '/invite');
     expect(window.location.search).toBe('');
@@ -57,6 +57,24 @@ describe('AcceptInviteClient', () => {
     expect((await screen.findByRole('alert')).textContent).toContain(error);
     expect(router.replace).not.toHaveBeenCalled();
     expect(window.location.search).toBe('');
+  });
+
+  it('falls back to /dashboard when the response has no slug', async () => {
+    fetchMock.mockResolvedValue(reply(200, { orgId: 'org1' }));
+    render(<AcceptInviteClient />);
+    await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard'));
+  });
+
+  it('falls back to /dashboard when the 200 body is not JSON', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad'); } });
+    render(<AcceptInviteClient />);
+    await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard'));
+  });
+
+  it('encodes the slug in the redirect', async () => {
+    fetchMock.mockResolvedValue(reply(200, { orgId: 'org1', slug: 'a b' }));
+    render(<AcceptInviteClient />);
+    await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard/a%20b'));
   });
 
   it('a 409 offers a way into the dashboard', async () => {
@@ -102,7 +120,7 @@ describe('AcceptInviteClient', () => {
 
     it('is cleared once the invite is accepted', async () => {
       render(<AcceptInviteClient />);
-      await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard'));
+      await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard/acme'));
       expect(stored()).toBeNull();
     });
 
@@ -135,7 +153,7 @@ describe('AcceptInviteClient', () => {
     it('a broken localStorage does not stop the accept', async () => {
       vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('QuotaExceeded'); });
       render(<AcceptInviteClient />);
-      await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard'));
+      await vi.waitFor(() => expect(router.replace).toHaveBeenCalledWith('/dashboard/acme'));
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
   });

@@ -52,7 +52,15 @@ export function OnboardingFlow({ start, email }: { start: OnboardingStart; email
           </div>
         )}
         {step === 'verify' && <VerifyStep email={email} />}
-        {step === 'org' && <OrgStep onCreated={(slug) => { setOrg(slug); setStep('app'); }} />}
+        {step === 'org' && (
+          <OrgStep onCreated={(slug) => {
+            // The org exists now: a reload of ?new=org must resume at its app
+            // step, not offer to create a second org.
+            window.history.replaceState(null, '', `/onboarding?org=${encodeURIComponent(slug)}`);
+            setOrg(slug);
+            setStep('app');
+          }} />
+        )}
         {step === 'app' && org && (
           <AppStep org={org} onCreated={(a, k, e) => { setApp(a); setKey(k); setKeyError(e); setStep('install'); }} />
         )}

@@ -18,8 +18,9 @@ export async function POST(request: Request): Promise<Response> {
   const token = raw && typeof raw === 'object' ? raw.token : undefined;
   if (!isSafeSegment(token)) return jsonError('This invite link is incomplete. Use the link from your email.', 400);
 
-  const res = await authedFetch<{ orgId: string }>(`/v1/invites/${token}/accept`, g.session.accessToken, { method: 'POST' });
-  if (res.ok) return NextResponse.json({ orgId: res.data.orgId }, { headers: NO_STORE });
+  const res = await authedFetch<{ orgId: string; slug?: string }>(`/v1/invites/${token}/accept`, g.session.accessToken, { method: 'POST' });
+  // The slug lets the invitee land on the team they just joined.
+  if (res.ok) return NextResponse.json({ orgId: res.data.orgId, slug: res.data.slug }, { headers: NO_STORE });
 
   switch (res.status) {
     case 401: return jsonError('unauthorized', 401);

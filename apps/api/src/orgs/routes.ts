@@ -7,6 +7,9 @@ import { Prisma } from '../generated/prisma/client.js';
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
 const createSchema = z.object({ name: z.string().min(1).max(100) });
 const roleSchema = z.object({ role: z.enum(ROLES) });
+// Slugs that collide with static `/dashboard/*` routes in the web app. They
+// get the random suffix, exactly as a taken slug does.
+const RESERVED_SLUGS = new Set(['account', 'new']);
 
 export function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'org';
@@ -27,7 +30,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
 
     const base = slugify(parsed.data.name);
-    const taken = await app.prisma.organization.findUnique({ where: { slug: base } });
+    const taken = RESERVED_SLUGS.has(base) || (await app.prisma.organization.findUnique({ where: { slug: base } }));
     const slug = taken ? `${base}-${randomBytes(2).toString('hex')}` : base;
 
     // The findUnique-then-create above is itself a check-then-act: two
@@ -81,38 +84,61 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
   class LastOwnerError extends Error {}
   const NOT_FOUND = Symbol('not-found');
 
+  /**
+   * One ordered `FOR UPDATE` over the org's OWNER rows plus the target row,
+   * taken before anything looks at the target's role. Deciding from the
+   * locked rows means the target's role can't change under us and the
+   * owners we count stay owners until we commit, so no concurrent promote,
+   * demote, removal or leave can leave the org with zero owners. Every
+   * caller locks through this one statement in id order, so there is a
+   * single lock order and no cycle. (Locking the owners first and then
+   * re-reading the target would deadlock against a concurrent demotion of
+   * a just-promoted target.)
+   */
+  async function lockOwnersAndTarget(
+    tx: Prisma.TransactionClient,
+    orgId: string,
+    target: { id: string } | { userId: string },
+  ) {
+    const match = 'id' in target ? Prisma.sql`id = ${target.id}` : Prisma.sql`"userId" = ${target.userId}`;
+    const rows = await tx.$queryRaw<{ id: string; userId: string; role: string }[]>`
+      SELECT id, "userId", role::text AS role FROM "Membership"
+      WHERE "orgId" = ${orgId} AND (role = 'OWNER'::"Role" OR ${match})
+      ORDER BY id FOR UPDATE`;
+    const row = rows.find((r) => ('id' in target ? r.id === target.id : r.userId === target.userId));
+    return { row, ownerCount: rows.filter((r) => r.role === 'OWNER').length };
+  }
+
+  /** Locks, then removes the target row, keeping at least one OWNER. */
+  async function removeMembership(orgId: string, target: { id: string } | { userId: string }) {
+    return app.prisma.$transaction(async (tx) => {
+      const { row, ownerCount } = await lockOwnersAndTarget(tx, orgId, target);
+      if (!row) return NOT_FOUND;
+      if (row.role === 'OWNER' && ownerCount <= 1) throw new LastOwnerError();
+      const { count } = await tx.membership.deleteMany({ where: { id: row.id, orgId } });
+      return count === 0 ? NOT_FOUND : ('ok' as const);
+    });
+  }
+
   app.patch('/v1/orgs/:org/members/:id', { preHandler: [app.authenticate, app.requireVerified, requireRole('OWNER')] }, async (req, reply) => {
     const parsed = roleSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
 
     const { id } = req.params as { id: string };
     const orgId = req.membership.orgId;
+    const role = parsed.data.role;
 
     try {
       const updated = await app.prisma.$transaction(async (tx) => {
-        // Scope the lookup by orgId (not just membership id) so a valid
-        // membership id belonging to a DIFFERENT org can never be reached
-        // through this org's route.
-        const target = await tx.membership.findFirst({ where: { id, orgId } });
-        if (!target) return NOT_FOUND;
+        // Scoped by orgId (not just membership id) so a valid membership id
+        // belonging to a DIFFERENT org can never be reached through this
+        // org's route.
+        const { row, ownerCount } = await lockOwnersAndTarget(tx, orgId, { id });
+        if (!row) return NOT_FOUND;
+        if (row.role === 'OWNER' && role !== 'OWNER' && ownerCount <= 1) throw new LastOwnerError();
 
-        if (target.role === 'OWNER' && parsed.data.role !== 'OWNER') {
-          // Lock every OWNER row for this org first so a concurrent
-          // transaction doing the same check-then-act on a DIFFERENT owner
-          // has to wait for this one to commit (or roll back) before it can
-          // read the owner count — otherwise two concurrent demotions of
-          // two different owners can both observe count === 2, both pass
-          // the <= 1 guard, and both commit, leaving zero owners.
-          await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${orgId} AND role = 'OWNER'::"Role" ORDER BY id FOR UPDATE`;
-          const ownerCount = await tx.membership.count({ where: { orgId, role: 'OWNER' } });
-          if (ownerCount <= 1) throw new LastOwnerError();
-        }
-
-        return tx.membership.update({
-          where: { id: target.id },
-          data: { role: parsed.data.role },
-          select: { id: true, role: true },
-        });
+        const { count } = await tx.membership.updateMany({ where: { id: row.id, orgId }, data: { role } });
+        return count === 0 ? NOT_FOUND : { id: row.id, role };
       });
 
       if (updated === NOT_FOUND) return reply.code(404).send({ error: 'Not Found' });
@@ -127,23 +153,23 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
 
   app.delete('/v1/orgs/:org/members/:id', { preHandler: [app.authenticate, app.requireVerified, requireRole('OWNER')] }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const orgId = req.membership.orgId;
-
     try {
-      const result = await app.prisma.$transaction(async (tx) => {
-        const target = await tx.membership.findFirst({ where: { id, orgId } });
-        if (!target) return NOT_FOUND;
+      const result = await removeMembership(req.membership.orgId, { id });
+      if (result === NOT_FOUND) return reply.code(404).send({ error: 'Not Found' });
+      return reply.code(204).send();
+    } catch (err) {
+      if (err instanceof LastOwnerError) {
+        return reply.code(409).send({ error: 'organization must keep at least one owner' });
+      }
+      throw err;
+    }
+  });
 
-        if (target.role === 'OWNER') {
-          await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${orgId} AND role = 'OWNER'::"Role" ORDER BY id FOR UPDATE`;
-          const ownerCount = await tx.membership.count({ where: { orgId, role: 'OWNER' } });
-          if (ownerCount <= 1) throw new LastOwnerError();
-        }
-
-        await tx.membership.delete({ where: { id: target.id } });
-        return 'ok' as const;
-      });
-
+  // The caller leaves the org, under the same lock and last-owner guard as
+  // member removal.
+  app.delete('/v1/orgs/:org/membership', { preHandler: [app.authenticate, app.requireVerified, requireRole('VIEWER')] }, async (req, reply) => {
+    try {
+      const result = await removeMembership(req.membership.orgId, { userId: req.user.id });
       if (result === NOT_FOUND) return reply.code(404).send({ error: 'Not Found' });
       return reply.code(204).send();
     } catch (err) {

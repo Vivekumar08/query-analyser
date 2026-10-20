@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
+import { settledOrBlocked } from '../test/locks.js';
 import type { FastifyInstance } from 'fastify';
 
 let app: FastifyInstance;
@@ -35,6 +36,15 @@ describe('orgs', () => {
     expect(res.json()).toMatchObject({ name: 'Acme Inc', slug: 'acme-inc', role: 'OWNER' });
     const list = await app.inject({ method: 'GET', url: '/v1/orgs', headers: as(u.token) });
     expect(list.json()).toHaveLength(1);
+  });
+
+  it('never hands out a reserved slug', async () => {
+    const u = await user('o@x.io');
+    for (const [name, base] of [['Account', 'account'], ['New', 'new'], ['new!', 'new']] as const) {
+      const res = await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(u.token), payload: { name } });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().slug).toMatch(new RegExp(`^${base}-[a-z0-9]{4}$`));
+    }
   });
 
   it('suffixes a colliding slug', async () => {
@@ -176,5 +186,177 @@ describe('orgs', () => {
     const res = await app.inject({ method: 'PATCH', url: `/v1/orgs/${orgA.id}/members/${mb.id}`, headers: as(a.token), payload: { role: 'VIEWER' } });
     expect(res.statusCode).toBe(404);
     expect((await app.prisma.membership.findUniqueOrThrow({ where: { id: mb.id } })).role).toBe('OWNER');
+  });
+});
+
+describe('leave', () => {
+  const leave = (orgId: string, token: string) =>
+    app.inject({ method: 'DELETE', url: `/v1/orgs/${orgId}/membership`, headers: as(token) });
+
+  async function orgOwnedBy(token: string) {
+    return (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(token), payload: { name: 'A' } })).json() as { id: string };
+  }
+
+  it('a MEMBER or VIEWER leaves: 204, membership gone, the org then 404s for them', async () => {
+    const a = await user('a@x.io');
+    const org = await orgOwnedBy(a.token);
+    for (const [email, role] of [['m@x.io', 'MEMBER'], ['v@x.io', 'VIEWER']] as const) {
+      const u = await user(email);
+      await app.prisma.membership.create({ data: { userId: u.id, orgId: org.id, role } });
+
+      const res = await leave(org.id, u.token);
+      expect(res.statusCode).toBe(204);
+      expect(res.body).toBe('');
+      expect(await app.prisma.membership.findUnique({ where: { userId_orgId: { userId: u.id, orgId: org.id } } })).toBeNull();
+      expect((await app.inject({ method: 'GET', url: `/v1/orgs/${org.id}`, headers: as(u.token) })).statusCode).toBe(404);
+      expect((await leave(org.id, u.token)).statusCode).toBe(404);
+    }
+    // The owner is untouched.
+    expect(await app.prisma.membership.count({ where: { orgId: org.id } })).toBe(1);
+  });
+
+  it('the only OWNER cannot leave', async () => {
+    const a = await user('a@x.io');
+    const org = await orgOwnedBy(a.token);
+    // Other, non-owner members don't count towards keeping an owner.
+    const b = await user('b@x.io');
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'ADMIN' } });
+
+    const res = await leave(org.id, a.token);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toEqual({ error: 'organization must keep at least one owner' });
+    const still = await app.prisma.membership.findUnique({ where: { userId_orgId: { userId: a.id, orgId: org.id } } });
+    expect(still?.role).toBe('OWNER');
+  });
+
+  it('an OWNER can leave when another OWNER remains', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'OWNER' } });
+
+    expect((await leave(org.id, a.token)).statusCode).toBe(204);
+    const owners = await app.prisma.membership.findMany({ where: { orgId: org.id, role: 'OWNER' } });
+    expect(owners.map((m) => m.userId)).toEqual([b.id]);
+  });
+
+  it('404s a non-member and a nonexistent org alike', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+
+    const nonMember = await leave(org.id, b.token);
+    const nonexistent = await leave('00000000-0000-0000-0000-000000000000', b.token);
+    expect(nonMember.statusCode).toBe(404);
+    expect(nonexistent.statusCode).toBe(404);
+    expect(nonMember.json()).toEqual(nonexistent.json());
+    expect(await app.prisma.membership.count({ where: { orgId: org.id } })).toBe(1);
+  });
+
+  it('403s leaving a suspended org', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'MEMBER' } });
+    await app.prisma.organization.update({ where: { id: org.id }, data: { suspendedAt: new Date() } });
+
+    const res = await leave(org.id, b.token);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ error: 'organization suspended' });
+    expect(await app.prisma.membership.count({ where: { orgId: org.id } })).toBe(2);
+  });
+
+  it('two OWNERs leaving at once never leave the org ownerless', async () => {
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'OWNER' } });
+
+    const [ra, rb] = await Promise.all([leave(org.id, a.token), leave(org.id, b.token)]);
+    expect([ra.statusCode, rb.statusCode].sort()).toEqual([204, 409]);
+    expect(await app.prisma.membership.count({ where: { orgId: org.id, role: 'OWNER' } })).toBe(1);
+  });
+
+  it('an OWNER leaving waits on the owner-row lock, then sees the other owner already gone', async () => {
+    // In-process Promise.all doesn't reliably interleave (see the demotion
+    // test above), so pin the lock directly: this transaction plays the
+    // other owner's concurrent leave, holding the OWNER rows.
+    const a = await user('a@x.io'); const b = await user('b@x.io');
+    const org = await orgOwnedBy(a.token);
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: org.id, role: 'OWNER' } });
+
+    let res: Promise<{ statusCode: number; json: () => unknown }> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${org.id} AND role = 'OWNER'::"Role" ORDER BY id FOR UPDATE`;
+      res = leave(org.id, b.token);
+      expect(await settledOrBlocked(app.prisma, res, tx)).toBe('blocked');
+      await tx.membership.delete({ where: { userId_orgId: { userId: a.id, orgId: org.id } } });
+    });
+    const done = await res!;
+    expect(done.statusCode).toBe(409);
+    expect(done.json()).toEqual({ error: 'organization must keep at least one owner' });
+    expect(await app.prisma.membership.count({ where: { orgId: org.id, role: 'OWNER' } })).toBe(1);
+  });
+
+  it('a caller promoted to OWNER mid-leave, while the other owner steps down, cannot leave the org ownerless', async () => {
+    // a is the only OWNER; c is ADMIN. The holder transaction stands in for
+    // two committed role changes (promote c, then a demotes themself) landing
+    // between the leave's read of its own row and its delete.
+    const a = await user('a@x.io'); const c = await user('c@x.io');
+    const org = await orgOwnedBy(a.token);
+    await app.prisma.membership.create({ data: { userId: c.id, orgId: org.id, role: 'ADMIN' } });
+
+    let res: Promise<{ statusCode: number; json: () => unknown }> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${org.id} ORDER BY id FOR UPDATE`;
+      res = leave(org.id, c.token);
+      expect(await settledOrBlocked(app.prisma, res, tx)).toBe('blocked');
+      await tx.membership.update({ where: { userId_orgId: { userId: c.id, orgId: org.id } }, data: { role: 'OWNER' } });
+      await tx.membership.update({ where: { userId_orgId: { userId: a.id, orgId: org.id } }, data: { role: 'ADMIN' } });
+    });
+    const done = await res!;
+    expect(done.statusCode).toBe(409);
+    expect(await app.prisma.membership.count({ where: { orgId: org.id, role: 'OWNER' } })).toBe(1);
+  });
+});
+
+describe('owner-row lock on role changes and removal', () => {
+  // Same interleaving as the leave test above: the target c is ADMIN when
+  // the request starts, then (in the holder) c is promoted and the acting
+  // owner a steps down. Acting on c afterwards must not leave zero owners.
+  async function orgWithAdmin() {
+    const a = await user('a@x.io'); const c = await user('c@x.io');
+    const org = (await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(a.token), payload: { name: 'A' } })).json() as { id: string };
+    const mc = await app.prisma.membership.create({ data: { userId: c.id, orgId: org.id, role: 'ADMIN' } });
+    return { a, c, org, mc };
+  }
+
+  async function promoteTargetAndStepDownMidRequest(
+    orgId: string, a: { id: string }, c: { id: string },
+    send: () => Promise<{ statusCode: number; json: () => unknown }>,
+  ) {
+    let res: Promise<{ statusCode: number; json: () => unknown }> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Membership" WHERE "orgId" = ${orgId} ORDER BY id FOR UPDATE`;
+      res = send();
+      expect(await settledOrBlocked(app.prisma, res, tx)).toBe('blocked');
+      await tx.membership.update({ where: { userId_orgId: { userId: c.id, orgId } }, data: { role: 'OWNER' } });
+      await tx.membership.update({ where: { userId_orgId: { userId: a.id, orgId } }, data: { role: 'ADMIN' } });
+    });
+    return res!;
+  }
+
+  it('removing a member promoted to OWNER mid-request, while the other owner steps down, 409s', async () => {
+    const { a, c, org, mc } = await orgWithAdmin();
+    const done = await promoteTargetAndStepDownMidRequest(org.id, a, c, () =>
+      app.inject({ method: 'DELETE', url: `/v1/orgs/${org.id}/members/${mc.id}`, headers: as(a.token) }));
+    expect(done.statusCode).toBe(409);
+    expect(done.json()).toEqual({ error: 'organization must keep at least one owner' });
+    expect(await app.prisma.membership.count({ where: { orgId: org.id, role: 'OWNER' } })).toBe(1);
+  });
+
+  it('demoting a member promoted to OWNER mid-request, while the other owner steps down, 409s', async () => {
+    const { a, c, org, mc } = await orgWithAdmin();
+    const done = await promoteTargetAndStepDownMidRequest(org.id, a, c, () =>
+      app.inject({ method: 'PATCH', url: `/v1/orgs/${org.id}/members/${mc.id}`, headers: as(a.token), payload: { role: 'VIEWER' } }));
+    expect(done.statusCode).toBe(409);
+    expect(done.json()).toEqual({ error: 'organization must keep at least one owner' });
+    expect(await app.prisma.membership.count({ where: { orgId: org.id, role: 'OWNER' } })).toBe(1);
   });
 });

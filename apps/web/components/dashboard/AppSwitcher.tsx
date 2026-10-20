@@ -2,20 +2,25 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Check, ChevronsUpDown, Plus } from 'lucide-react';
+import { Building2, Check, ChevronsUpDown, Plus, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandGroup, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
-import type { groupForSwitcher } from './switcher';
+import { ROLE_LABEL } from '@/src/dashboard-types';
+import { ACCOUNT_HREF, NEW_ORG_HREF } from '@/src/landing';
+import type { groupForSwitcher, orgsForSwitcher } from './switcher';
 
 export function AppSwitcher({
   groups,
+  orgs,
   currentLabel,
   newAppHref,
 }: {
   groups: ReturnType<typeof groupForSwitcher>;
+  orgs: ReturnType<typeof orgsForSwitcher>;
   currentLabel: { org: string; app: string };
-  newAppHref: string;
+  /** null hides New app (the caller's role in this org cannot create apps). */
+  newAppHref: string | null;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -45,6 +50,17 @@ export function AppSwitcher({
       <PopoverContent className="w-64 p-0" align="start">
         <Command>
           <CommandList>
+            <CommandGroup heading="Organisations">
+              {orgs.map((o) => (
+                <CommandItem key={o.slug} value={`org:${o.slug}`} onSelect={() => go(o.href)}>
+                  <Link href={o.href} onClick={close} className="flex min-w-0 flex-1 items-center gap-1">
+                    <span className="truncate">{o.name}</span>
+                    <span className="text-xs text-muted-foreground">{ROLE_LABEL[o.role]}</span>
+                    {o.current && <Check className="ml-auto size-4" aria-label="current organisation" />}
+                  </Link>
+                </CommandItem>
+              ))}
+            </CommandGroup>
             {groups.map((g) => (
               <CommandGroup key={g.org.slug} heading={g.org.name}>
                 {g.apps.map((a) => (
@@ -60,9 +76,21 @@ export function AppSwitcher({
             ))}
             <CommandSeparator />
             <CommandGroup>
-              <CommandItem value="new-app" onSelect={() => go(newAppHref)}>
-                <Link href={newAppHref} onClick={close} className="flex flex-1 items-center gap-2">
-                  <Plus className="size-4" aria-hidden /> New app
+              {newAppHref && (
+                <CommandItem value="new-app" onSelect={() => go(newAppHref)}>
+                  <Link href={newAppHref} onClick={close} className="flex flex-1 items-center gap-2">
+                    <Plus className="size-4" aria-hidden /> New app
+                  </Link>
+                </CommandItem>
+              )}
+              <CommandItem value="new-org" onSelect={() => go(NEW_ORG_HREF)}>
+                <Link href={NEW_ORG_HREF} onClick={close} className="flex flex-1 items-center gap-2">
+                  <Building2 className="size-4" aria-hidden /> New organisation
+                </Link>
+              </CommandItem>
+              <CommandItem value="account" onSelect={() => go(ACCOUNT_HREF)}>
+                <Link href={ACCOUNT_HREF} onClick={close} className="flex flex-1 items-center gap-2">
+                  <UserRound className="size-4" aria-hidden /> Account
                 </Link>
               </CommandItem>
             </CommandGroup>

@@ -13,6 +13,13 @@ export interface OrgSummary { id: string; name: string; slug: string; plan: stri
 
 export const ROLES: readonly Role[] = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'];
 
+export const ROLE_LABEL: Record<Role, string> = { OWNER: 'Owner', ADMIN: 'Admin', MEMBER: 'Member', VIEWER: 'Viewer' };
+
+/** OWNER or ADMIN: may create apps and manage the org. */
+export function isAdminRole(role: Role): boolean {
+  return role === 'OWNER' || role === 'ADMIN';
+}
+
 /** GET /v1/orgs/:orgId/members (ADMIN+) → Member[]. `id` is the membership id. */
 export interface Member { id: string; role: Role; createdAt: string; user: { id: string; email: string; name: string | null } }
 

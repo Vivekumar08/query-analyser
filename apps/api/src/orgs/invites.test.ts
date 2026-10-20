@@ -37,7 +37,7 @@ describe('invites', () => {
     const n = await user('n@x.io');
     const acc = await app.inject({ method: 'POST', url: `/v1/invites/${token}/accept`, headers: n.h });
     expect(acc.statusCode).toBe(200);
-    expect(acc.json()).toEqual({ orgId: org.id, role: 'MEMBER' });
+    expect(acc.json()).toEqual({ orgId: org.id, slug: org.slug, role: 'MEMBER' });
     expect(await app.prisma.membership.count({ where: { orgId: org.id, userId: n.id } })).toBe(1);
 
     expect((await app.inject({ method: 'POST', url: `/v1/invites/${token}/accept`, headers: n.h })).statusCode).toBe(410);

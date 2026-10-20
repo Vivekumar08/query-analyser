@@ -81,6 +81,27 @@ describe('apps', () => {
     const res = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: h, payload: { name: 'web', env: 'production' } });
     expect(res.statusCode).toBe(403);
   });
+
+  it('403s a MEMBER attempting to create an app', async () => {
+    const o = await owner();
+    const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'm@x.io', password: 'correct horse battery', name: 'M' } });
+    await app.prisma.user.update({ where: { email: 'm@x.io' }, data: { emailVerifiedAt: new Date() } });
+    await app.prisma.membership.create({ data: { userId: s.json().user.id, orgId: o.orgId, role: 'MEMBER' } });
+    const h = { authorization: `Bearer ${s.json().accessToken}` };
+    const res = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: h, payload: { name: 'web', env: 'production' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'insufficient role' });
+  });
+
+  it('lets an ADMIN create an app', async () => {
+    const o = await owner();
+    const s = await app.inject({ method: 'POST', url: '/v1/auth/signup', payload: { email: 'adm@x.io', password: 'correct horse battery', name: 'A' } });
+    await app.prisma.user.update({ where: { email: 'adm@x.io' }, data: { emailVerifiedAt: new Date() } });
+    await app.prisma.membership.create({ data: { userId: s.json().user.id, orgId: o.orgId, role: 'ADMIN' } });
+    const h = { authorization: `Bearer ${s.json().accessToken}` };
+    const res = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: h, payload: { name: 'web', env: 'production' } });
+    expect(res.statusCode).toBe(201);
+  });
 });
 
 describe('keys', () => {
