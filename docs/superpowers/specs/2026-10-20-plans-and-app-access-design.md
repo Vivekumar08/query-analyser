@@ -94,6 +94,20 @@ Teammates are invited **to an app, not to the whole organisation**. The user wan
   - **Org-wide ADMIN invite** to an existing MEMBER/VIEWER: promote them to ADMIN under the same lock, and delete their `AppAccess` rows.
   - **Already has that access:** 409. The invite is **consumed** (marked accepted), so its seat frees up.
 
+### Settings are for ADMIN+ only (user's rule)
+- Invited MEMBER/VIEWER users get **no access to app Settings or org settings**:
+  - the sidebar hides the "Settings" item for them;
+  - `/dashboard/[org]/[app]/settings` returns the not-found page for them;
+  - the org-level Members/People UI is never rendered for them.
+- The API routes behind settings are already ADMIN+:
+  - keys;
+  - sample-key PUT/DELETE;
+  - invites;
+  - members;
+  - app access and app delete.
+- The one VIEWER-level read that stays is `GET /v1/apps/:id/sample-key`, because "Reveal real values" on the query detail page needs the wrapped key.
+- Their own **Account** page (name, password, their orgs, leave) stays available to everyone.
+
 ### Delete an app
 - `DELETE /v1/apps/:id`, ADMIN+, removes the app.
 - Existing cascades remove keys, signatures and samples; the new `AppAccess` and app-scoped invites must cascade too.
