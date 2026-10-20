@@ -19,6 +19,7 @@ const mails = {
   invite: inviteEmail({
     href: `${origin}/invite?token=preview-token`,
     orgName: 'Kisna',
+    appName: 'Shop',
     inviterName: 'Vivek Kumar',
     role: 'MEMBER',
     ttlMs: 7 * 24 * 3600 * 1000,
