@@ -24,7 +24,7 @@ Teammates are invited **to an app, not to the whole organisation**. The user wan
 
 - One module, `apps/api/src/plans.ts`, exports `PLAN_LIMITS` and `limitsFor(plan: string)`. An unknown plan string gets `free` limits.
 - `pro` and `team` exist as data only. Nothing sells or assigns them yet; ops can set `Organization.plan` by hand.
-- **Orgs you can own:** a user may create a new org only while they OWN fewer orgs than the largest `ownedOrgs` limit among the plans of the orgs they already own (`free` when they own none). Being invited into other orgs is never limited.
+- **Orgs you can own:** a user may create a new org only while the number of orgs they CREATED (`Organization.createdById`) is below the largest `ownedOrgs` limit among the plans of those created orgs (`free` when none); being promoted to OWNER of someone else's org never raises it (controller's call P1-1). Being invited into other orgs is never limited.
 - **Seats:** see "Role changes…" below: all memberships plus pending unexpired invites (distinct emails), minus one owner. Revoking an invite or removing a member frees a seat.
 - **Invitable roles:** an invite with a role outside the plan's list is refused. OWNER is never invitable, by any plan, through this route.
 - **Retention:** the daily-rollup pruning (`apps/api/src/analysis/jobs.ts`, `DAILY_RETENTION_DAYS` today) becomes per org plan. Hourly retention stays at 7 days. The dashboard's range presets must not offer ranges longer than the plan keeps; longer ones are shown disabled with "Kept for N days on your plan".
