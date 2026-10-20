@@ -1,4 +1,4 @@
-import Link from 'next/link';
+import { Wordmark } from '@/components/brand/Logo';
 import { GlassCard } from './GlassCard';
 
 /**
@@ -21,9 +21,7 @@ export function AuthShell({
 }) {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-6 px-4 py-12">
-      <Link href="/" className="text-[15px] font-semibold tracking-tight">
-        <span className="text-accent-text">◐</span> query·analyser
-      </Link>
+      <Wordmark />
       <GlassCard strong className={`w-full ${width === 'md' ? 'max-w-md' : 'max-w-sm'} p-7`}>
         <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
         {intro && <div className="mt-2 text-sm leading-relaxed text-muted-foreground">{intro}</div>}
