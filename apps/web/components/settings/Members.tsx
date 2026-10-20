@@ -10,22 +10,25 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { CopyButton } from '@/components/dashboard/CopyButton';
-import { ROLES, type Member, type PendingInvite, type Role } from '@/src/dashboard-types';
+import { ROLES, ROLE_LABEL, isAdminRole, type Member, type PendingInvite, type Role } from '@/src/dashboard-types';
+import { appAccessSummary } from '@/src/plan-limits';
 
 type Props = {
   /** The org's id (the API's `:org`), not its slug. */
   orgId: string;
   viewerRole: Role;
   viewerUserId: string;
-  /** null below ADMIN (the API refuses the list) or when the list failed to load. */
+  /** The org plan's invitable roles: ADMIN here means admins can be invited, and limits the role select. */
+  invitableRoles: readonly Role[];
+  /** null when the list failed to load. */
   initialMembers: Member[] | null;
+  /** Org-wide invites only (`appId` null); app invites belong to People with access. null when the list failed to load. */
   initialInvites: PendingInvite[] | null;
 };
 type Confirm = { kind: 'role'; member: Member; role: Role } | { kind: 'remove'; member: Member };
 type Notice = { email: string; link: string };
 
 const GENERIC = 'Something went wrong. Please try again.';
-const ROLE_LABEL: Record<Role, string> = { OWNER: 'Owner', ADMIN: 'Admin', MEMBER: 'Member', VIEWER: 'Viewer' };
 const SELECT_CLASS = 'h-8 rounded-full border border-input bg-transparent px-3 text-sm outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50';
 const COPY_CLASS = 'rounded-full border px-3 py-1 text-xs text-muted-foreground hover:bg-muted';
 const HEADING_CLASS = 'font-semibold outline-none';
@@ -34,25 +37,36 @@ function refreshSession(): void {
   window.location.assign(`/api/auth/refresh?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
 }
 
+/**
+ * The row after a role change, mirroring what the API does to app access:
+ * promoted to OWNER/ADMIN sees every app; demoted from there keeps every app
+ * that exists (still "All apps"); MEMBER↔VIEWER changes the role on each app.
+ */
+function withRole(m: Member, role: Role): Member {
+  if (isAdminRole(role)) return { ...m, role, allApps: true, apps: [] };
+  if (m.allApps) return { ...m, role };
+  return { ...m, role, apps: m.apps.map((a) => ({ ...a, role })) };
+}
+
 async function errorOf(res: Response): Promise<string> {
   const data = (await res.json().catch(() => ({}))) as { error?: string };
   return data.error ?? GENERIC;
 }
 
 /**
- * Settings → Members (org-wide). ADMINs invite and revoke; OWNERs also change
- * roles and remove members, each behind a confirmation. Below ADMIN the API
- * refuses the member list, so this says who to ask instead.
+ * Settings → Members (org-wide, ADMIN+): everyone in the org with the apps
+ * they can open. ADMINs revoke org-wide invites and, on plans that allow it,
+ * invite admins; OWNERs also change roles and remove members, each behind a
+ * confirmation. Teammates are invited to an app from People with access.
  */
-export function Members({ orgId, viewerRole, viewerUserId, initialMembers, initialInvites }: Props) {
-  const canManage = viewerRole === 'OWNER' || viewerRole === 'ADMIN';
+export function Members({ orgId, viewerRole, viewerUserId, invitableRoles, initialMembers, initialInvites }: Props) {
   const isOwner = viewerRole === 'OWNER';
+  const canInviteAdmin = invitableRoles.includes('ADMIN');
   const base = `/api/orgs/${encodeURIComponent(orgId)}`;
 
   const [members, setMembers] = useState<Member[]>(initialMembers ?? []);
   const [invites, setInvites] = useState<PendingInvite[]>(initialInvites ?? []);
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState<Role>('MEMBER');
   const [inviting, setInviting] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -69,19 +83,6 @@ export function Members({ orgId, viewerRole, viewerUserId, initialMembers, initi
     setFocusTo(null);
   }, [focusTo]);
 
-  if (!canManage) {
-    return (
-      <Card>
-        <CardHeader>
-          <h2 className={`flex items-center gap-2 text-base ${HEADING_CLASS}`}><Users className="size-4" aria-hidden /> Members</h2>
-        </CardHeader>
-        <CardContent className="text-sm">
-          <p className="text-muted-foreground">Ask an admin to invite teammates.</p>
-        </CardContent>
-      </Card>
-    );
-  }
-
   const sendInvite = async () => {
     const address = email.trim();
     if (!/^[^\s@]+@[^\s@]+$/.test(address)) {
@@ -95,7 +96,7 @@ export function Members({ orgId, viewerRole, viewerUserId, initialMembers, initi
       const res = await fetch(`${base}/invites`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email: address, role }),
+        body: JSON.stringify({ email: address, role: 'ADMIN' }),
       });
       if (res.status === 401) return refreshSession();
       if (!res.ok) {
@@ -106,11 +107,12 @@ export function Members({ orgId, viewerRole, viewerUserId, initialMembers, initi
       setNotice({ email: created.email, link: created.inviteLink });
       setEmail('');
       // Re-read the list (a re-invite adds a row the API dedupes nowhere); fall back to prepending.
+      // App invites are listed under People with access, so only org-wide ones stay here.
       const list = await fetch(`${base}/invites`).catch(() => null);
-      if (list?.ok) setInvites((await list.json()) as PendingInvite[]);
+      if (list?.ok) setInvites(((await list.json()) as PendingInvite[]).filter((i) => i.appId === null));
       else {
         const { inviteLink: _link, ...invite } = created;
-        setInvites((prev) => [{ ...invite, createdAt: new Date().toISOString() }, ...prev]);
+        setInvites((prev) => [{ ...invite, appId: null, createdAt: new Date().toISOString() }, ...prev]);
       }
     } catch {
       setError(GENERIC);
@@ -159,7 +161,7 @@ export function Members({ orgId, viewerRole, viewerUserId, initialMembers, initi
         return;
       }
       if (c.kind === 'role') {
-        setMembers((prev) => prev.map((m) => (m.id === c.member.id ? { ...m, role: c.role } : m)));
+        setMembers((prev) => prev.map((m) => (m.id === c.member.id ? withRole(m, c.role) : m)));
       } else {
         setMembers((prev) => prev.filter((m) => m.id !== c.member.id));
         setFocusTo('members');
@@ -171,7 +173,8 @@ export function Members({ orgId, viewerRole, viewerUserId, initialMembers, initi
     }
   };
 
-  const inviteRoles = ROLES.filter((r) => isOwner || r !== 'OWNER');
+  // OWNER is always assignable (promotion isn't an invite); otherwise the plan's roles, plus the member's own.
+  const roleOptions = (m: Member) => ROLES.filter((r) => r === 'OWNER' || invitableRoles.includes(r) || r === m.role);
 
   return (
     <Card>
@@ -193,6 +196,7 @@ export function Members({ orgId, viewerRole, viewerUserId, initialMembers, initi
                   <div className="min-w-0">
                     <p className="truncate font-medium">{m.user.name || m.user.email}{self && <span className="text-muted-foreground"> (you)</span>}</p>
                     <p className="truncate text-xs text-muted-foreground">{m.user.email}</p>
+                    <p className="truncate text-xs text-muted-foreground">{appAccessSummary(m)}</p>
                   </div>
                   {editable ? (
                     <div className="flex items-center gap-2">
@@ -203,7 +207,7 @@ export function Members({ orgId, viewerRole, viewerUserId, initialMembers, initi
                         disabled={busy === m.id}
                         onChange={(e) => setConfirm({ kind: 'role', member: m, role: e.target.value as Role })}
                       >
-                        {ROLES.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
+                        {roleOptions(m).map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
                       </select>
                       <Button
                         size="sm"
@@ -224,31 +228,28 @@ export function Members({ orgId, viewerRole, viewerUserId, initialMembers, initi
           </ul>
         )}
 
-        <form
-          noValidate
-          className="flex flex-col gap-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void sendInvite();
-          }}
-        >
-          <p className="flex items-center gap-2 font-medium"><UserPlus className="size-4" aria-hidden /> Invite a teammate</p>
-          <div className="flex flex-wrap items-end gap-2">
-            <div className="flex min-w-56 flex-1 flex-col gap-1">
-              <label htmlFor="invite-email" className="text-xs font-medium">Email</label>
-              <Input id="invite-email" type="email" autoComplete="off" value={email} onChange={(e) => setEmail(e.target.value)} />
+        {canInviteAdmin && (
+          <form
+            noValidate
+            className="flex flex-col gap-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void sendInvite();
+            }}
+          >
+            <p className="flex items-center gap-2 font-medium"><UserPlus className="size-4" aria-hidden /> Invite an admin</p>
+            <p className="text-xs text-muted-foreground">Admins can open every app and manage settings. Invite teammates to an app from People with access.</p>
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="flex min-w-56 flex-1 flex-col gap-1">
+                <label htmlFor="admin-invite-email" className="text-xs font-medium">Admin email</label>
+                <Input id="admin-invite-email" type="email" autoComplete="off" value={email} onChange={(e) => setEmail(e.target.value)} />
+              </div>
+              <Button type="submit" size="sm" className="h-9" disabled={inviting}>
+                {inviting && <Loader2 className="size-4 animate-spin" aria-hidden />} Send invite
+              </Button>
             </div>
-            <div className="flex flex-col gap-1">
-              <label htmlFor="invite-role" className="text-xs font-medium">Role</label>
-              <select id="invite-role" className={`${SELECT_CLASS} h-9`} value={role} onChange={(e) => setRole(e.target.value as Role)}>
-                {inviteRoles.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
-              </select>
-            </div>
-            <Button type="submit" size="sm" className="h-9" disabled={inviting}>
-              {inviting && <Loader2 className="size-4 animate-spin" aria-hidden />} Send invite
-            </Button>
-          </div>
-        </form>
+          </form>
+        )}
 
         {notice && (
           <div className="flex flex-col gap-2">
