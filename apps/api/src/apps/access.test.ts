@@ -16,6 +16,15 @@ type Res = { statusCode: number; json: () => any };
 const NONEXISTENT = '00000000-0000-0000-0000-000000000000';
 const HOUR = 3600_000;
 
+const ingestBody = (n: number) => ({
+  app: 'shop', env: 'production', host: 'h', sdkVersion: '0.1.0', bucket: '2026092014', thresholdMs: 100, dropped: 0,
+  items: Array.from({ length: n }, (_, i) => ({
+    signature: `S${i}`, hash: i.toString(16).padStart(16, '0'), model: 'M', operation: 'find',
+    filterShape: [], sortKeys: [], stages: [], count: 1, totalMs: 120, maxMs: 120, lastMs: 120, lastTs: 1,
+    hist: [0, 1, 0, 0, 0, 0, 0, 0], sample: null,
+  })),
+});
+
 // Signup is rate-limited per IP; give each fixture signup its own address.
 let nextIp = 1;
 const signupIp = () => `10.7.${Math.floor(nextIp / 250)}.${(nextIp++ % 250) + 1}`;
@@ -113,6 +122,21 @@ describe('GET /v1/apps/:id/access', () => {
     expect((await getAccess(shop, o.h)).json().seats).toEqual({ used: 0, max: 1 });
   });
 
+  it('leaves out a row holder who is no longer a member of the org', async () => {
+    const { o, orgId, shop } = await org();
+    const m = await member(orgId, 'MEMBER', 'm@x.io');
+    await grant(shop, m.id);
+    // The database doesn't tie a row to a membership; an orphan row (left by
+    // some older path) must not list a non-member's email here.
+    const orphan = await user('gone@x.io');
+    await grant(shop, orphan.id);
+    const elsewhere = await org('team', 'x@x.io');
+    await app.prisma.membership.create({ data: { userId: orphan.id, orgId: elsewhere.orgId, role: 'MEMBER' } });
+    const res = (await getAccess(shop, o.h)).json();
+    expect(res.people.map((p: { email: string }) => p.email)).toEqual(['o@x.io', 'm@x.io']);
+    expect(res.seats).toEqual({ used: 1, max: 20 });
+  });
+
   it('403s a MEMBER with a row and 404s one without', async () => {
     const { orgId, shop, other } = await org();
     const m = await member(orgId, 'MEMBER', 'm@x.io');
@@ -182,6 +206,32 @@ describe('DELETE /v1/apps/:id/access/:userId', () => {
     expect(await app.prisma.invite.count({ where: { id: pending.id } })).toBe(1);
   });
 
+  it('404s a userId that is not an id', async () => {
+    const { o, shop } = await org();
+    for (const userId of ['not-an-id', 'x'.repeat(80), '%27%20OR%201%3D1']) {
+      const res = await revoke(shop, userId, o.h);
+      expect(res.statusCode).toBe(404);
+      expect(res.json()).toEqual({ error: 'Not Found' });
+    }
+  });
+
+  it('waits on the org lock, so it sees a row an accept is granting', async () => {
+    // The holder plays an accept granting m a row on shop under the org lock.
+    // A revoke that didn't take the lock would see no row (404) and the
+    // accept would then commit access the admin had just asked to remove.
+    const { o, orgId, shop } = await org();
+    const m = await member(orgId, 'MEMBER', 'm@x.io');
+    let res: Promise<Res> | undefined;
+    await app.prisma.$transaction(async (tx) => {
+      await lockOrg(tx, orgId);
+      res = revoke(shop, m.id, o.h);
+      expect(await settledOrBlocked(app.prisma, res, tx)).toBe('blocked');
+      await tx.appAccess.create({ data: { appId: shop, userId: m.id, role: 'MEMBER' } });
+    });
+    expect((await res!).statusCode).toBe(204);
+    expect(await app.prisma.appAccess.count({ where: { userId: m.id } })).toBe(0);
+  });
+
   it('403s a MEMBER with a row, 404s a foreign or unknown app alike', async () => {
     const { orgId, shop } = await org();
     const m = await member(orgId, 'MEMBER', 'm@x.io');
@@ -234,6 +284,24 @@ describe('DELETE /v1/apps/:id', () => {
     const after = await app.inject({ method: 'POST', url: '/v1/ingest', headers: { authorization: `Bearer ${key}` }, payload: body });
     expect(after.statusCode).toBe(401);
     expect(after.json()).toEqual({ error: 'invalid ingest key' });
+  });
+
+  it('a stale cached key for a deleted app gets 401, not 500, and is evicted (A7-1)', async () => {
+    // Another replica deleted the app, so this process's cache was never
+    // invalidated; or this request resolved its key just before the delete.
+    const { o, shop } = await org();
+    const { key } = (await app.inject({ method: 'POST', url: `/v1/apps/${shop}/keys`, headers: o.h })).json();
+    const ingest = (n: number) => app.inject({ method: 'POST', url: '/v1/ingest', headers: { authorization: `Bearer ${key}` }, payload: ingestBody(n) });
+    expect((await ingest(1)).statusCode).toBe(202); // cache warm
+    const before = app.ingestStats.rejected401;
+    await app.prisma.app.delete({ where: { id: shop } }); // bypasses invalidate
+    const r = await ingest(2); // items present, so it reaches writeBatch
+    expect(r.statusCode).toBe(401);
+    expect(r.json()).toEqual({ error: 'invalid ingest key' });
+    expect(app.ingestStats.rejected401).toBe(before + 1);
+    // Evicted: the next request re-resolves from the database and 401s
+    // before writeBatch (a stale cache would 202 an empty batch).
+    expect((await ingest(0)).statusCode).toBe(401);
   });
 
   it('403s a MEMBER, 404s a foreign or unknown app alike', async () => {

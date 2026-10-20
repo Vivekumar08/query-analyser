@@ -1,5 +1,6 @@
 import type { PrismaClient } from '../db.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { isForeignKeyViolation } from '../db-errors.js';
 import { compactDay, pruneHourly, pruneDaily } from './compaction.js';
 import { detectRegression, type HourPoint } from './regression.js';
 import { percentileFromHist } from './percentile.js';
@@ -38,6 +39,21 @@ export interface NightlyResult {
   dailyPruned: number;
   adviceWritten: number;
   newExpensive: number;
+}
+
+/**
+ * Runs one per-row write, skipping it (false) when its signature is gone: an
+ * app deleted mid-run cascades its signatures away after the job read them.
+ * One such row must not abort the run for every other org.
+ */
+async function unlessDeleted(write: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await write();
+    return true;
+  } catch (err) {
+    if (isForeignKeyViolation(err)) return false;
+    throw err;
+  }
 }
 
 const daysAgo = (from: Date, n: number) => new Date(from.getTime() - n * 86_400_000);
@@ -83,10 +99,10 @@ export async function runHourlyJobs(deps: JobDeps): Promise<HourlyResult> {
     const detail = detectRegression(trailing, point(latestRow));
     if (!detail) continue;
 
-    await deps.prisma.alert.create({
+    const written = await unlessDeleted(() => deps.prisma.alert.create({
       data: { signatureId, kind: detail.kind, details: { ...detail } },
-    });
-    alertsCreated += 1;
+    }));
+    if (written) alertsCreated += 1;
   }
 
   return { alertsCreated };
@@ -190,14 +206,14 @@ export async function detectNewExpensive(deps: JobDeps): Promise<number> {
     });
     if (existing) continue;
 
-    await deps.prisma.alert.create({
+    const written = await unlessDeleted(() => deps.prisma.alert.create({
       data: {
         signatureId: row.id,
         kind: 'new_expensive',
         details: { firstSeen: row.firstSeen.toISOString(), window: '24h', topN: TOP_N },
       },
-    });
-    created += 1;
+    }));
+    if (written) created += 1;
   }
   return created;
 }
@@ -310,7 +326,7 @@ async function refreshAdviceForApp(prisma: PrismaClient, appId: string): Promise
         continue;
       }
 
-      await prisma.advice.upsert({
+      const ok = await unlessDeleted(() => prisma.advice.upsert({
         where: { signatureId: s.id },
         create: {
           signatureId: s.id,
@@ -318,8 +334,8 @@ async function refreshAdviceForApp(prisma: PrismaClient, appId: string): Promise
           rationale: result.rationale,
         },
         update: { suggestion: asJsonArray(result.suggestion), rationale: result.rationale },
-      });
-      written += 1;
+      }));
+      if (ok) written += 1;
     }
 
     if (signatures.length < ADVICE_SIGNATURE_PAGE) break;

@@ -1,8 +1,12 @@
 import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import { requireAppRole } from '../orgs/rbac.js';
 import { lockOrg } from '../orgs/locks.js';
 import { seatState } from '../orgs/seats.js';
 import { limitsFor } from '../plans.js';
+
+/** User ids are UUIDs; anything else can't name a row, so it's a plain 404. */
+const userIdSchema = z.string().uuid();
 
 /** Who can open an app, and per-app revocation. Both are ADMIN+. */
 export async function accessRoutes(app: FastifyInstance): Promise<void> {
@@ -23,8 +27,10 @@ export async function accessRoutes(app: FastifyInstance): Promise<void> {
         select: { role: true, user: userSelect },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       }),
+      // Only current members: the database doesn't tie a row to a
+      // membership, and an orphan row must not list a non-member here.
       app.prisma.appAccess.findMany({
-        where: { appId },
+        where: { appId, user: { memberships: { some: { orgId } } } },
         select: { role: true, user: userSelect },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       }),
@@ -47,9 +53,13 @@ export async function accessRoutes(app: FastifyInstance): Promise<void> {
   // Removes one app's access. The membership stays (so does its seat), and
   // so do their other apps. Their pending invites to this app go too
   // (Ruling A5-1), so one can't restore what was just taken away. Under the
-  // org lock, so it serialises with an accept granting the same row.
+  // org lock, so it serialises with an accept granting the same row: without
+  // it, a revoke could miss a row an accept is committing and report 404
+  // while the access survives.
   app.delete('/v1/apps/:id/access/:userId', auth, async (req, reply) => {
-    const { userId } = req.params as { userId: string };
+    const parsed = userIdSchema.safeParse((req.params as { userId?: unknown }).userId);
+    if (!parsed.success) return reply.code(404).send({ error: 'Not Found' });
+    const userId = parsed.data;
     const appId = req.appId;
     const removed = await app.prisma.$transaction(async (tx) => {
       if (!(await lockOrg(tx, req.membership.orgId))) return false;
