@@ -21,7 +21,10 @@ export interface PlanLimits {
 }
 
 /** GET /v1/orgs → OrgSummary[] (a bare array). */
-export interface OrgSummary { id: string; name: string; slug: string; plan: string; createdAt: string; role: Role; limits: PlanLimits }
+/** `createdByMe`: the caller created this org (what the org limit counts, not ownership). */
+export interface OrgSummary {
+  id: string; name: string; slug: string; plan: string; createdAt: string; role: Role; createdByMe: boolean; limits: PlanLimits;
+}
 
 export const ROLES: readonly Role[] = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'];
 

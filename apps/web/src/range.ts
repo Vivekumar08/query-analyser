@@ -25,11 +25,17 @@ export function presetAllowed(p: RangePreset, retentionDays: number): boolean {
   return PRESET_DAYS[p] <= retentionDays;
 }
 
-/** The first UTC day a plan keeping `retentionDays` still has, or null for no limit. */
+/**
+ * The first whole UTC day a plan keeping `retentionDays` still has, or null
+ * for no limit. The nightly prune deletes daily rows with
+ * `day < now - retentionDays` (apps/api/src/analysis/compaction.ts), so the
+ * day containing that cutoff is gone unless the cutoff is exactly midnight:
+ * the first kept day is the cutoff rounded up to midnight.
+ */
 export function earliestKeptDay(retentionDays: number, now: Date = new Date()): Date | null {
   if (!Number.isFinite(retentionDays)) return null;
-  const d = new Date(now.getTime() - retentionDays * DAY_MS);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const cutoff = now.getTime() - retentionDays * DAY_MS;
+  return new Date(Math.ceil(cutoff / DAY_MS) * DAY_MS);
 }
 
 const DEFAULT: RangeState = { kind: 'preset', preset: '24h' };
@@ -77,9 +83,16 @@ export function parseRange(p: Params, retentionDays = Infinity, now: Date = new 
   return DEFAULT;
 }
 
-export function rangeToWindow(r: RangeState, now: Date = new Date()): { from: string; to: string } {
+/**
+ * The API window for a range. A preset starts no earlier than the first whole
+ * kept day: the API widens a long window's start to UTC midnight, and that
+ * day may already be pruned, which would draw a partial first day.
+ */
+export function rangeToWindow(r: RangeState, now: Date = new Date(), retentionDays = Infinity): { from: string; to: string } {
   if (r.kind === 'custom') return { from: r.from, to: r.to };
-  return { from: new Date(now.getTime() - PRESET_MS[r.preset]).toISOString(), to: now.toISOString() };
+  const from = new Date(now.getTime() - PRESET_MS[r.preset]);
+  const earliest = earliestKeptDay(retentionDays, now);
+  return { from: (earliest && from < earliest ? earliest : from).toISOString(), to: now.toISOString() };
 }
 
 export function rangeToParams(r: RangeState): Record<string, string> {

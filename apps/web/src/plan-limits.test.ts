@@ -20,13 +20,22 @@ describe('plan-limits', () => {
     expect(planLimitCopy(3)).toBeNull();
   });
 
-  it('canCreateOrg: anyone who owns none; else fewer than the largest owned limit', () => {
+  it('canCreateOrg: anyone who created none; else fewer than the largest limit among the orgs they created (P1-1)', () => {
     const free = limits(1), team = limits(3);
+    const row = (createdByMe: boolean, l: PlanLimits, role: 'OWNER' | 'MEMBER' = 'OWNER') => ({ role, createdByMe, limits: l });
     expect(canCreateOrg([])).toBe(true);
-    expect(canCreateOrg([{ role: 'MEMBER', limits: free }])).toBe(true);
-    expect(canCreateOrg([{ role: 'OWNER', limits: free }])).toBe(false);
-    expect(canCreateOrg([{ role: 'OWNER', limits: free }, { role: 'OWNER', limits: team }])).toBe(true);
-    expect(canCreateOrg([{ role: 'OWNER', limits: team }, { role: 'OWNER', limits: team }, { role: 'OWNER', limits: team }])).toBe(false);
+    expect(canCreateOrg([row(false, free, 'MEMBER')])).toBe(true);
+    expect(canCreateOrg([row(true, free)])).toBe(false);
+    expect(canCreateOrg([row(true, free), row(true, team)])).toBe(true);
+    expect(canCreateOrg([row(true, team), row(true, team), row(true, team)])).toBe(false);
+  });
+
+  it('canCreateOrg: a promoted owner who created nothing can still create (A10-2)', () => {
+    // The role is ignored; only createdByMe counts.
+    const owner = (createdByMe: boolean, ownedOrgs: number) => ({ role: 'OWNER' as const, createdByMe, limits: limits(ownedOrgs) });
+    expect(canCreateOrg([owner(false, 1)])).toBe(true);
+    // Owning someone else's team org neither counts nor raises the allowance.
+    expect(canCreateOrg([owner(true, 1), owner(false, 3)])).toBe(false);
   });
 
   it('canCreateApp: fewer apps than the plan allows', () => {

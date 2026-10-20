@@ -23,18 +23,21 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
   app.get('/v1/orgs', { preHandler: [app.authenticate, app.requireVerified] }, async (req) => {
     const rows = await app.prisma.membership.findMany({
       where: { userId: req.user.id },
-      select: { role: true, org: { select: { id: true, name: true, slug: true, plan: true, createdAt: true } } },
+      select: { role: true, org: { select: { id: true, name: true, slug: true, plan: true, createdAt: true, createdById: true } } },
       orderBy: { createdAt: 'asc' },
     });
     // Retention is the effective value (the grace included), so the web's
-    // range cap matches what the nightly prune keeps.
+    // range cap matches what the nightly prune keeps. `createdByMe` lets the
+    // web mirror the org limit below, which counts orgs the caller created
+    // (not orgs they own); the creator's id itself is not sent.
     const now = new Date();
-    return rows.map((r) => ({
-      ...r.org,
-      role: r.role,
+    return rows.map(({ role, org: { createdById, ...org } }) => ({
+      ...org,
+      role,
+      createdByMe: createdById === req.user.id,
       limits: {
-        ...limitsFor(r.org.plan),
-        dailyRetentionDays: effectiveRetentionDays(r.org.plan, now, app.config.RETENTION_GRACE_UNTIL),
+        ...limitsFor(org.plan),
+        dailyRetentionDays: effectiveRetentionDays(org.plan, now, app.config.RETENTION_GRACE_UNTIL),
       },
     }));
   });

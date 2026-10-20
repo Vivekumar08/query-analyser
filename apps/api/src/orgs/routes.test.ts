@@ -278,6 +278,20 @@ describe('org limit', () => {
     })]);
   });
 
+  it('marks which listed orgs the caller created, not which they own (P1-1)', async () => {
+    const a = await user('a@x.io');
+    const b = await user('b@x.io');
+    const mine = (await create(a.token, 'Mine')).json() as { id: string };
+    // b is promoted to OWNER of a's org but created nothing.
+    await app.prisma.membership.create({ data: { userId: b.id, orgId: mine.id, role: 'OWNER' } });
+    const listA = (await app.inject({ method: 'GET', url: '/v1/orgs', headers: as(a.token) })).json();
+    const listB = (await app.inject({ method: 'GET', url: '/v1/orgs', headers: as(b.token) })).json();
+    expect(listA).toEqual([expect.objectContaining({ id: mine.id, role: 'OWNER', createdByMe: true })]);
+    expect(listB).toEqual([expect.objectContaining({ id: mine.id, role: 'OWNER', createdByMe: false })]);
+    // The creator's id itself is never sent.
+    expect(listB[0]).not.toHaveProperty('createdById');
+  });
+
   it('lists the plan\'s own retention once the grace has passed', async () => {
     const after = await buildApp({ logger: false, config: { ...loadConfig(), RETENTION_GRACE_UNTIL: new Date('2026-01-01T00:00:00.000Z') } });
     try {

@@ -34,7 +34,7 @@ export default async function QueriesPage({
   const search = filtersToSearch(filters);
 
   const token = ctx.session.accessToken;
-  const res = await listQueries(token, ctx.app.id, filtersToApiQuery(filters));
+  const res = await listQueries(token, ctx.app.id, filtersToApiQuery(filters, undefined, retentionDays));
   if (!res.ok && res.status === 401) redirect(`/api/auth/refresh?next=${encodeURIComponent(`${base}/queries${search ? `?${search}` : ''}`)}`);
   const outcome = listOutcome(res);
   if (outcome === 'error') throw new Error('Could not load queries');
@@ -48,7 +48,7 @@ export default async function QueriesPage({
   // rows are all one model/op, so one extra unfiltered call supplies the rest.
   let optionRows = items;
   if (filtered) {
-    const all = await listQueries(token, ctx.app.id, optionsApiQuery(filters.range));
+    const all = await listQueries(token, ctx.app.id, optionsApiQuery(filters.range, undefined, retentionDays));
     if (all.ok) optionRows = all.data.items;
   }
   const models = [...new Set([...optionRows.map((r) => r.model), ...(filters.model ? [filters.model] : [])])].sort();

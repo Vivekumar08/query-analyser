@@ -48,7 +48,7 @@ export default async function QueryDetailPage({
   // Detail is all-time (the API ignores a window); only the trend is range-scoped.
   const [detail, series, sampleKey] = await Promise.all([
     getQuery(token, appId, sig),
-    getSeries(token, appId, sig, rangeToWindow(range)),
+    getSeries(token, appId, sig, rangeToWindow(range, undefined, retentionDays)),
     getSampleKey(token, appId),
   ]);
   if (!detail.ok) {

@@ -25,9 +25,9 @@ import { PLAN_LIMIT_COPY } from '@/src/plan-limits';
 
 const FREE = { ownedOrgs: 1, apps: 1, seats: 1, invitableRoles: ['MEMBER'], dailyRetentionDays: 90 };
 const ORGS = [
-  { id: 'o1', slug: 'team', name: 'Team', plan: 'free', createdAt: 'c', role: 'MEMBER', limits: FREE },
-  // Owning a free org uses up the one org this account may create.
-  { id: 'o2', slug: 'other', name: 'Other', plan: 'free', createdAt: 'c', role: 'OWNER', limits: FREE },
+  { id: 'o1', slug: 'team', name: 'Team', plan: 'free', createdAt: 'c', role: 'MEMBER', createdByMe: false, limits: FREE },
+  // Having created a free org uses up the one org this account may create.
+  { id: 'o2', slug: 'other', name: 'Other', plan: 'free', createdAt: 'c', role: 'OWNER', createdByMe: true, limits: FREE },
 ];
 const page = (org: string) => OrgPage({ params: Promise.resolve({ org }) });
 
@@ -51,12 +51,20 @@ describe('/dashboard/[org]', () => {
     expect(vi.mocked(listApps).mock.calls[0]).toEqual(['tok', 'o1']);
   });
 
-  it('an owner of a free org sees Create your own organisation disabled with the orgs copy', async () => {
+  it('the creator of a free org sees Create your own organisation disabled with the orgs copy', async () => {
     vi.mocked(listApps).mockResolvedValue({ ok: true, data: [] } as never);
     render(await page('team'));
     expect(screen.queryByRole('link', { name: 'Create your own organisation' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Create your own organisation' }).getAttribute('aria-disabled')).toBe('true');
     expect(screen.getByText(PLAN_LIMIT_COPY.orgs)).toBeTruthy();
+  });
+
+  it('a promoted owner who created no org may still create one (A10-2)', async () => {
+    vi.mocked(listOrgs).mockResolvedValue({ ok: true, data: [ORGS[0], { ...ORGS[1], createdByMe: false }] } as never);
+    vi.mocked(listApps).mockResolvedValue({ ok: true, data: [] } as never);
+    render(await page('team'));
+    expect(screen.getByRole('link', { name: 'Create your own organisation' }).getAttribute('href')).toBe('/onboarding?new=org');
+    expect(screen.queryByText(PLAN_LIMIT_COPY.orgs)).toBeNull();
   });
 
   it('someone who owns no org may create one', async () => {

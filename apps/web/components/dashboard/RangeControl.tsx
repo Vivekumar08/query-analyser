@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { format } from 'date-fns';
 import type { DateRange } from 'react-day-picker';
@@ -8,10 +8,11 @@ import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { earliestKeptDay, presetAllowed, type RangePreset, type RangeState } from '@/src/range';
+import { earliestKeptDay, presetAllowed, rangeToParams, type RangePreset, type RangeState } from '@/src/range';
 import { retentionNote } from '@/src/plan-limits';
 
 const PRESETS: RangePreset[] = ['1h', '24h', '7d', '30d'];
+const RANGE_KEYS = ['range', 'from', 'to'] as const;
 const day = (d: Date) => format(d, 'yyyy-MM-dd');
 // Stored custom bounds are UTC ISO strings; the calendar works in local dates.
 const asLocalDay = (iso: string) => {
@@ -33,7 +34,28 @@ export function RangeControl({ value, retentionDays }: { value: RangeState; rete
     value.kind === 'custom' ? { from: asLocalDay(value.from), to: asLocalDay(value.to) } : undefined,
   );
 
+  const noteId = useId();
   const anyBlocked = PRESETS.some((p) => !presetAllowed(p, retentionDays));
+
+  // The server limits the URL's range to what the plan keeps (parseRange), so
+  // a bookmarked ?range=30d on a 7-day plan renders 24h. Put the range that was
+  // drawn back in the URL, once per value, so the URL never claims otherwise.
+  const canonicalKey = JSON.stringify(rangeToParams(value));
+  const synced = useRef<string | null>(null);
+  useEffect(() => {
+    if (synced.current === canonicalKey) return;
+    synced.current = canonicalKey;
+    const want: Record<string, string | undefined> = JSON.parse(canonicalKey);
+    if (RANGE_KEYS.every((k) => (params.get(k) ?? undefined) === want[k])) return;
+    const s = new URLSearchParams(params.toString());
+    for (const k of RANGE_KEYS) {
+      const v = want[k];
+      if (v === undefined) s.delete(k);
+      else s.set(k, v);
+    }
+    const qs = s.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }, [canonicalKey, params, pathname, router]);
   const earliest = earliestKeptDay(retentionDays);
   const today = new Date();
   const disabledDays = earliest
@@ -65,7 +87,13 @@ export function RangeControl({ value, retentionDays }: { value: RangeState; rete
           {PRESETS.map((p) => {
             const allowed = presetAllowed(p, retentionDays);
             return (
-              <ToggleGroupItem key={p} value={p} disabled={!allowed} title={allowed ? undefined : retentionNote(retentionDays)}>
+              <ToggleGroupItem
+              key={p}
+              value={p}
+              disabled={!allowed}
+              title={allowed ? undefined : retentionNote(retentionDays)}
+              aria-describedby={allowed ? undefined : noteId}
+            >
                 {p}
               </ToggleGroupItem>
             );
@@ -99,7 +127,7 @@ export function RangeControl({ value, retentionDays }: { value: RangeState; rete
           </PopoverContent>
         </Popover>
       </div>
-      {anyBlocked && <p className="text-xs text-muted-foreground">{retentionNote(retentionDays)}</p>}
+      {anyBlocked && <p id={noteId} className="text-xs text-muted-foreground">{retentionNote(retentionDays)}</p>}
     </div>
   );
 }

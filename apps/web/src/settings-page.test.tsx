@@ -52,5 +52,6 @@ describe('/dashboard/[org]/[app]/settings', () => {
     expect(nav.notFound).not.toHaveBeenCalled();
     expect(getSampleKey).toHaveBeenCalledWith('tok', 'a1');
     expect(listMembers).toHaveBeenCalledWith('tok', 'o1');
+    expect(listInvites).toHaveBeenCalledWith('tok', 'o1');
   });
 });

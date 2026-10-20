@@ -1,4 +1,4 @@
-import { ROLES, ROLE_LABEL, type MemberApp, type PlanLimits, type Role } from './dashboard-types';
+import { ROLES, ROLE_LABEL, type MemberApp, type PlanLimits } from './dashboard-types';
 
 /** What a `403 { error: 'plan-limit', limit }` refusal is about (apps/api/src/plans.ts). */
 export type LimitKind = 'orgs' | 'apps' | 'seats' | 'role';
@@ -19,15 +19,17 @@ export function planLimitCopy(limit: unknown): string | null {
 }
 
 /**
- * Whether "New organisation" is enabled. Anyone who owns no org may create
- * one; otherwise the owned count must be below the largest `ownedOrgs` among
- * the orgs they own. A hint only: the API counts the orgs the user created,
- * and is the real gate.
+ * Whether "New organisation" is enabled, mirroring the API (P1-1): the orgs
+ * the user created must number fewer than the largest `ownedOrgs` among them.
+ * Orgs they were invited into or promoted to OWNER of never count. Someone
+ * who created none may always create one (every plan, free included, allows
+ * at least one). A hint only: the API also counts created orgs the user has
+ * since left, and is the real gate.
  */
-export function canCreateOrg(orgs: { role: Role; limits: PlanLimits }[]): boolean {
-  const owned = orgs.filter((o) => o.role === 'OWNER');
-  if (owned.length === 0) return true;
-  return owned.length < Math.max(...owned.map((o) => o.limits.ownedOrgs));
+export function canCreateOrg(orgs: { createdByMe: boolean; limits: PlanLimits }[]): boolean {
+  const created = orgs.filter((o) => o.createdByMe);
+  if (created.length === 0) return true;
+  return created.length < Math.max(...created.map((o) => o.limits.ownedOrgs));
 }
 
 /** Whether "New app" is enabled for an org with `appCount` apps. */

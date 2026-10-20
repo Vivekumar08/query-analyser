@@ -15,9 +15,11 @@ vi.mock('@/src/dashboard-api', () => ({ listOrgs: vi.fn() }));
 import AccountPage from '@/app/dashboard/account/page';
 import { requireSession } from '@/src/auth';
 import { listOrgs } from '@/src/dashboard-api';
+import { PLAN_LIMIT_COPY } from '@/src/plan-limits';
 
 const USER = { id: 'u1', email: 'ada@x.co', name: 'Ada', isPlatformAdmin: false, emailVerifiedAt: 'v' };
-const ORGS = [{ id: 'o1', slug: 'team', name: 'Team', plan: 'free', createdAt: 'c', role: 'MEMBER' }];
+const FREE = { ownedOrgs: 1, apps: 1, seats: 1, invitableRoles: ['MEMBER'], dailyRetentionDays: 90 };
+const ORGS = [{ id: 'o1', slug: 'team', name: 'Team', plan: 'free', createdAt: 'c', role: 'MEMBER', createdByMe: false, limits: FREE }];
 
 beforeEach(() => {
   nav.redirect.mockClear();
@@ -37,6 +39,21 @@ describe('/dashboard/account', () => {
     expect(screen.getByText('Other devices are signed out within 15 minutes.')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Open Team' }).getAttribute('href')).toBe('/dashboard/team');
     expect(vi.mocked(listOrgs).mock.calls[0]).toEqual(['tok']);
+  });
+
+  it('Create organisation is a link for someone who created none, even as a promoted owner (A10-2)', async () => {
+    vi.mocked(listOrgs).mockResolvedValue({ ok: true, data: [{ ...ORGS[0], role: 'OWNER' }] } as never);
+    render(await AccountPage());
+    expect(screen.getByRole('link', { name: 'Create organisation' }).getAttribute('href')).toBe('/onboarding?new=org');
+    expect(screen.queryByText(PLAN_LIMIT_COPY.orgs)).toBeNull();
+  });
+
+  it('Create organisation is disabled with the orgs copy once a free org was created', async () => {
+    vi.mocked(listOrgs).mockResolvedValue({ ok: true, data: [{ ...ORGS[0], role: 'OWNER', createdByMe: true }] } as never);
+    render(await AccountPage());
+    expect(screen.queryByRole('link', { name: 'Create organisation' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Create organisation' }).getAttribute('aria-disabled')).toBe('true');
+    expect(screen.getByText(PLAN_LIMIT_COPY.orgs)).toBeTruthy();
   });
 
   it('sends an unverified user to /onboarding', async () => {

@@ -50,8 +50,8 @@ export function filtersToSearch(f: QueryFilters): string {
   return s.toString();
 }
 
-export function filtersToApiQuery(f: QueryFilters, now: Date = new Date()): string {
-  const { from, to } = rangeToWindow(f.range, now);
+export function filtersToApiQuery(f: QueryFilters, now: Date = new Date(), retentionDays = Infinity): string {
+  const { from, to } = rangeToWindow(f.range, now, retentionDays);
   const s = new URLSearchParams({ from, to, sort: f.sort, limit: String(PAGE_SIZE), offset: String((f.page - 1) * PAGE_SIZE) });
   if (f.model) s.set('model', f.model);
   if (f.op) s.set('op', f.op);
@@ -59,7 +59,7 @@ export function filtersToApiQuery(f: QueryFilters, now: Date = new Date()): stri
 }
 
 /** Unfiltered top-by-wasted window used to fill the model/op dropdowns. */
-export function optionsApiQuery(range: RangeState, now: Date = new Date()): string {
-  const { from, to } = rangeToWindow(range, now);
+export function optionsApiQuery(range: RangeState, now: Date = new Date(), retentionDays = Infinity): string {
+  const { from, to } = rangeToWindow(range, now, retentionDays);
   return new URLSearchParams({ from, to, sort: 'wasted', limit: String(MAX_LIMIT) }).toString();
 }
