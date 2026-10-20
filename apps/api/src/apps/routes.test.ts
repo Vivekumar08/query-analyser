@@ -102,6 +102,44 @@ describe('apps', () => {
     const res = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: h, payload: { name: 'web', env: 'production' } });
     expect(res.statusCode).toBe(201);
   });
+
+  it('a free org cannot create a second app', async () => {
+    const o = await owner();
+    expect((await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'web', env: 'production' } })).statusCode).toBe(201);
+    const res = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'api', env: 'production' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'plan-limit', limit: 'apps', max: 1 });
+  });
+
+  it('two concurrent creates of different apps on free make exactly one app', async () => {
+    const o = await owner();
+    const results = await Promise.all(['a', 'b'].map((name) =>
+      app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name, env: 'production' } })));
+    expect(results.map((r) => r.statusCode).sort()).toEqual([201, 403]);
+    expect(await app.prisma.app.count({ where: { orgId: o.orgId } })).toBe(1);
+  });
+
+  it('an org already over its limit keeps its apps but cannot add one', async () => {
+    const o = await owner();
+    await app.prisma.app.create({ data: { orgId: o.orgId, name: 'one', env: 'production' } });
+    await app.prisma.app.create({ data: { orgId: o.orgId, name: 'two', env: 'production' } });
+    const res = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'three', env: 'production' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'plan-limit', limit: 'apps', max: 1 });
+    expect(await app.prisma.app.count({ where: { orgId: o.orgId } })).toBe(2);
+  });
+
+  it('a team org can create up to 10', async () => {
+    const o = await owner();
+    await app.prisma.organization.update({ where: { id: o.orgId }, data: { plan: 'team' } });
+    for (let i = 0; i < 10; i++) {
+      const r = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: `app${i}`, env: 'production' } });
+      expect(r.statusCode).toBe(201);
+    }
+    const res = await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'app10', env: 'production' } });
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'plan-limit', limit: 'apps', max: 10 });
+  });
 });
 
 describe('keys', () => {

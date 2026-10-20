@@ -4,6 +4,8 @@ import { requireRole, requireAppRole } from '../orgs/rbac.js';
 import { generateKey } from '../ingest/keys.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { sampleKeyRoutes } from './sample-key.js';
+import { lockOrg } from '../orgs/locks.js';
+import { limitsFor, PlanLimitError, sendPlanLimit } from '../plans.js';
 
 const createSchema = z.object({ name: z.string().min(1).max(100), env: z.string().min(1).max(40) });
 const appSelect = { id: true, name: true, env: true, createdAt: true } as const;
@@ -17,18 +19,32 @@ export async function appRoutes(app: FastifyInstance): Promise<void> {
   app.post('/v1/orgs/:org/apps', { preHandler: [app.authenticate, app.requireVerified, requireRole('ADMIN')] }, async (req, reply) => {
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'invalid body' });
-    const exists = await app.prisma.app.findUnique({ where: { orgId_name_env: { orgId: req.membership.orgId, ...parsed.data } } });
-    if (exists) return reply.code(409).send({ error: 'app already exists for this env' });
-    // The findUnique-then-create above is itself a check-then-act: two
-    // concurrent requests for the same (orgId, name, env) can both pass the
-    // `exists` check and then both attempt to INSERT, so the second `create`
-    // fails its unique constraint. Prisma's P2002 carries no `statusCode`, so
-    // without this catch it would fall through to the generic error handler
-    // as a 500 instead of the spec'd 409.
+    const orgId = req.membership.orgId;
+    const DUPLICATE = Symbol('duplicate');
+    const GONE = Symbol('gone');
+    // One transaction under the org-row lock, so concurrent creates of
+    // different apps can't both pass the count. The duplicate check comes
+    // first: a repeated (name, env) is a 409 whatever the plan.
+    //
+    // The duplicate check is still a check-then-act for the same
+    // (orgId, name, env) on its own, so keep the P2002 catch: Prisma's P2002
+    // carries no `statusCode`, and without it a lost race would fall through
+    // to the generic error handler as a 500 instead of the spec'd 409.
     try {
-      const created = await app.prisma.app.create({ data: { orgId: req.membership.orgId, ...parsed.data }, select: appSelect });
+      const created = await app.prisma.$transaction(async (tx) => {
+        const org = await lockOrg(tx, orgId);
+        if (!org) return GONE; // deleted after requireRole passed
+        const exists = await tx.app.findUnique({ where: { orgId_name_env: { orgId, ...parsed.data } } });
+        if (exists) return DUPLICATE;
+        const max = limitsFor(org.plan).apps;
+        if ((await tx.app.count({ where: { orgId } })) >= max) throw new PlanLimitError('apps', max);
+        return tx.app.create({ data: { orgId, ...parsed.data }, select: appSelect });
+      });
+      if (created === GONE) return reply.code(404).send({ error: 'Not Found' });
+      if (created === DUPLICATE) return reply.code(409).send({ error: 'app already exists for this env' });
       return reply.code(201).send(created);
     } catch (err) {
+      if (err instanceof PlanLimitError) return sendPlanLimit(reply, err);
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
         return reply.code(409).send({ error: 'app already exists for this env' });
       }

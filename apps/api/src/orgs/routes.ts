@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { randomBytes } from 'node:crypto';
 import { requireRole } from './rbac.js';
 import { Prisma } from '../generated/prisma/client.js';
+import { limitsFor, PlanLimitError, sendPlanLimit } from '../plans.js';
+import { lockOwnersAndTarget, lockUser } from './locks.js';
 
 const ROLES = ['OWNER', 'ADMIN', 'MEMBER', 'VIEWER'] as const;
 const createSchema = z.object({ name: z.string().min(1).max(100) });
@@ -22,7 +24,7 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
       select: { role: true, org: { select: { id: true, name: true, slug: true, plan: true, createdAt: true } } },
       orderBy: { createdAt: 'asc' },
     });
-    return rows.map((r) => ({ ...r.org, role: r.role }));
+    return rows.map((r) => ({ ...r.org, role: r.role, limits: limitsFor(r.org.plan) }));
   });
 
   app.post('/v1/orgs', { preHandler: [app.authenticate, app.requireVerified] }, async (req, reply) => {
@@ -33,6 +35,25 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     const taken = RESERVED_SLUGS.has(base) || (await app.prisma.organization.findUnique({ where: { slug: base } }));
     const slug = taken ? `${base}-${randomBytes(2).toString('hex')}` : base;
 
+    // The org is created only while the caller owns fewer orgs than the
+    // largest `ownedOrgs` among the plans of the orgs they already own
+    // (`free` when they own none). The user-row lock serialises one user's
+    // concurrent creates, so two can't both pass the count.
+    const userId = req.user.id;
+    const createOwnedOrg = (slug: string) =>
+      app.prisma.$transaction(async (tx) => {
+        await lockUser(tx, userId);
+        const owned = await tx.membership.findMany({ where: { userId, role: 'OWNER' }, select: { org: { select: { plan: true } } } });
+        const max = owned.length === 0
+          ? limitsFor('free').ownedOrgs
+          : Math.max(...owned.map((m) => limitsFor(m.org.plan).ownedOrgs));
+        if (owned.length >= max) throw new PlanLimitError('orgs', max);
+        return tx.organization.create({
+          data: { name: parsed.data.name, slug, memberships: { create: { userId, role: 'OWNER' } } },
+          select: { id: true, name: true, slug: true, plan: true, createdAt: true },
+        });
+      });
+
     // The findUnique-then-create above is itself a check-then-act: two
     // concurrent requests choosing the same base slug (or, much more
     // unlikely, colliding on the same random suffix) can both pass the
@@ -42,20 +63,18 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
     // right after the first is exceedingly unlikely and not worth looping
     // indefinitely over.
     try {
-      const org = await app.prisma.organization.create({
-        data: { name: parsed.data.name, slug, memberships: { create: { userId: req.user.id, role: 'OWNER' } } },
-        select: { id: true, name: true, slug: true, plan: true, createdAt: true },
-      });
-      return reply.code(201).send({ ...org, role: 'OWNER' });
-    } catch (err) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && (err.meta?.target as string[] | undefined)?.includes('slug')) {
-        const retrySlug = `${base}-${randomBytes(2).toString('hex')}`;
-        const org = await app.prisma.organization.create({
-          data: { name: parsed.data.name, slug: retrySlug, memberships: { create: { userId: req.user.id, role: 'OWNER' } } },
-          select: { id: true, name: true, slug: true, plan: true, createdAt: true },
-        });
+      try {
+        const org = await createOwnedOrg(slug);
         return reply.code(201).send({ ...org, role: 'OWNER' });
+      } catch (err) {
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002' && (err.meta?.target as string[] | undefined)?.includes('slug')) {
+          const org = await createOwnedOrg(`${base}-${randomBytes(2).toString('hex')}`);
+          return reply.code(201).send({ ...org, role: 'OWNER' });
+        }
+        throw err;
       }
+    } catch (err) {
+      if (err instanceof PlanLimitError) return sendPlanLimit(reply, err);
       throw err;
     }
   });
@@ -83,31 +102,6 @@ export async function orgRoutes(app: FastifyInstance): Promise<void> {
   // `reply.send`.
   class LastOwnerError extends Error {}
   const NOT_FOUND = Symbol('not-found');
-
-  /**
-   * One ordered `FOR UPDATE` over the org's OWNER rows plus the target row,
-   * taken before anything looks at the target's role. Deciding from the
-   * locked rows means the target's role can't change under us and the
-   * owners we count stay owners until we commit, so no concurrent promote,
-   * demote, removal or leave can leave the org with zero owners. Every
-   * caller locks through this one statement in id order, so there is a
-   * single lock order and no cycle. (Locking the owners first and then
-   * re-reading the target would deadlock against a concurrent demotion of
-   * a just-promoted target.)
-   */
-  async function lockOwnersAndTarget(
-    tx: Prisma.TransactionClient,
-    orgId: string,
-    target: { id: string } | { userId: string },
-  ) {
-    const match = 'id' in target ? Prisma.sql`id = ${target.id}` : Prisma.sql`"userId" = ${target.userId}`;
-    const rows = await tx.$queryRaw<{ id: string; userId: string; role: string }[]>`
-      SELECT id, "userId", role::text AS role FROM "Membership"
-      WHERE "orgId" = ${orgId} AND (role = 'OWNER'::"Role" OR ${match})
-      ORDER BY id FOR UPDATE`;
-    const row = rows.find((r) => ('id' in target ? r.id === target.id : r.userId === target.userId));
-    return { row, ownerCount: rows.filter((r) => r.role === 'OWNER').length };
-  }
 
   /** Locks, then removes the target row, keeping at least one OWNER. */
   async function removeMembership(orgId: string, target: { id: string } | { userId: string }) {

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import { settledOrBlocked } from '../test/locks.js';
+import { limitsFor } from '../plans.js';
 import type { FastifyInstance } from 'fastify';
 
 let app: FastifyInstance;
@@ -44,6 +45,8 @@ describe('orgs', () => {
       const res = await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(u.token), payload: { name } });
       expect(res.statusCode).toBe(201);
       expect(res.json().slug).toMatch(new RegExp(`^${base}-[a-z0-9]{4}$`));
+      // Three orgs for one owner is past the free limit, so the first is on team.
+      if (base === 'account') await app.prisma.organization.update({ where: { id: res.json().id }, data: { plan: 'team' } });
     }
   });
 
@@ -52,6 +55,8 @@ describe('orgs', () => {
     const first = await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(u.token), payload: { name: 'Acme' } });
     expect(first.statusCode).toBe(201);
     expect(first.json().slug).toBe('acme');
+    // A second org for one owner is past the free limit.
+    await app.prisma.organization.update({ where: { id: first.json().id }, data: { plan: 'team' } });
 
     const res = await app.inject({ method: 'POST', url: '/v1/orgs', headers: as(u.token), payload: { name: 'Acme' } });
     expect(res.statusCode).toBe(201);
@@ -186,6 +191,52 @@ describe('orgs', () => {
     const res = await app.inject({ method: 'PATCH', url: `/v1/orgs/${orgA.id}/members/${mb.id}`, headers: as(a.token), payload: { role: 'VIEWER' } });
     expect(res.statusCode).toBe(404);
     expect((await app.prisma.membership.findUniqueOrThrow({ where: { id: mb.id } })).role).toBe('OWNER');
+  });
+});
+
+describe('org limit', () => {
+  const create = (token: string, name = 'A') =>
+    app.inject({ method: 'POST', url: '/v1/orgs', headers: as(token), payload: { name } });
+
+  it('a free owner cannot create a second org', async () => {
+    const u = await user('o@x.io');
+    expect((await create(u.token, 'First')).statusCode).toBe(201);
+    const res = await create(u.token, 'Second');
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'plan-limit', limit: 'orgs', max: 1 });
+    expect(await app.prisma.membership.count({ where: { userId: u.id, role: 'OWNER' } })).toBe(1);
+  });
+
+  it('being invited into other orgs does not count', async () => {
+    const a = await user('a@x.io'); const u = await user('u@x.io');
+    const other = (await create(a.token, 'Other')).json() as { id: string };
+    await app.prisma.membership.create({ data: { userId: u.id, orgId: other.id, role: 'MEMBER' } });
+    expect((await create(u.token, 'Mine')).statusCode).toBe(201);
+  });
+
+  it('the largest limit among owned orgs applies', async () => {
+    const u = await user('u@x.io');
+    const first = (await create(u.token, 'One')).json() as { id: string };
+    await app.prisma.organization.update({ where: { id: first.id }, data: { plan: 'team' } });
+    expect((await create(u.token, 'Two')).statusCode).toBe(201);
+    expect((await create(u.token, 'Three')).statusCode).toBe(201);
+    const res = await create(u.token, 'Four');
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ error: 'plan-limit', limit: 'orgs', max: 3 });
+  });
+
+  it('two concurrent creates by a free user make exactly one org', async () => {
+    const u = await user('u@x.io');
+    const [r1, r2] = await Promise.all([create(u.token, 'One'), create(u.token, 'Two')]);
+    expect([r1.statusCode, r2.statusCode].sort()).toEqual([201, 403]);
+    expect(await app.prisma.membership.count({ where: { userId: u.id, role: 'OWNER' } })).toBe(1);
+  });
+
+  it('lists each org with its plan limits', async () => {
+    const u = await user('u@x.io');
+    const org = (await create(u.token, 'Mine')).json() as { id: string };
+    const list = await app.inject({ method: 'GET', url: '/v1/orgs', headers: as(u.token) });
+    expect(list.json()).toEqual([expect.objectContaining({ id: org.id, plan: 'free', role: 'OWNER', limits: limitsFor('free') })]);
   });
 });
 
