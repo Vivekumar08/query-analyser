@@ -43,6 +43,7 @@ type _SortKey = AssertTrue<Equal<SortKey, SdkSortKey>>;
 type _IngestItem = AssertTrue<Equal<IngestItem, SdkIngestItem>>;
 type _IngestPayload = AssertTrue<Equal<IngestPayload, SdkIngestPayload>>;
 type _EncryptedSample = AssertTrue<Equal<EncryptedSample, SdkEncryptedSample>>;
+type _ItemCarriesOrigin = AssertTrue<Equal<IngestItem['source'] | IngestItem['collection'], string | undefined>>;
 // The optional envelope field must exist on the item (and so on the SDK copy).
 type _ItemCarriesEnvelope = AssertTrue<
   Equal<IngestItem['encryptedSample'], EncryptedSample | null | undefined>
