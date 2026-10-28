@@ -1,0 +1,27 @@
+{
+  "name": "@query-analyser/sdk-compat",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "bench": "QA_BENCH=1 vitest run src/overhead.test.ts"
+  },
+  "devDependencies": {
+    "@query-analyser/contract": "workspace:*",
+    "@types/node": "^22.0.0",
+    "mongodb-memory-server": "^10.1.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "mongodb4": "npm:mongodb@4.17.2",
+    "mongodb5": "npm:mongodb@5.9.2",
+    "mongodb6": "npm:mongodb@6.22.0",
+    "mongodb7": "npm:mongodb@7.8.0",
+    "mongoose5": "npm:mongoose@5.13.23",
+    "mongoose6": "npm:mongoose@6.13.12",
+    "mongoose7": "npm:mongoose@7.8.13",
+    "mongoose8": "npm:mongoose@8.24.8",
+    "mongoose9": "npm:mongoose@9.11.4"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "paths": {
+      "mongoose": ["./node_modules/mongoose8"],
+      "mongoose5": ["./src/types/mongoose-alias.d.ts"],
+      "mongoose6": ["./src/types/mongoose-alias.d.ts"],
+      "mongoose7": ["./src/types/mongoose-alias.d.ts"],
+      "mongoose8": ["./src/types/mongoose-alias.d.ts"],
+      "mongoose9": ["./src/types/mongoose-alias.d.ts"]
+    }
+  },
+  "include": ["src"]
+}
