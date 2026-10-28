@@ -48,4 +48,15 @@ describe('CompassQuery', () => {
     expect(note).toMatch(/next slowest run/);
     expect(note).toContain('QA_SAMPLE_KEY');
   });
+
+  it('uses the stored collection name when present', () => {
+    render(<CompassQuery {...base} collection="cat_items" encryptedSample={null} sampleKeyEnabled={false} canManage={false} />);
+    expect(screen.getByText(/db\.getCollection\("cat_items"\)\.find/)).toBeTruthy();
+    expect((screen.getByLabelText('Collection') as HTMLInputElement).value).toBe('cat_items');
+  });
+
+  it('falls back to the lowercase-plural guess when the collection is null', () => {
+    render(<CompassQuery {...base} collection={null} encryptedSample={null} sampleKeyEnabled={false} canManage={false} />);
+    expect(screen.getByText(/db\.getCollection\("categories"\)/)).toBeTruthy();
+  });
 });

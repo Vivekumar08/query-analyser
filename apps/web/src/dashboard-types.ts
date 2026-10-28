@@ -103,6 +103,8 @@ export interface QueryDetail {
   firstSeen: string; lastSeen: string; count: number; totalMs: string; maxMs: number;
   avgMs: number; p95: PercentileResult; p99: PercentileResult;
   hist: number[]; redactedSample: unknown | null; encryptedSample: EncryptedSample | null; advice: Advice | null;
+  /** Optional so an API that has not been redeployed still type-matches. */
+  source?: string; collection?: string | null;
 }
 
 /** Same `avgMs`/`p95` guarantees as QueryDetail. */

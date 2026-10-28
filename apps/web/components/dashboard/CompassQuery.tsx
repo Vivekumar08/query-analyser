@@ -18,9 +18,10 @@ const asParts = (v: unknown): SampleParts | null => (v !== null && typeof v === 
  * a sample key — the in-browser "Reveal real values" flow.
  */
 export function CompassQuery({
-  model, redactedSample, appId, encryptedSample, sampleKeyEnabled, canManage, settingsHref,
+  model, collection: storedCollection, redactedSample, appId, encryptedSample, sampleKeyEnabled, canManage, settingsHref,
 }: {
   model: string;
+  collection?: string | null;
   redactedSample: unknown;
   appId: string;
   encryptedSample: EncryptedSample | null;
@@ -28,7 +29,7 @@ export function CompassQuery({
   canManage: boolean;
   settingsHref: string;
 }) {
-  const [collection, setCollection] = useState(() => defaultCollection(model));
+  const [collection, setCollection] = useState(() => storedCollection || defaultCollection(model));
   const parts = asParts(redactedSample);
   const command = parts ? compassCommand(collection, parts, { placeholder: true }) : null;
 

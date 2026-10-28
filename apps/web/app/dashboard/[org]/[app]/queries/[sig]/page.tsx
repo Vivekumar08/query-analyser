@@ -111,6 +111,7 @@ export default async function QueryDetailPage({
         {(d.redactedSample != null || d.encryptedSample != null) && (
           <CompassQuery
             model={d.model}
+            collection={d.collection ?? null}
             redactedSample={d.redactedSample}
             appId={appId}
             encryptedSample={d.encryptedSample ?? null}
