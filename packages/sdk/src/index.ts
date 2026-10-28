@@ -150,6 +150,18 @@ type InternalAnalyser = Analyser & { _stop(): void; _aggregator: Aggregator };
 
 let active: InternalAnalyser | null = null;
 let activeOptions: { apiKey: string; app: string } | null = null;
+/** False while the active instance is the `enabled: false` no-op. */
+let activeEnabled = false;
+
+/** options.mongoClient as a list of objects; never throws. */
+function givenClients(given: MongoClientLike | MongoClientLike[] | undefined): object[] {
+  try {
+    const list: unknown[] = given === undefined ? [] : Array.isArray(given) ? given : [given];
+    return list.filter((c): c is object => typeof c === 'object' && c !== null);
+  } catch {
+    return [];
+  }
+}
 
 // Important 3: calling the returned `analyser.shutdown()` directly — the
 // natural call for a TS user holding an `Analyser` — used to never clear
@@ -164,6 +176,7 @@ function clearActiveIfSelf(self: InternalAnalyser): void {
   if (active === self) {
     active = null;
     activeOptions = null;
+    activeEnabled = false;
   }
 }
 
@@ -180,6 +193,14 @@ export function init(options: InitOptions): Analyser {
       onError(new Error(
         'query-analyser: init() was already called with different options; reusing the existing instance and ignoring the apiKey/app from this call',
       ));
+    }
+    // Serverless handlers often call init({ mongoClient }) on every
+    // invocation with a lazily created client: watch the clients this call
+    // brings (attach once, warn once per client), unless the live instance is
+    // the disabled no-op.
+    if (activeEnabled) {
+      const report = (e: Error): void => { try { onError(e); } catch { /* never throw from reporting */ } };
+      for (const client of givenClients(options.mongoClient)) watchClient(client, report);
     }
     return active;
   }
@@ -211,6 +232,7 @@ export function init(options: InitOptions): Analyser {
     };
     active = noop;
     activeOptions = { apiKey: options.apiKey, app: options.app };
+    activeEnabled = false;
     return noop;
   }
 
@@ -345,9 +367,7 @@ export function init(options: InitOptions): Analyser {
     }
 
     // Clients that exist already: mongoose's connections, and any passed in.
-    const given = options.mongoClient === undefined
-      ? []
-      : Array.isArray(options.mongoClient) ? options.mongoClient : [options.mongoClient];
+    const given = givenClients(options.mongoClient);
     const clients = new Set<object>([...(mg ? mongooseClients(mg) : []), ...given]);
     for (const client of clients) watchClient(client, reportSafely);
 
@@ -482,6 +502,7 @@ export function init(options: InitOptions): Analyser {
 
   active = analyser;
   activeOptions = { apiKey: options.apiKey, app: options.app };
+  activeEnabled = true;
   return analyser;
 }
 
