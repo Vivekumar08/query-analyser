@@ -1,16 +1,47 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { gunzipSync } from 'node:zlib';
+import { EventEmitter } from 'node:events';
 import mongoose from 'mongoose';
 // Test-only: the contract is a dev dependency, used here to make a recipient
 // key pair and to decrypt what the SDK sent.
 import { generateSampleKeyPair, decryptSample } from '@query-analyser/contract/runtime';
-import { init, shutdown } from './index.js';
+import sdkDefault, { init, instrument, shutdown } from './index.js';
+import { CONNECT_WRAP, MONITORING_OFF_WARNING, resolvePeer } from './drivers.js';
+import { currentSink } from './monitor.js';
 import { buildSignature, type SignatureResult } from './signature.js';
 import { MAX_CHUNK_BYTES } from './transport.js';
 
 afterEach(async () => { await shutdown(); });
 
 const okFetch = () => Promise.resolve(new Response('{}', { status: 202 }));
+
+class FakeClient extends EventEmitter { options = { monitorCommands: true }; }
+const fakeClient = () => new FakeClient();
+/** Driver 4+ shape with monitoring off: options.monitorCommands false plus a setter. */
+class Fake4 extends EventEmitter {
+  options = { monitorCommands: false };
+  get monitorCommands() { return this.options.monitorCommands; }
+  set monitorCommands(v: boolean) { this.options.monitorCommands = v; }
+}
+let rid = 1_000_000;
+/** A paired find start and success of 150 ms. */
+function emitFind(c: EventEmitter, coll: string, filter: object, db = 'app'): void {
+  const requestId = ++rid;
+  c.emit('commandStarted', { requestId, connectionId: 1, databaseName: db, commandName: 'find', command: { find: coll, filter } });
+  c.emit('commandSucceeded', { requestId, connectionId: 1, duration: 150, commandName: 'find', reply: { ok: 1, cursor: { id: 0, firstBatch: [] } } });
+}
+const warnings = (onError: { mock: { calls: unknown[][] } }) =>
+  onError.mock.calls.filter(([e]) => (e as Error).message === MONITORING_OFF_WARNING);
+/** Every item of every request body. */
+function sentItems(fetchImpl: { mock: { calls: unknown[][] } }): Record<string, unknown>[] {
+  return fetchImpl.mock.calls.flatMap((_, n) => (JSON.parse(bodyText(fetchImpl, n)) as { items: Record<string, unknown>[] }).items);
+}
+/** An unconnected mongoose connection with a database name, so its models are resolvable without a server. */
+function lateConnection() {
+  const conn = mongoose.createConnection();
+  (conn as unknown as { name: string }).name = 'latedb';
+  return conn;
+}
 
 /**
  * `_aggregator` is a test-only seam on the internal analyser (not part of
@@ -46,14 +77,17 @@ describe('init', () => {
     expect(a.installedModels).toBeGreaterThan(0);
   });
 
-  it('instruments models compiled AFTER init via the global plugin', () => {
-    const m = mongoose;
-    init({ apiKey: 'k', app: 'x', mongoose: m, fetchImpl: okFetch });
-    const schema = new mongoose.Schema({ a: String });
-    m.model(`AfterInit_${Date.now()}`, schema);
-    // The global plugin ran, so the install marker is on the schema.
-    expect(Object.getOwnPropertySymbols(schema).some((s) => String(s).includes('query-analyser')))
-      .toBe(true);
+  it('resolves a model registered after init()', async () => {
+    const c = fakeClient(); const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, mongoClient: c, fetchImpl });
+    // A find before the model exists builds the resolver's index first, so
+    // the later lookup has to rebuild on its miss.
+    emitFind(c, `other_${Date.now()}`, { a: 1 });
+    const M = lateConnection().model(`Late_${Date.now()}`, new mongoose.Schema({ a: Number }));
+    emitFind(c, M.collection.collectionName, { a: 1 }, M.db.name);
+    await a.flush();
+    const late = sentItems(fetchImpl).find((i) => i.collection === M.collection.collectionName);
+    expect(late).toMatchObject({ model: M.modelName, collection: M.collection.collectionName });
   });
 
   it('does nothing at all when disabled', () => {
@@ -260,85 +294,22 @@ describe('init', () => {
     expect(a2).toBe(a1);
   });
 
-  // Fix round 4, Critical 1: init()'s mongoose-instrumentation block reaches
-  // into internals (`mg.models`, `schema.pre`, kareem's shape) that are not
-  // guaranteed stable. A `models` getter that throws must never crash the
-  // host's boot file.
-  it('never throws when mongoose.models is a throwing getter, and still returns a usable Analyser', () => {
+  // Replaces "never throws when mongoose.models is a throwing getter": init()
+  // reaches mongoose only through `connections` now (model registry and
+  // client discovery). A getter that throws must never crash the boot file.
+  it('never throws when mongoose.connections is a throwing getter, and still returns a usable Analyser', async () => {
+    const fake = { get connections(): never { throw new Error('boom'); } };
     const onError = vi.fn();
-    const fakeMongoose = {
-      plugin: () => {},
-      get models(): never {
-        throw new Error('models getter boom');
-      },
-    };
     let a: ReturnType<typeof init> | undefined;
-    expect(() => {
-      a = init({ apiKey: 'k', app: 'x', mongoose: fakeMongoose as unknown as Parameters<typeof init>[0]['mongoose'], fetchImpl: okFetch, onError });
-    }).not.toThrow();
+    expect(() => { a = init({ apiKey: 'k', app: 'x', mongoose: fake, fetchImpl: okFetch, onError }); }).not.toThrow();
     expect(a).toBeDefined();
     expect(a!.installedModels).toBe(0);
-    expect(onError).toHaveBeenCalled();
-  });
-
-  // Fix round 4, Critical 1: one bad model's schema (throws in pre()) must
-  // not stop the other models in the same mongoose instance from being
-  // instrumented.
-  it('instruments the other models when one model schema throws during install', () => {
-    const onError = vi.fn();
-    function makeSchema(shouldThrow: boolean) {
-      return {
-        pre(_match: unknown, _fn: unknown) {
-          if (shouldThrow) throw new Error('schema.pre boom');
-          return this;
-        },
-        post(_match: unknown, _fn: unknown) {
-          return this;
-        },
-      };
-    }
-    const fakeMongoose = {
-      plugin: () => {},
-      models: {
-        First: { schema: makeSchema(false) },
-        Middle: { schema: makeSchema(true) },
-        Last: { schema: makeSchema(false) },
-      },
-    };
-    const a = init({
-      apiKey: 'k', app: 'x',
-      mongoose: fakeMongoose as unknown as Parameters<typeof init>[0]['mongoose'],
-      fetchImpl: okFetch, onError,
-    });
-    expect(a.installedModels).toBe(2);
-    expect(onError).toHaveBeenCalledTimes(1);
-    expect((onError.mock.calls[0]![0] as Error).message).toBe('schema.pre boom');
-  });
-
-  // Important 4: mongoose was resolved and has models, but the install loop
-  // instrumented none of them — a silent "the SDK does nothing" failure
-  // worth its own explicit warning, distinct from any per-model error.
-  it('warns once when mongoose is resolved but zero models end up instrumented', () => {
-    const onError = vi.fn();
-    function throwingSchema() {
-      return {
-        pre() { throw new Error('always throws'); },
-        post() { return this; },
-      };
-    }
-    const fakeMongoose = {
-      plugin: () => {},
-      models: { A: { schema: throwingSchema() }, B: { schema: throwingSchema() } },
-    };
-    const a = init({
-      apiKey: 'k', app: 'x',
-      mongoose: fakeMongoose as unknown as Parameters<typeof init>[0]['mongoose'],
-      fetchImpl: okFetch, onError,
-    });
-    expect(a.installedModels).toBe(0);
-    // Two per-model errors, plus one "zero models instrumented" summary.
-    expect(onError).toHaveBeenCalledTimes(3);
-    expect(onError.mock.calls.some((c) => (c[0] as Error).message.includes('no models were instrumented'))).toBe(true);
+    const fetchImpl = vi.fn(okFetch);
+    await a!.shutdown();
+    const b = init({ apiKey: 'k', app: 'x', mongoose: fake, fetchImpl });
+    seed(b);
+    await b.flush();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   // Important 3: calling the returned analyser's own shutdown() — the
@@ -391,6 +362,129 @@ const WIRE_ITEM_KEYS = [
   'signature', 'hash', 'model', 'operation', 'filterShape', 'sortKeys', 'stages',
   'count', 'totalMs', 'maxMs', 'lastMs', 'lastTs', 'hist', 'sample', 'source', 'collection',
 ];
+
+describe('driver layer', () => {
+  it('wraps connect of the resolved mongodb and of mongoose.mongo, and shutdown() restores it', async () => {
+    init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch });
+    expect(CONNECT_WRAP in mongoose.mongo.MongoClient.prototype).toBe(true);
+    expect(CONNECT_WRAP in (resolvePeer('mongodb') as typeof mongoose.mongo).MongoClient.prototype).toBe(true);
+    await shutdown();
+    expect(CONNECT_WRAP in mongoose.mongo.MongoClient.prototype).toBe(false);
+    expect(CONNECT_WRAP in (resolvePeer('mongodb') as typeof mongoose.mongo).MongoClient.prototype).toBe(false);
+  });
+
+  it('shutdown() clears the sink it set, and only its own', async () => {
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch });
+    expect(currentSink()).not.toBeNull();
+    await a.shutdown();
+    expect(currentSink()).toBeNull();
+  });
+
+  it('warns once, naming monitorCommands: true, for a mongoClient whose monitoring is off', () => {
+    const onError = vi.fn(); const c = new Fake4();
+    init({ apiKey: 'k', app: 'x', mongoose, mongoClient: [c, c], fetchImpl: okFetch, onError });
+    expect(onError.mock.calls.filter(([e]) => (e as Error).message === MONITORING_OFF_WARNING)).toHaveLength(1);
+    expect(MONITORING_OFF_WARNING).toContain('`monitorCommands: true`');
+    expect(MONITORING_OFF_WARNING).toContain('if this client was already connected');
+    // init() switched it on for any later connect.
+    expect(c.options.monitorCommands).toBe(true);
+    expect(c.listenerCount('commandStarted')).toBe(1);
+  });
+
+  it('does not warn for a mongoClient whose monitoring is on', () => {
+    const onError = vi.fn();
+    init({ apiKey: 'k', app: 'x', mongoose, mongoClient: fakeClient(), fetchImpl: okFetch, onError });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('instrument() on the same client on every invocation attaches once and warns at most once', async () => {
+    const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, onError });
+    const c = new Fake4();
+    for (let i = 0; i < 5; i++) instrument(c);
+    for (const ev of ['commandStarted', 'commandSucceeded', 'commandFailed']) expect(c.listenerCount(ev)).toBe(1);
+    expect(warnings(onError)).toHaveLength(1);
+    const coll = `serverless_${Date.now()}`;
+    emitFind(c, coll, { a: 1 });
+    await a.flush();
+    const items = sentItems(fetchImpl);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ collection: coll, count: 1 });
+  });
+
+  it('instrument() warns at most once per client even while its monitoring stays off', () => {
+    const onError = vi.fn();
+    init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError });
+    // A setter that never takes effect: monitorState stays 'off' every call.
+    class Stubborn extends EventEmitter {
+      options = { monitorCommands: false };
+      get monitorCommands() { return false; }
+      set monitorCommands(_v: boolean) { /* ignored */ }
+    }
+    const c = new Stubborn();
+    for (let i = 0; i < 5; i++) instrument(c);
+    expect(warnings(onError)).toHaveLength(1);
+    expect(c.listenerCount('commandSucceeded')).toBe(1);
+  });
+
+  it('instrument() captures a client from a driver copy the SDK cannot reach', async () => {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl });
+    const c = fakeClient(); // no prototype the SDK wrapped
+    instrument(c);
+    const coll = `unreached_${Date.now()}`;
+    emitFind(c, coll, { a: 1 });
+    await a.flush();
+    const items = sentItems(fetchImpl);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ model: coll, collection: coll });
+  });
+
+  it('a mongoClient from a driver copy the SDK cannot reach is captured', async () => {
+    const fetchImpl = vi.fn(okFetch);
+    const c = fakeClient();
+    const a = init({ apiKey: 'k', app: 'x', mongoose, mongoClient: c, fetchImpl });
+    const coll = `unreached_opt_${Date.now()}`;
+    emitFind(c, coll, { a: 1 });
+    await a.flush();
+    expect(sentItems(fetchImpl)).toHaveLength(1);
+    expect(sentItems(fetchImpl)[0]).toMatchObject({ model: coll, collection: coll });
+  });
+
+  it('instrument() before init() is picked up once init() runs', async () => {
+    const c = fakeClient();
+    instrument(c);
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl });
+    const coll = `early_${Date.now()}`;
+    emitFind(c, coll, { a: 1 });
+    await a.flush();
+    expect(sentItems(fetchImpl)).toHaveLength(1);
+    expect(c.listenerCount('commandSucceeded')).toBe(1);
+  });
+
+  it('instrument() before init() writes the monitoring-off warning to stderr', () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      instrument(new Fake4());
+      const lines = write.mock.calls.map(([t]) => String(t));
+      expect(lines.filter((l) => l.includes(MONITORING_OFF_WARNING))).toHaveLength(1);
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('instrument() never throws', () => {
+    init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError: () => { throw new Error('onError boom'); } });
+    const hostile = new Proxy({}, { get() { throw new Error('get boom'); }, getPrototypeOf() { throw new Error('proto boom'); } });
+    expect(() => instrument(hostile)).not.toThrow();
+    expect(() => instrument(null as unknown as object)).not.toThrow();
+    expect(() => instrument({ on() { throw new Error('on boom'); } })).not.toThrow();
+  });
+
+  it('the default export carries init, shutdown and instrument', () =>
+    expect(Object.keys(sdkDefault).sort()).toEqual(['init', 'instrument', 'shutdown']));
+});
 
 describe('encrypted samples', () => {
   const sigFor = (key: string) => buildSignature({ model: 'M', operation: 'find', filter: { [key]: 1 } });

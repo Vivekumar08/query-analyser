@@ -222,6 +222,9 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.4
+      mongodb:
+        specifier: ^6.20.0
+        version: 6.21.0
       mongodb-memory-server:
         specifier: ^10.1.2
         version: 10.4.3
