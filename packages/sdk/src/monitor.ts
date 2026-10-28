@@ -56,6 +56,7 @@ interface ClientState {
 
 interface EventEmitterLike {
   on(event: string, listener: (event: unknown) => void): unknown;
+  removeListener?(event: string, listener: (event: unknown) => void): unknown;
 }
 
 const states = new WeakMap<object, ClientState>();
@@ -111,13 +112,18 @@ function evictCursors(cursors: Map<string, OpenCursor>, now: number): void {
   evictOlderThan(cursors as Map<unknown, OpenCursor>, now - MAX_CURSOR_IDLE_MS, (c) => c.lastUsed);
 }
 
+/** Age bounds hold whatever the sink's state, so a start that never ends can't outlive 600 s. */
+function evictStale(state: ClientState, now: number): void {
+  evictOlderThan(state.inFlight, now - MAX_IN_FLIGHT_AGE_MS, (e) => e.startedAt);
+  evictCursors(state.cursors, now);
+}
+
 function onStarted(state: ClientState, ev: unknown): void {
   const s = sink;
   try {
-    if (!s || s.isDisabled() || !isRecord(ev)) return;
     const now = Date.now();
-    evictOlderThan(state.inFlight, now - MAX_IN_FLIGHT_AGE_MS, (e) => e.startedAt);
-    evictCursors(state.cursors, now);
+    evictStale(state, now);
+    if (!s || s.isDisabled() || !isRecord(ev)) return;
 
     const commandName = ev.commandName;
     const database = ev.databaseName;
@@ -163,6 +169,7 @@ function onStarted(state: ClientState, ev: unknown): void {
 function onEnded(state: ClientState, ev: unknown, failed: boolean): void {
   const s = sink;
   try {
+    evictStale(state, Date.now());
     if (!isRecord(ev)) return;
     // Take and drop the entry first, so the command reference never outlives its end.
     const entry = state.inFlight.get(ev.requestId);
@@ -214,7 +221,8 @@ function onEnded(state: ClientState, ev: unknown, failed: boolean): void {
       }
     }
 
-    if (live && lastShape) {
+    // A database-level aggregate has no collection; its getMore ($cmd.aggregate) could never match.
+    if (live && lastShape && statements[0]!.collection !== '') {
       const st = statements[0]!;
       const now = Date.now();
       evictCursors(state.cursors, now);
@@ -265,13 +273,33 @@ export function attachClient(client: object): boolean {
     if (!isRecord(client) || typeof (client as Partial<EventEmitterLike>).on !== 'function') return false;
     const tagged = client as Record<PropertyKey, unknown>;
     if (tagged[ATTACHED] === true) return false;
-    Object.defineProperty(client, ATTACHED, { value: true, enumerable: false, configurable: true });
     const state: ClientState = { inFlight: new Map(), cursors: new Map() };
-    states.set(client, state);
     const emitter = client as unknown as EventEmitterLike;
-    emitter.on('commandStarted', (ev) => onStarted(state, ev));
-    emitter.on('commandSucceeded', (ev) => onEnded(state, ev, false));
-    emitter.on('commandFailed', (ev) => onEnded(state, ev, true));
+    const listeners: [string, (ev: unknown) => void][] = [
+      ['commandStarted', (ev) => onStarted(state, ev)],
+      ['commandSucceeded', (ev) => onEnded(state, ev, false)],
+      ['commandFailed', (ev) => onEnded(state, ev, true)],
+    ];
+    const added: [string, (ev: unknown) => void][] = [];
+    try {
+      for (const pair of listeners) {
+        emitter.on(pair[0], pair[1]);
+        added.push(pair);
+      }
+    } catch (e) {
+      // Undo a partial attach so a retry doesn't stack listeners.
+      for (const [event, fn] of added) {
+        try {
+          emitter.removeListener?.(event, fn);
+        } catch {
+          // best effort
+        }
+      }
+      throw e;
+    }
+    // Mark only once all three are on, so a failed attach can be retried.
+    Object.defineProperty(client, ATTACHED, { value: true, enumerable: false, configurable: true });
+    states.set(client, state);
     return true;
   } catch (e) {
     report(sink, e);
