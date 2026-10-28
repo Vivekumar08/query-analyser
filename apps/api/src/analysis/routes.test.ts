@@ -169,6 +169,14 @@ describe('read APIs', () => {
     expect(res.json()).toHaveProperty('encryptedSample', null);
   });
 
+  it('detail returns source and collection, reading a null source as mongodb', async () => {
+    const { token, appId, sigHash, sigId } = await seed();
+    const get = () => app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/${sigHash}`, headers: as(token) });
+    expect(await get().then((r) => r.json())).toMatchObject({ source: 'mongodb', collection: null });
+    await app.prisma.querySignature.update({ where: { id: sigId }, data: { source: 'mongodb', collection: 'users' } });
+    expect(await get().then((r) => r.json())).toMatchObject({ source: 'mongodb', collection: 'users' });
+  });
+
   it('detail returns the stored encryptedSample, and the list does not', async () => {
     const { token, appId, sigHash, sigId } = await seed();
     const env = { v: 1, epk: 'ZXBr', iv: 'aXZpdml2aXZpdml2', ct: 'Y2lwaGVydGV4dA==' };

@@ -195,3 +195,29 @@ describe('writeBatch', () => {
     });
   });
 });
+
+describe('source and collection', () => {
+  const find = (appId: string) => prisma.querySignature.findFirstOrThrow({ where: { appId } });
+
+  it('stores both on a new signature', async () => {
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, payload([item({ source: 'mongodb', collection: 'orders' })]));
+    expect(await find(app.id)).toMatchObject({ source: 'mongodb', collection: 'orders' });
+  });
+
+  it('stores null for a 0.1/0.2 item without them', async () => {
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, payload([item()]));
+    expect(await find(app.id)).toMatchObject({ source: null, collection: null });
+  });
+
+  it('fills a null collection on an existing signature and never overwrites a stored one', async () => {
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, payload([item()]));
+    expect((await find(app.id)).collection).toBeNull();
+    await writeBatch(prisma, app.id, payload([item({ collection: 'orders', source: 'mongodb' })]));
+    expect(await find(app.id)).toMatchObject({ collection: 'orders', source: 'mongodb' });
+    await writeBatch(prisma, app.id, payload([item({ collection: 'other' })]));
+    expect(await find(app.id)).toMatchObject({ collection: 'orders', source: 'mongodb' });
+  });
+});

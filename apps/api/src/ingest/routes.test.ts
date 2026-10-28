@@ -50,6 +50,16 @@ describe('POST /v1/ingest', () => {
     expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(2);
   });
 
+  it('accepts a 0.3 batch with source and collection and stores them', async () => {
+    const { app: a, key } = await seedKey();
+    const body = payload(1);
+    body.items[0] = { ...body.items[0]!, source: 'mongodb', collection: 'orders' };
+    const res = await post(key, body);
+    expect(res.statusCode).toBe(202);
+    const row = await app.prisma.querySignature.findFirstOrThrow({ where: { appId: a.id } });
+    expect(row).toMatchObject({ source: 'mongodb', collection: 'orders' });
+  });
+
   it('accepts a gzip-encoded body', async () => {
     const { key } = await seedKey();
     const res = await post(key, gzipSync(JSON.stringify(payload(3))), { 'content-encoding': 'gzip' });
