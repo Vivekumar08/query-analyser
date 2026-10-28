@@ -26,6 +26,8 @@ interface Index {
   namespaces: Map<string, NamespaceEntry>;
   /** collection name -> names of base models registered under it, any db. */
   collections: Map<string, Set<string>>;
+  /** Models skipped because db.name or collectionName was unreadable (e.g. not connected yet). */
+  skipped: number;
 }
 
 function str(v: unknown): string | null {
@@ -82,6 +84,7 @@ function countModels(mongoose: object | null): number {
 function build(mongoose: object | null): Index {
   const namespaces = new Map<string, NamespaceEntry>();
   const collections = new Map<string, Set<string>>();
+  let skipped = 0;
   for (const c of listConnections(mongoose)) {
     for (const model of listModels(c)) {
       try {
@@ -96,7 +99,10 @@ function build(mongoose: object | null): Index {
         const name = str(m.modelName);
         const db = str(m.db?.name);
         const coll = str(m.collection?.collectionName);
-        if (name === null || db === null || coll === null) continue;
+        if (name === null || db === null || coll === null) {
+          skipped++;
+          continue;
+        }
         const nsKey = `${db}\u0000${coll}`;
         let entry = namespaces.get(nsKey);
         if (!entry) {
@@ -120,11 +126,12 @@ function build(mongoose: object | null): Index {
           names.add(name);
         }
       } catch {
+        skipped++;
         /* skip a model whose properties throw */
       }
     }
   }
-  return { namespaces, collections };
+  return { namespaces, collections, skipped };
 }
 
 export function createModelResolver(mongoose: object | null): ModelResolver {
@@ -166,7 +173,7 @@ export function createModelResolver(mongoose: object | null): ModelResolver {
         if (!index) rebuild();
         const hit = lookup(database, collection, filter);
         if (hit !== null) return hit;
-        if (countModels(mongoose) !== builtCount) {
+        if (countModels(mongoose) !== builtCount || (index !== null && index.skipped > 0)) {
           rebuild();
           const again = lookup(database, collection, filter);
           if (again !== null) return again;

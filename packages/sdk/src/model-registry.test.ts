@@ -138,14 +138,24 @@ describe('createModelResolver', () => {
 
   it('resolves real mongoose models, including discriminators', () => {
     const c = mongoose.createConnection();
-    // An unconnected connection has no db name yet; give it one the way connect() would.
-    (c as unknown as { name: string }).name = 'realdb';
     buildGoldenModels(c);
     const r = createModelResolver({ connections: [c] });
     const db = 'realdb';
+    expect(r.resolve(db, 'my_things', {})).toBe('my_things');
+    (c as unknown as { name: string }).name = db;
+    // The name only becomes readable after connect; simulate that without hand-setting it before the first resolve.
     expect(r.resolve(db, 'my_things', {})).toBe('GoldenThing');
     expect(r.resolve(db, 'goldenusers', {})).toBe('GoldenUser');
     expect(r.resolve(db, 'goldenanimals', { __t: 'GoldenDog' })).toBe('GoldenDog');
     expect(r.resolve(db, 'goldenanimals', {})).toBe('GoldenAnimal');
+  });
+
+  it('picks up models whose db name was unreadable at first (defined before connect)', () => {
+    let dbName: string | undefined;
+    const late = { modelName: 'Late', db: { get name() { return dbName; } }, collection: { collectionName: 'lates' } };
+    const r = createModelResolver(fakeMongoose([{ models: { Late: late } }]));
+    expect(r.resolve('app', 'lates', {})).toBe('lates');
+    dbName = 'app';
+    expect(r.resolve('app', 'lates', {})).toBe('Late');
   });
 });
