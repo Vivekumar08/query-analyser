@@ -142,6 +142,8 @@ function toWireItem(item: AggregatedItem): IngestItem {
     lastTs: item.lastTs,
     hist: item.hist,
     sample: item.sample,
+    source: 'mongodb',
+    collection: item.collection ?? item.model,
   };
 }
 

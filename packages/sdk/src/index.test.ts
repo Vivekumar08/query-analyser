@@ -389,7 +389,7 @@ function bodyText(fetchImpl: { mock: { calls: unknown[][] } }, n = 0): string {
 
 const WIRE_ITEM_KEYS = [
   'signature', 'hash', 'model', 'operation', 'filterShape', 'sortKeys', 'stages',
-  'count', 'totalMs', 'maxMs', 'lastMs', 'lastTs', 'hist', 'sample',
+  'count', 'totalMs', 'maxMs', 'lastMs', 'lastTs', 'hist', 'sample', 'source', 'collection',
 ];
 
 describe('encrypted samples', () => {
@@ -656,6 +656,7 @@ describe('chunked flushes', () => {
     expect(sent.items).toHaveLength(1);
     expect(Object.keys(sent.items[0]!)).toEqual(WIRE_ITEM_KEYS);
     expect(sent.items[0]).toMatchObject({ hash: sig.hash, signature: sig.signature, count: 1, maxMs: 150, sample: { filter: { a: '<number>' } } });
+    expect(sent.items[0]).toMatchObject({ source: 'mongodb', collection: 'Order' });
     expect(text).toBe(JSON.stringify(sent));
   });
 

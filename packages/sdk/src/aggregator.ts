@@ -1,6 +1,6 @@
 import type { IngestItem } from './types.js';
 import { HIST_SIZE } from '@query-analyser/contract/runtime';
-import { addToHist, newHist } from './histogram.js';
+import { addToHist, bucketIndex, newHist } from './histogram.js';
 import type { SignatureResult } from './signature.js';
 import { serializeSample } from './ejson.js';
 
@@ -14,6 +14,13 @@ export interface AggregatedItem extends IngestItem {
   sampleText?: string;
 }
 
+/** A handle on one counted occurrence, so a later getMore can extend it. */
+export interface Occurrence {
+  readonly hash: string;
+  readonly generation: number;
+  ms: number;
+}
+
 /**
  * In-memory fold of slow queries by signature. The only state the hot path
  * touches. `swap()` hands the window to the transport and starts a fresh one.
@@ -21,6 +28,7 @@ export interface AggregatedItem extends IngestItem {
 export class Aggregator {
   private buffer = new Map<string, AggregatedItem>();
   private droppedCount = 0;
+  private gen = 0;
 
   constructor(private readonly maxSignatures: number) {}
 
@@ -28,18 +36,23 @@ export class Aggregator {
     return this.buffer.size;
   }
 
+  /** Incremented on every swap(). */
+  get generation(): number {
+    return this.gen;
+  }
+
   /**
    * `rawSample` (the unredacted sample input, only when encryption is on) is
    * serialised here, synchronously and bounded, and only when this occurrence
    * becomes the slowest for its signature. The object itself is never kept.
    */
-  add(sig: SignatureResult, durationMs: number, sample: unknown, rawSample?: unknown): void {
+  add(sig: SignatureResult, durationMs: number, sample: unknown, rawSample?: unknown, collection?: string): Occurrence | null {
     let item = this.buffer.get(sig.hash);
 
     if (!item) {
       if (this.buffer.size >= this.maxSignatures) {
         this.droppedCount++;
-        return;
+        return null;
       }
       item = {
         signature: sig.signature,
@@ -56,6 +69,7 @@ export class Aggregator {
         lastTs: 0,
         hist: newHist(),
         sample: null,
+        collection: collection ?? sig.model,
       };
       this.buffer.set(sig.hash, item);
     }
@@ -70,6 +84,24 @@ export class Aggregator {
       item.sample = sample;   // keep the sample from the worst occurrence
       setSampleText(item, rawSample === undefined ? undefined : serializeSample(rawSample));
     }
+    return { hash: sig.hash, generation: this.gen, ms: durationMs };
+  }
+
+  /** Add `extraMs` to a counted occurrence. False once its window was swapped. */
+  extend(occ: Occurrence, extraMs: number): boolean {
+    if (occ.generation !== this.gen) return false;
+    const item = this.buffer.get(occ.hash);
+    if (!item) return false;
+    const from = bucketIndex(occ.ms);
+    const to = bucketIndex(occ.ms + extraMs);
+    if (from !== to) {
+      item.hist[from] = Math.max(0, (item.hist[from] ?? 0) - 1);
+      item.hist[to] = (item.hist[to] ?? 0) + 1;
+    }
+    item.totalMs += extraMs;
+    item.maxMs = Math.max(item.maxMs, occ.ms + extraMs);
+    occ.ms += extraMs;
+    return true;
   }
 
   /** Take the current window and reset. */
@@ -78,6 +110,7 @@ export class Aggregator {
     const dropped = this.droppedCount;
     this.buffer = new Map();
     this.droppedCount = 0;
+    this.gen++;
     return { items, dropped };
   }
 
