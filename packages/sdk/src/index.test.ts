@@ -94,6 +94,17 @@ describe('init', () => {
     const fetchImpl = vi.fn(okFetch);
     const a = init({ apiKey: 'k', app: 'x', enabled: false, mongoose, fetchImpl });
     expect(a.installedModels).toBe(0);
+    expect(currentSink()).toBeNull();
+    expect(CONNECT_WRAP in mongoose.mongo.MongoClient.prototype).toBe(false);
+    expect(CONNECT_WRAP in (resolvePeer('mongodb') as typeof mongoose.mongo).MongoClient.prototype).toBe(false);
+  });
+
+  it('a repeated init() while disabled does not watch the clients it is given', () => {
+    init({ apiKey: 'k', app: 'x', enabled: false, mongoose, fetchImpl: okFetch });
+    const c = new Fake4();
+    init({ apiKey: 'k', app: 'x', enabled: false, mongoose, mongoClient: c, fetchImpl: okFetch });
+    expect(c.listenerCount('commandStarted')).toBe(0);
+    expect(c.options.monitorCommands).toBe(false);
   });
 
   it('sends nothing when the window is empty', async () => {
@@ -480,6 +491,51 @@ describe('driver layer', () => {
     expect(() => instrument(hostile)).not.toThrow();
     expect(() => instrument(null as unknown as object)).not.toThrow();
     expect(() => instrument({ on() { throw new Error('on boom'); } })).not.toThrow();
+  });
+
+  it('a repeated init() still watches the clients it is given', async () => {
+    const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
+    const A = fakeClient();
+    const a = init({ apiKey: 'k', app: 'x', mongoose, mongoClient: A, fetchImpl, onError });
+    const B = new Fake4(); // created lazily, monitoring off
+    for (let i = 0; i < 3; i++) {
+      expect(init({ apiKey: 'k', app: 'x', mongoose, mongoClient: [B], fetchImpl, onError })).toBe(a);
+    }
+    for (const ev of ['commandStarted', 'commandSucceeded', 'commandFailed']) expect(B.listenerCount(ev)).toBe(1);
+    expect(B.options.monitorCommands).toBe(true);
+    expect(warnings(onError)).toHaveLength(1);
+    const coll = `repeat_${Date.now()}`;
+    emitFind(B, coll, { a: 1 });
+    await a.flush();
+    const items = sentItems(fetchImpl);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ collection: coll, count: 1 });
+  });
+
+  it('a client attached in one init() cycle is captured again after shutdown() and a new init()', async () => {
+    const c = fakeClient();
+    init({ apiKey: 'k', app: 'x', mongoose, mongoClient: c, fetchImpl: okFetch });
+    await shutdown();
+    const fetchImpl = vi.fn(okFetch);
+    const b = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl });
+    const coll = `cycle_${Date.now()}`;
+    emitFind(c, coll, { a: 1 });
+    await b.flush();
+    expect(sentItems(fetchImpl)).toHaveLength(1);
+    expect(c.listenerCount('commandSucceeded')).toBe(1);
+  });
+
+  it('a stale instance shutdown() leaves the newer sink and connect wraps in place', async () => {
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch });
+    await a.shutdown();
+    const b = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch });
+    const sinkB = currentSink();
+    expect(sinkB).not.toBeNull();
+    await a.shutdown();
+    expect(currentSink()).toBe(sinkB);
+    expect(CONNECT_WRAP in mongoose.mongo.MongoClient.prototype).toBe(true);
+    expect(CONNECT_WRAP in (resolvePeer('mongodb') as typeof mongoose.mongo).MongoClient.prototype).toBe(true);
+    expect(init({ apiKey: 'k', app: 'x' })).toBe(b);
   });
 
   it('the default export carries init, shutdown and instrument', () =>
