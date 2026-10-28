@@ -70,6 +70,24 @@ describe('monitor', () => {
     setSink(s);
   });
 
+  it('a failed attach can be retried and leaves no duplicate listeners', () => {
+    const e = new FakeClient();
+    const realOn = e.on.bind(e);
+    let calls = 0;
+    e.on = ((event: string, fn: (...a: unknown[]) => void) => {
+      calls++;
+      if (calls === 2) throw new Error('on-boom');
+      return realOn(event, fn);
+    }) as typeof e.on;
+    expect(attachClient(e)).toBe(false);
+    expect(clientStats(e)).toBeNull();
+    expect(attachClient(e)).toBe(true);
+    expect(e.listenerCount('commandStarted')).toBe(1);
+    expect(e.listenerCount('commandSucceeded')).toBe(1);
+    expect(e.listenerCount('commandFailed')).toBe(1);
+    expect(attachClient(e)).toBe(false);
+  });
+
   it('attaches once per client', () => {
     expect(attachClient(c)).toBe(true);
     expect(attachClient(c)).toBe(false);
@@ -235,6 +253,34 @@ describe('monitor', () => {
       expect(s.aggregator.swap().items[0]).toMatchObject({ count: 1, maxMs: 150, totalMs: 150 });
     });
 
+    it('a slow failed getMore still extends its occurrence and then forgets its cursor', () => {
+      run(c, 'find', { find: 'd', filter: {} }, { duration: 150, reply: liveReply('96') });
+      run(c, 'getMore', { getMore: { toString: () => '96' }, collection: 'd' }, { fail: true, duration: 200 });
+      expect(clientStats(c)!.cursors).toBe(0);
+      expect(s.aggregator.swap().items[0]).toMatchObject({ count: 1, totalMs: 350, maxMs: 350 });
+    });
+
+    it('evicts a stale start with no sink: a later start drops it after 600 s', () => {
+      vi.useFakeTimers();
+      c.emit('commandStarted', { requestId: 4242, connectionId: 1, databaseName: 'app', commandName: 'find', command: { find: 'o', filter: {}, lsid: { id: 'secret' } } });
+      run(c, 'find', { find: 'd', filter: {} }, { duration: 5, reply: liveReply('97') });
+      expect(clientStats(c)).toEqual({ inFlight: 1, cursors: 1 });
+      setSink(null);
+      vi.advanceTimersByTime(MAX_IN_FLIGHT_AGE_MS + 1);
+      c.emit('commandStarted', { requestId: 4243, connectionId: 1, databaseName: 'app', commandName: 'find', command: { find: 'o', filter: {} } });
+      expect(clientStats(c)).toEqual({ inFlight: 0, cursors: 0 });
+    });
+
+    it('evicts a stale start while disabled: a later end drops it after 600 s', () => {
+      vi.useFakeTimers();
+      c.emit('commandStarted', { requestId: 4244, connectionId: 1, databaseName: 'app', commandName: 'find', command: { find: 'o', filter: {} } });
+      run(c, 'find', { find: 'd', filter: {} }, { duration: 5, reply: liveReply('98') });
+      setSink(sink({ isDisabled: () => true }));
+      vi.advanceTimersByTime(MAX_IN_FLIGHT_AGE_MS + 1);
+      c.emit('commandSucceeded', { requestId: 99_999, connectionId: 1, duration: 1, commandName: 'find', reply: { ok: 1 } });
+      expect(clientStats(c)).toEqual({ inFlight: 0, cursors: 0 });
+    });
+
     it('forgets a cursor when its getMore fails', () => {
       run(c, 'find', { find: 'd', filter: {} }, { reply: liveReply('91') });
       run(c, 'getMore', { getMore: { toString: () => '91' }, collection: 'd' }, { fail: true, duration: 5 });
@@ -251,6 +297,11 @@ describe('monitor', () => {
       run(c, 'find', { find: 'd', filter: {} }, { reply: { cursor: { id: 0, firstBatch: [] } } });
       run(c, 'find', { find: 'd', filter: {} }, { reply: { ok: 1 } });
       run(c, 'find', { find: 'd', filter: {} }, { fail: true });
+      expect(clientStats(c)!.cursors).toBe(0);
+    });
+
+    it('does not keep a cursor for a database-level aggregate', () => {
+      run(c, 'aggregate', { aggregate: 1, pipeline: [{ $documents: [{ a: 1 }] }] }, { duration: 5, reply: liveReply('95') });
       expect(clientStats(c)!.cursors).toBe(0);
     });
 
