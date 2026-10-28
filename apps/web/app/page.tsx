@@ -44,7 +44,7 @@ export default function Page() {
         {/* Hero */}
         <section className="grid grid-cols-1 items-center gap-12 pt-10 pb-6 md:grid-cols-[1.15fr_1fr] md:pt-16 [&>*]:min-w-0">
           <div>
-            <Eyebrow>For MongoDB · mongoose 8</Eyebrow>
+            <Eyebrow>For MongoDB · Mongoose 6–9 · Node.js driver 4–7</Eyebrow>
             <h1 className="mt-4 text-[44px] leading-[1.03] font-semibold tracking-[-0.025em] sm:text-[56px]">
               Your slowest queries,
               <br />

@@ -154,10 +154,14 @@ export function InstallStep({
         <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
         <p><strong>This key is shown once.</strong> Copy it now — we can&apos;t show it again.</p>
       </div>
+      <p className="text-sm font-medium">Mongoose</p>
       <pre className="overflow-x-auto rounded-xl border bg-white/70 p-4 font-mono text-sm"><code>{s.install}{'\n\n'}{s.code}</code></pre>
+      <p className="text-sm font-medium">MongoDB driver</p>
+      <pre className="overflow-x-auto rounded-xl border bg-white/70 p-4 font-mono text-sm"><code>{s.driverCode}</code></pre>
       <p className="text-xs text-muted-foreground">Prefer an environment variable in production: <code className="font-mono">apiKey: process.env.QA_KEY</code>.</p>
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => copy(`${s.install}\n\n${s.code}`, 'Snippet')}><Copy className="size-4" /> Copy snippet</Button>
+        <Button variant="outline" onClick={() => copy(`${s.install}\n\n${s.driverCode}`, 'Driver snippet')}><Copy className="size-4" /> Copy driver snippet</Button>
         <Button variant="outline" onClick={() => copy(key, 'Key')}><Copy className="size-4" /> Copy key</Button>
       </div>
 
@@ -189,7 +193,8 @@ export function InstallStep({
           <CardContent>
             <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
               <li>The key is set in the running process (<code className="font-mono">QA_KEY</code> or inline).</li>
-              <li>Your app uses mongoose 8.</li>
+              <li>Your app uses Mongoose 6–9 or the MongoDB Node.js driver 4–7 (Mongoose 5 needs monitorCommands: true).</li>
+              <li>init() runs before your app connects to MongoDB, or the connection sets monitorCommands: true.</li>
               <li>Only queries taking 100&nbsp;ms or more are reported — trigger a slow one.</li>
               <li>Batches ship every 10 seconds.</li>
             </ul>
