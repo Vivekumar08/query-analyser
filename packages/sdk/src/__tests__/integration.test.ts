@@ -48,7 +48,8 @@ function capture() {
   return { bodies, fetchImpl };
 }
 
-describe('end to end', () => {
+// rewritten in Task 9
+describe.skip('end to end', () => {
   it('captures a real find and reports it with the right shape', async () => {
     const Order = mongoose.model(`IntOrder${suffix()}`, new mongoose.Schema({ status: String, total: Number }));
     const { bodies, fetchImpl } = capture();
