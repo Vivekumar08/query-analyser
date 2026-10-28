@@ -2,7 +2,9 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest
 import { gunzipSync } from 'node:zlib';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
+import { MongoClient } from 'mongodb';
 import { init, shutdown } from '../index.js';
+import { MONITORING_OFF_WARNING } from '../drivers.js';
 // Critical 2 test-only import: the contract is a dev dependency of the SDK
 // (never a runtime one — see types.ts for why SDK source never imports it),
 // used here purely to prove the SDK's real serialised output parses under
@@ -18,7 +20,9 @@ const suffix = () => `_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 
 beforeAll(async () => {
   mongod = await MongoMemoryServer.create();
-  await mongoose.connect(mongod.getUri());
+  // The documented path for an app that connects before init(): switch
+  // command monitoring on in the connect options.
+  await mongoose.connect(mongod.getUri(), { monitorCommands: true });
 }, 60_000);
 
 afterAll(async () => {
@@ -48,8 +52,14 @@ function capture() {
   return { bodies, fetchImpl };
 }
 
-// rewritten in Task 9
-describe.skip('end to end', () => {
+type SentItem = Record<string, unknown> & {
+  model: string; collection: string; operation: string; count: number; filterShape: unknown;
+};
+function itemsOf(bodies: string[]): SentItem[] {
+  return bodies.flatMap((b) => JSON.parse(b).items as SentItem[]);
+}
+
+describe('end to end', () => {
   it('captures a real find and reports it with the right shape', async () => {
     const Order = mongoose.model(`IntOrder${suffix()}`, new mongoose.Schema({ status: String, total: Number }));
     const { bodies, fetchImpl } = capture();
@@ -322,5 +332,264 @@ describe.skip('end to end', () => {
         at: { $gte: { $date: '2026-01-01T00:00:00.000Z' } },
       },
     });
+  });
+
+  // ---- Driver command monitoring (Task 9) ----
+
+  it('zero-setup: a connection opened after init() is captured with no options', async () => {
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+    const conn = await mongoose.createConnection(mongod.getUri()).asPromise();
+    try {
+      const Zero = conn.model(`IntZero${suffix()}`, new mongoose.Schema({ a: String }));
+      await Zero.find({ a: 'x' }).exec();
+      await a.flush();
+
+      const items = itemsOf(bodies);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        model: Zero.modelName,
+        collection: Zero.collection.collectionName,
+        operation: 'find',
+        source: 'mongodb',
+      });
+    } finally {
+      await conn.close();
+    }
+  });
+
+  it('warns once, naming monitorCommands: true, for a connection opened before init() without it, and captures nothing from it', async () => {
+    const conn = await mongoose.createConnection(mongod.getUri()).asPromise();
+    try {
+      const Early = conn.model(`IntOffEarly${suffix()}`, new mongoose.Schema({ a: String }));
+      const { bodies, fetchImpl } = capture();
+      const onError = vi.fn();
+      const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl, onError });
+
+      const messages = onError.mock.calls.map(([e]) => (e as Error).message);
+      expect(messages.filter((m) => m === MONITORING_OFF_WARNING)).toHaveLength(1);
+      expect(MONITORING_OFF_WARNING).toContain('monitorCommands: true');
+
+      await Early.find({ a: 'x' }).exec();
+      await a.flush();
+      expect(bodies).toHaveLength(0);
+    } finally {
+      await conn.close();
+    }
+  });
+
+  it('captures the raw driver: a MongoClient from the app\'s own mongodb is captured under the collection name', async () => {
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+    const client = new MongoClient(mongod.getUri());
+    await client.connect();
+    try {
+      await client.db('rawdb').collection('orders').find({ status: 'x' }).toArray();
+      await a.flush();
+
+      const items = itemsOf(bodies);
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({
+        model: 'orders',
+        collection: 'orders',
+        source: 'mongodb',
+        operation: 'find',
+        filterShape: [{ key: 'status', op: 'eq' }],
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('useDb() models resolve through otherDbs even when another db uses the same collection name', async () => {
+    const s = suffix();
+    const IntA = mongoose.model(`IntA${s}`, new mongoose.Schema({ a: String }, { collection: 'shared_x' }));
+    const tenant = mongoose.connection.useDb(`tenant_x${s}`);
+    const IntB = tenant.model(`IntB${s}`, new mongoose.Schema({ a: String }, { collection: 'shared_x' }));
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+
+    await IntA.find({ a: 'x' }).exec();
+    await IntB.find({ a: 'y' }).exec();
+    await a.flush();
+
+    const items = itemsOf(bodies);
+    expect(items.map((i) => i.model).sort()).toEqual([IntA.modelName, IntB.modelName].sort());
+    expect(items.every((i) => i.collection === 'shared_x')).toBe(true);
+  });
+
+  it('two connections to different dbs resolve each model on the same collection name', async () => {
+    const s = suffix();
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+    const connA = await mongoose.createConnection(mongod.getUri(), { dbName: `dba${s}` }).asPromise();
+    const connB = await mongoose.createConnection(mongod.getUri(), { dbName: `dbb${s}` }).asPromise();
+    try {
+      const IntOrderA = connA.model(`IntOrderA${s}`, new mongoose.Schema({ status: String }, { collection: 'orders_shared' }));
+      const IntOrderB = connB.model(`IntOrderB${s}`, new mongoose.Schema({ status: String }, { collection: 'orders_shared' }));
+
+      await IntOrderA.find({ status: 'a' }).exec();
+      await IntOrderB.find({ status: 'b' }).exec();
+      await a.flush();
+
+      const items = itemsOf(bodies);
+      expect(items.map((i) => i.model).sort()).toEqual([IntOrderA.modelName, IntOrderB.modelName].sort());
+      expect(items.every((i) => i.collection === 'orders_shared')).toBe(true);
+    } finally {
+      await connA.close();
+      await connB.close();
+    }
+  });
+
+  it('models defined before connect resolve to their names after connect, discriminators with a custom key included', async () => {
+    const s = suffix();
+    const { bodies, fetchImpl } = capture();
+    // Models and init() before the connection opens: the registry cannot
+    // read the db name yet, and must rebuild once it can.
+    const conn = mongoose.createConnection();
+    const Pre = conn.model(`IntPre${s}`, new mongoose.Schema({ a: String }));
+    const Shape = conn.model(`IntShape${s}`, new mongoose.Schema({ name: String }, { discriminatorKey: 'kind' }));
+    const Circle = Shape.discriminator(`IntCircle${s}`, new mongoose.Schema({ r: Number }));
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+    // A query on the already-open default connection builds the resolver's
+    // index now, while these models' db name is still unreadable — the case
+    // the registry must recover from once the connection opens.
+    const Probe = mongoose.model(`IntPreProbe${s}`, new mongoose.Schema({ a: String }));
+    await Probe.find({ a: 'p' }).exec();
+    await conn.openUri(mongod.getUri(), { dbName: `predb${s}` });
+    try {
+      await Pre.find({ a: 'x' }).exec();
+      await Circle.find({ name: 'c' }).exec();
+      await Shape.find({ name: 's' }).exec();
+      await a.flush();
+
+      const items = itemsOf(bodies);
+      const byModel = (m: string) => items.filter((i) => i.model === m);
+      expect(byModel(Pre.modelName)).toHaveLength(1);
+      expect(byModel(Circle.modelName)).toHaveLength(1);
+      expect(byModel(Circle.modelName)[0]!.filterShape).toEqual([{ key: 'kind', op: 'eq' }, { key: 'name', op: 'eq' }]);
+      expect(byModel(Shape.modelName)).toHaveLength(1);
+      expect(byModel(Probe.modelName)).toHaveLength(1);
+      expect(items).toHaveLength(4);
+    } finally {
+      await conn.close();
+    }
+  });
+
+  it('a cursor read in batches is one find occurrence, with no getMore item', async () => {
+    const Many = mongoose.model(`IntMany${suffix()}`, new mongoose.Schema({ n: Number }));
+    await Many.insertMany(Array.from({ length: 300 }, (_, n) => ({ n })));
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+
+    const docs = await Many.collection.find({}).batchSize(10).toArray();
+    expect(docs).toHaveLength(300);
+    await a.flush();
+
+    const items = itemsOf(bodies);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ model: Many.modelName, operation: 'find', count: 1 });
+    expect(items.some((i) => i.operation === 'getMore')).toBe(false);
+  });
+
+  it('a failed command at the threshold is counted and still rejects in the app', async () => {
+    const Uniq = mongoose.model(`IntUniq${suffix()}`, new mongoose.Schema({ email: { type: String, unique: true } }));
+    await Uniq.init();
+    await Uniq.create({ email: 'dup@x.test' });
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl, onError: () => {} });
+
+    await expect(Uniq.collection.insertOne({ email: 'dup@x.test' })).rejects.toMatchObject({ code: 11000 });
+    await a.flush();
+
+    const insert = itemsOf(bodies).find((i) => i.model === Uniq.modelName && i.operation === 'insert');
+    expect(insert).toBeDefined();
+    expect(insert!.count).toBeGreaterThanOrEqual(1);
+  });
+
+  it('captures insert, save(), collection bulkWrite statements and Model.collection queries', async () => {
+    const Doc = mongoose.model(`IntDoc${suffix()}`, new mongoose.Schema({ a: Number, b: String }));
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+    const step = async (fn: () => Promise<unknown>) => {
+      bodies.length = 0;
+      await fn();
+      await a.flush();
+      return itemsOf(bodies).filter((i) => i.model === Doc.modelName);
+    };
+
+    const doc = await Doc.create({ a: 1, b: 'x' });
+    await a.flush();
+    expect(itemsOf(bodies).map((i) => i.operation)).toEqual(['insert']);
+
+    const saved = await step(async () => { doc.b = 'y'; await doc.save(); });
+    expect(saved.map((i) => i.operation)).toEqual(['updateOne']);
+    expect(saved[0]!.filterShape).toEqual([{ key: '_id', op: 'eq' }]);
+
+    const bulk = await step(() => Doc.collection.bulkWrite([
+      { insertOne: { document: { a: 2 } } },
+      { updateOne: { filter: { a: 2 }, update: { $set: { b: 'z' } } } },
+      { deleteMany: { filter: { a: { $gt: 100 } } } },
+    ]));
+    expect(bulk.map((i) => i.operation).sort()).toEqual(['deleteMany', 'insert', 'updateOne']);
+
+    const raw = await step(() => Doc.collection.find({ a: 1 }).toArray());
+    expect(raw).toHaveLength(1);
+    expect(raw[0]).toMatchObject({ operation: 'find', filterShape: [{ key: 'a', op: 'eq' }] });
+  });
+
+  it('never puts a queried value in the payload, for every captured command type', async () => {
+    const s = suffix();
+    const Vault = mongoose.model(`IntVault${s}`, new mongoose.Schema({ email: String, pin: Number, note: String }));
+    const Other = mongoose.model(`IntVaultOther${s}`, new mongoose.Schema({ owner: String, memo: String }));
+    const { bodies, fetchImpl } = capture();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl });
+
+    const secrets: string[] = [];
+    const secret = (label: string) => {
+      const v = `zz-${label}-${Math.floor(Math.random() * 1e9)}-secret`;
+      secrets.push(v);
+      return v;
+    };
+
+    await Vault.find({ email: secret('find') }).exec();
+    await Vault.findOne({ email: secret('findOne') }).exec();
+    await Vault.countDocuments({ email: secret('count') }).exec();
+    await Vault.distinct('note', { email: secret('distinct') }).exec();
+    await Vault.updateOne({ email: secret('u1f') }, { $set: { note: secret('u1u') } }).exec();
+    await Vault.updateMany({ email: secret('umf') }, { $set: { note: secret('umu') } }).exec();
+    await Vault.replaceOne({ email: secret('rf') }, { email: secret('rr'), note: secret('rn') }).exec();
+    await Vault.deleteOne({ email: secret('d1') }).exec();
+    await Vault.deleteMany({ email: secret('dm') }).exec();
+    await Vault.findOneAndUpdate({ email: secret('fouf') }, { $set: { note: secret('fouu') } }).exec();
+    await Vault.findOneAndDelete({ email: secret('fodf') }).exec();
+    await Vault.findOneAndReplace({ email: secret('forf') }, { email: secret('forr') }).exec();
+    await Vault.aggregate([
+      { $match: { email: secret('aggm') } },
+      { $lookup: { from: Other.collection.collectionName, as: 'o', pipeline: [{ $match: { memo: secret('aggl') } }] } },
+    ]);
+    await Vault.create({ email: secret('ins1'), note: secret('ins1n') });
+    await Vault.insertMany([{ email: secret('insm1') }, { email: secret('insm2') }]);
+    await Vault.bulkWrite([
+      { insertOne: { document: { email: secret('bwi') } } },
+      { updateOne: { filter: { email: secret('bwuf') }, update: { $set: { note: secret('bwuu') } } } },
+      { deleteMany: { filter: { email: secret('bwd') } } },
+    ]);
+    await a.flush();
+
+    expect(bodies.length).toBeGreaterThanOrEqual(1);
+    const body = bodies.join('');
+    for (const v of secrets) expect(body, v).not.toContain(v);
+    for (const banned of ['lsid', '$clusterTime', '"$db"', 'firstBatch']) expect(body, banned).not.toContain(banned);
+    // Key names stay (the $lookup sub-pipeline's own keys are summarised as
+    // "<object>" past redact's depth, exactly as in 0.2).
+    for (const key of ['email', 'note', '$match', '$lookup']) expect(body, key).toContain(key);
+    for (const b of bodies) expect(() => ingestPayloadSchema.parse(JSON.parse(b))).not.toThrow();
+
+    const ops = new Set(itemsOf(bodies).map((i) => i.operation));
+    for (const op of ['find', 'findOne', 'countDocuments', 'distinct', 'updateOne', 'updateMany', 'replaceOne',
+      'deleteOne', 'deleteMany', 'findOneAndUpdate', 'findOneAndDelete', 'findOneAndReplace', 'aggregate', 'insert']) {
+      expect(ops.has(op), op).toBe(true);
+    }
   });
 });
