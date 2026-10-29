@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import type { MongoMemoryServer } from 'mongodb-memory-server';
 import { ingestPayloadSchema } from '@query-analyser/contract';
 import { init, shutdown } from '../../sdk/src/index.js';
-import { MONGOOSES, capture, startMongo, suffix } from './harness.js';
+import { MONGOOSES, bundledDriver, capture, startMongo, suffix } from './harness.js';
 
 /**
  * Every Mongoose major (6–9) on a real mongod, each on the driver it
@@ -21,7 +21,7 @@ afterAll(async () => {
   await mongod.stop();
 });
 
-describe.each(MONGOOSES)('mongoose $major', ({ major, mod }) => {
+describe.each(MONGOOSES)('mongoose $major', ({ major, alias, mod }) => {
   afterEach(async () => {
     await mod.disconnect();
     await shutdown();
@@ -36,6 +36,11 @@ describe.each(MONGOOSES)('mongoose $major', ({ major, mod }) => {
     await mod.connect(uri, { dbName: `compat_m${major}` });
     return { ...cap, a };
   }
+
+  it(`loads mongoose ${major} on the driver it bundles (${major - 2})`, () => {
+    expect(mod.version.startsWith(`${major}.`), mod.version).toBe(true);
+    expect(bundledDriver(alias, mod)).toEqual({ major: major - 2, same: true });
+  });
 
   it('zero-setup: init() before connect() captures Model queries under the model name', async () => {
     const { a, items } = await setup();

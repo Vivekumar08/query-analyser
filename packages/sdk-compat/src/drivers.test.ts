@@ -3,7 +3,7 @@ import type { MongoMemoryServer } from 'mongodb-memory-server';
 import { ingestPayloadSchema } from '@query-analyser/contract';
 import { init, instrument, shutdown } from '../../sdk/src/index.js';
 import { installConnectWrap, MONITORING_OFF_WARNING } from '../../sdk/src/drivers.js';
-import { DRIVERS, capture, startMongo, suffix } from './harness.js';
+import { DRIVERS, capture, loadedDriver, startMongo, suffix } from './harness.js';
 
 /**
  * Every `mongodb` driver major (4–7) on a real mongod. Each test calls
@@ -11,7 +11,7 @@ import { DRIVERS, capture, startMongo, suffix } from './harness.js';
  * copy is not the `mongodb` init() resolves, so its prototype is wrapped
  * here exactly as init() wraps the resolved one.
  */
-describe.each(DRIVERS)('mongodb $major', ({ major, mod }) => {
+describe.each(DRIVERS)('mongodb $major', ({ major, alias, mod }) => {
   let mongod: MongoMemoryServer;
   let uri: string;
   const clients: InstanceType<typeof mod.MongoClient>[] = [];
@@ -42,6 +42,10 @@ describe.each(DRIVERS)('mongodb $major', ({ major, mod }) => {
   }
   const warnings = (onError: ReturnType<typeof vi.fn>) =>
     onError.mock.calls.map(([e]) => (e as Error).message).filter((m) => m === MONITORING_OFF_WARNING);
+
+  it(`loads driver ${major}`, () => {
+    expect(loadedDriver(alias, mod)).toEqual({ major, same: true });
+  });
 
   it('captures every command in the table under 0.2-style names', async () => {
     const { a, items } = setup();
