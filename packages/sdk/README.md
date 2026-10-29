@@ -52,7 +52,9 @@ query-analyser: command monitoring is off for a MongoClient, so if this client w
 ```
 
 Do what it says: pass `monitorCommands: true` in the connect options, or call
-`init()` before connecting.
+`init()` before connecting. For a client that was already connected when the SDK
+first saw it, the warning can come after its first few commands instead of
+straight away.
 
 ## Supported versions
 
@@ -69,8 +71,12 @@ Do what it says: pass `monitorCommands: true` in the connect options, or call
   once if it is missing).
 - Mongoose 9: 0.2 threw `TypeError: next is not a function` into app code. 0.3
   does not.
-- Query hashes for the same query shape are unchanged between 0.2 and 0.3 (a
-  35-case golden test proves it), so your history continues.
+- All 35 tested Mongoose 8 query shapes keep their 0.2 hash, filter shape and
+  sample (a golden test checks each one), so their history continues.
+  Discriminator aggregates are still named after the discriminator model, as
+  in 0.2. One known exception, by design: when two base models (not
+  discriminators) share one collection, every query on it is named after the
+  first one registered.
 - 0.3 measures database time. 0.2 also counted time spent in the app (casting,
   hydration, pool waits, `bufferCommands`), so latencies for the same shape can
   drop at the upgrade. Durations are whole milliseconds.
