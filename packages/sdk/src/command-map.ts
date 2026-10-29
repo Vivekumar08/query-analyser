@@ -18,6 +18,11 @@ export interface MappedStatement {
   pipeline?: unknown[];
   /** Exactly the object 0.2 handed to redact(); null for insert. */
   sampleInput: Record<string, unknown> | null;
+  /**
+   * aggregate only: the object Mongoose writes a discriminator key into, used
+   * to resolve the model name and nothing else (never in the signature or sample).
+   */
+  modelFilter?: Record<string, unknown>;
 }
 
 export const CAPTURED_COMMANDS: ReadonlySet<string> = new Set([
@@ -108,6 +113,24 @@ function updateStatement(
   return stmt(database, collection, operation, { filter, sort }, sample({ filter, update, sort }));
 }
 
+/**
+ * Where Mongoose's prepareDiscriminatorPipeline puts the discriminator key
+ * (before the aggregate hooks run, so 0.2 saw it too): the first stage's
+ * `$match`, a first `$geoNear`'s `query`, or the `$match` after a first `$search`.
+ */
+function discriminatorFilterOf(pipeline: unknown[] | undefined): Record<string, unknown> | undefined {
+  if (!pipeline) return undefined;
+  const first = pipeline[0];
+  if (!isRecord(first)) return undefined;
+  if (isRecord(first.$match)) return first.$match;
+  if (isRecord(first.$geoNear)) return isRecord(first.$geoNear.query) ? first.$geoNear.query : undefined;
+  if (first.$search !== undefined) {
+    const second = pipeline[1];
+    return isRecord(second) && isRecord(second.$match) ? second.$match : undefined;
+  }
+  return undefined;
+}
+
 function collectionName(v: unknown): string {
   return typeof v === 'string' && v.length > 0 ? v : '';
 }
@@ -135,7 +158,10 @@ export function mapCommand(
           return [stmt(database, collection, 'countDocuments', { filter }, sample({ filter }))];
         }
         const p = Array.isArray(pipeline) ? pipeline : undefined;
-        return [stmt(database, collection, 'aggregate', { pipeline: p }, sample({ pipeline: p }))];
+        const s = stmt(database, collection, 'aggregate', { pipeline: p }, sample({ pipeline: p }));
+        const modelFilter = discriminatorFilterOf(p);
+        if (modelFilter !== undefined) s.modelFilter = modelFilter;
+        return [s];
       }
       case 'update': {
         const collection = collectionName(command.update);

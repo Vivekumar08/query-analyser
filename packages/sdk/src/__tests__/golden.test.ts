@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { init, shutdown, type Analyser } from '../index.js';
+import { buildSignature } from '../signature.js';
 import { GOLDEN_CASES, GOLDEN_FIELDS, buildGoldenModels, seedGolden, type GoldenIds, type GoldenModels } from './golden-cases.js';
 
 // Recorded from SDK 0.2 (mongoose middleware) in Task 1. Never edited to make
@@ -66,6 +67,22 @@ describe("all 35 mongoose 8 golden cases keep 0.2's exact hash, shape and sample
     await analyser.flush();
     const items = bodies.flatMap((b) => JSON.parse(b).items as Record<string, unknown>[]);
     expect(items.map(pick(GOLDEN_FIELDS))).toEqual([fixture.cases[name]]);
+  });
+
+  // Not in the 0.2 fixture (0.2 is gone, so it can't be recorded). 0.2 named
+  // an aggregate after `_model.modelName`, the discriminator, and hashed the
+  // pipeline as sent (Mongoose adds the discriminator key before the hooks run).
+  it.each([
+    ['merged into the first $match', [{ $match: { name: 'rex' } }], [{ $match: { name: 'rex', __t: 'GoldenDog' } }]],
+    ['prepended as a $match', [{ $group: { _id: '$name' } }], [{ $match: { __t: 'GoldenDog' } }, { $group: { _id: '$name' } }]],
+  ])('a discriminator aggregate keeps its 0.2 model name and hash (key %s)', async (_label, pipeline, sent) => {
+    bodies.length = 0;
+    await models.Dog.aggregate(pipeline as mongoose.PipelineStage[]).exec();
+    await analyser.flush();
+    const items = bodies.flatMap((b) => JSON.parse(b).items as Record<string, unknown>[]);
+    const expected = buildSignature({ model: 'GoldenDog', operation: 'aggregate', pipeline: sent });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ model: 'GoldenDog', operation: 'aggregate', hash: expected.hash, signature: expected.signature });
   });
 
   it('the fixture has all 35 cases', () => {

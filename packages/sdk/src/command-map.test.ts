@@ -47,7 +47,7 @@ describe('mapCommand', () => {
     const pipeline = [{ $match: { a: 1 } }, { $group: { _id: null, n: { $sum: 1 } } }];
     expect(isCountDocumentsPipeline(pipeline)).toBe(false);
     expect(mapCommand('aggregate', 'app', { aggregate: 'users', pipeline })).toEqual([
-      { database: 'app', collection: 'users', operation: 'aggregate', pipeline, sampleInput: { pipeline } },
+      { database: 'app', collection: 'users', operation: 'aggregate', pipeline, sampleInput: { pipeline }, modelFilter: { a: 1 } },
     ]);
   });
 
@@ -55,6 +55,20 @@ describe('mapCommand', () => {
     expect(isCountDocumentsPipeline([{ $match: {} }, { $limit: 1 }, { $skip: 1 }, GROUP])).toBe(false);
     expect(isCountDocumentsPipeline([{ $match: {}, $x: 1 }, GROUP])).toBe(false);
     expect(isCountDocumentsPipeline('x')).toBe(false);
+  });
+
+  it('an aggregate carries the stage Mongoose puts the discriminator key in as modelFilter, and nothing else changes', () => {
+    const pipeline = [{ $match: { name: 'rex', __t: 'Dog' } }, { $sort: { name: 1 } }];
+    expect(mapCommand('aggregate', 'app', { aggregate: 'animals', pipeline })).toEqual([
+      { database: 'app', collection: 'animals', operation: 'aggregate', pipeline, sampleInput: { pipeline },
+        modelFilter: { name: 'rex', __t: 'Dog' } },
+    ]);
+    const near = { near: { type: 'Point', coordinates: [0, 0] }, distanceField: 'd', query: { __t: 'Dog' } };
+    expect(mapCommand('aggregate', 'app', { aggregate: 'animals', pipeline: [{ $geoNear: near }] })[0]!.modelFilter)
+      .toEqual({ __t: 'Dog' });
+    expect(mapCommand('aggregate', 'app', { aggregate: 'animals', pipeline: [{ $search: {} }, { $match: { __t: 'Dog' } }] })[0]!.modelFilter)
+      .toEqual({ __t: 'Dog' });
+    expect(mapCommand('aggregate', 'app', { aggregate: 'animals', pipeline: [{ $group: { _id: '$a' } }] })[0]).not.toHaveProperty('modelFilter');
   });
 
   it('aggregate: 1 gives an empty collection', () => {

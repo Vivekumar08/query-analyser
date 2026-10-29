@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, it, expect, vi, afterEach, beforeEach, type Mock } from 'vitest';
 import { ingestPayloadSchema } from '@query-analyser/contract';
 import { Aggregator } from './aggregator.js';
+import { buildSignature } from './signature.js';
 import {
   attachClient,
   clientStats,
@@ -326,6 +327,19 @@ describe('monitor', () => {
         thresholdMs: 100, dropped: 0, items: wire,
       });
       expect(result.success).toBe(true);
+    });
+
+    it('resolves an aggregate\'s model from its first $match (discriminators), keeping the 0.2 signature', () => {
+      const resolveModel = vi.fn((_d: string, coll: string, filter: unknown) =>
+        (filter as { __t?: unknown } | undefined)?.__t === 'Dog' ? 'Dog' : coll);
+      setSink(sink({ resolveModel, aggregator: s.aggregator }));
+      const pipeline = [{ $match: { name: 'rex', __t: 'Dog' } }];
+      run(c, 'aggregate', { aggregate: 'animals', pipeline }, { reply: { cursor: { id: 0, firstBatch: [] } } });
+      expect(resolveModel).toHaveBeenCalledWith('app', 'animals', { name: 'rex', __t: 'Dog' });
+      const item = s.aggregator.swap().items[0]!;
+      const expected = buildSignature({ model: 'Dog', operation: 'aggregate', pipeline });
+      expect(item).toMatchObject({ model: 'Dog', operation: 'aggregate', hash: expected.hash, signature: expected.signature,
+        sample: { pipeline: [{ $match: { name: '<string>', __t: '<string>' } }] } });
     });
 
     it('keeps a cursor for a live aggregate', () => {
