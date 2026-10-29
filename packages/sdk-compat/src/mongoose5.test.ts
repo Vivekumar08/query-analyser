@@ -8,7 +8,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import type { MongoMemoryServer } from 'mongodb-memory-server';
 import mongoose5 from 'mongoose5';
 import { init, shutdown } from '../../sdk/src/index.js';
-import { capture, startMongo } from './harness.js';
+import { bundledDriver, capture, startMongo } from './harness.js';
 
 describe('mongoose 5 (best effort)', () => {
   let mongod: MongoMemoryServer;
@@ -25,6 +25,8 @@ describe('mongoose 5 (best effort)', () => {
   });
 
   it('mongoose 5 with monitorCommands: true reports a find under its model name', async () => {
+    expect(mongoose5.version.startsWith('5.'), mongoose5.version).toBe(true);
+    expect(bundledDriver('mongoose5', mongoose5)).toEqual({ major: 3, same: true });
     const { fetchImpl, items } = capture();
     const a = init({ apiKey: 'k', app: 'compat-mongoose5', mongoose: mongoose5, thresholdMs: 0, fetchImpl, onError: () => {} });
     // Typed against the Mongoose 8 shim, which has no useNewUrlParser /
