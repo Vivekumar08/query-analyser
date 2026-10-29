@@ -214,7 +214,7 @@ function onEnded(state: ClientState, ev: unknown, failed: boolean): void {
     let lastShape: CapturedShape | null = null;
     let lastOcc: Occurrence | null = null;
     for (const st of statements) {
-      const shape = shapeOf(st, s.resolveModel(st.database, st.collection, st.filter));
+      const shape = shapeOf(st, s.resolveModel(st.database, st.collection, st.modelFilter ?? st.filter));
       if (seen.has(shape.sig.hash)) continue;
       seen.add(shape.sig.hash);
       lastShape = shape;
