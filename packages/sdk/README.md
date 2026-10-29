@@ -13,13 +13,70 @@ require('@vivekumar08/query-analyser').init({
 });
 ```
 
-That is the whole setup. Every mongoose query at 100 ms or slower is grouped by
+That is the whole setup. Every MongoDB command at 100 ms or slower is grouped by
 its *shape*, aggregated in memory, and shipped to your dashboard every ten
 seconds.
 
-Requires `mongoose` `>=8 <9` as a peer dependency. The pre-compiled-model
-instrumentation relies on undocumented mongoose internals that are verified
-only against mongoose 8; other majors are not supported.
+Call `init()` before your app connects to MongoDB (before `mongoose.connect()`
+or `client.connect()`). The SDK listens to the driver's own command events, so
+it works with Mongoose and with the plain `mongodb` driver.
+
+## Using the mongodb driver
+
+When `init()` runs first there is nothing to add: clients that connect later are
+captured automatically.
+
+For a client created earlier, or from a bundled copy of the driver the SDK
+cannot resolve, connect it with `{ monitorCommands: true }` and either pass it to
+`init()` or call `instrument(client)`:
+
+```js
+const { MongoClient } = require('mongodb');
+const qa = require('@vivekumar08/query-analyser');
+
+const client = new MongoClient(uri, { monitorCommands: true });
+qa.init({ apiKey: process.env.QA_KEY, app: 'my-service', mongoClient: client });
+// or, for lazily created clients and serverless handlers:
+qa.instrument(client);
+await client.connect();
+```
+
+`instrument(client)` is safe to call on every invocation with one cached client:
+it attaches one set of listeners. Calling `init({ mongoClient })` again is fine
+too.
+
+If monitoring is off for a client the SDK warns once:
+
+```
+query-analyser: command monitoring is off for a MongoClient, so if this client was already connected its queries are not captured. Pass `monitorCommands: true` in its connect options, or call init() before connecting.
+```
+
+Do what it says: pass `monitorCommands: true` in the connect options, or call
+`init()` before connecting.
+
+## Supported versions
+
+| Library | Status |
+|---|---|
+| `mongodb` driver 4, 5, 6, 7 | supported and tested |
+| Mongoose 6, 7, 8, 9 | supported and tested |
+| Mongoose 5.13 (driver 3.7) | best effort; **requires** `monitorCommands: true` in the connect options, because the SDK cannot switch monitoring on or detect it there |
+
+## Migrating from 0.2
+
+- Mongoose 8 users whose `init()` runs before connecting have nothing to do.
+  Otherwise add `monitorCommands: true` to the connection options (the SDK warns
+  once if it is missing).
+- Mongoose 9: 0.2 threw `TypeError: next is not a function` into app code. 0.3
+  does not.
+- Query hashes for the same query shape are unchanged between 0.2 and 0.3 (a
+  35-case golden test proves it), so your history continues.
+- 0.3 measures database time. 0.2 also counted time spent in the app (casting,
+  hydration, pool waits, `bufferCommands`), so latencies for the same shape can
+  drop at the upgrade. Durations are whole milliseconds.
+- Newly captured: `insert`, `save()`, `bulkWrite` statements,
+  `Model.collection.*`, failed commands, and `estimatedDocumentCount` (which
+  appears as `count`). `insert` items carry no sample.
 
 ## What leaves your process
 
@@ -36,6 +93,8 @@ with a type-only sample: `{"filter":{"email":"<string>","total":{"$gte":"<number
 `update` and `sort` are included in the sample only when the query actually
 has one — a plain `find()` with no sort reports as
 `{"filter":{...}}`, not `{"filter":{...},"update":"<undefined>","sort":"<undefined>"}`.
+Each item also carries `source` (`mongodb`) and `collection` (the collection
+name).
 **By default, no queried value ever leaves your process.** The only exception is
 the opt-in `sampleKey` below, and even then the values are encrypted before they
 leave, so we cannot read them.
@@ -85,15 +144,21 @@ require('@vivekumar08/query-analyser').init({
 | `enabled` | `true` | set `false` to make `init` a no-op |
 | `endpoint` | hosted ingest | override for self-hosted |
 | `mongoose` | auto-resolved | pass explicitly if resolution fails |
+| `mongoClient` | — | a `MongoClient` (or an array) to capture explicitly; needs `monitorCommands: true` unless `init()` ran before connecting |
 | `onError` | logs to stderr | called with internal errors |
 | `sampleKey` | — | opt-in: app's sample public key; sends end-to-end encrypted real-value samples |
 
 ## Notes
 
-- Call `init()` anywhere. Models compiled before the call are instrumented too.
-- Nothing runs on the query path except a timestamp and a map write (plus, with
-  `sampleKey`, a bounded 16 KiB serialisation when a query is the new slowest for
-  its shape; encryption happens later, at flush). No I/O.
+- Call `init()` before connecting. The SDK listens to the driver's command
+  events; it adds no code of its own to your queries (plus, with `sampleKey`, a
+  bounded 16 KiB serialisation when a query is the new slowest for its shape;
+  encryption happens later, at flush). No I/O on the query path. Turning on the
+  driver's command monitoring has a cost for very large reads; see the
+  [changelog](./CHANGELOG.md).
+- Known limitation: an app that loads both the CommonJS and ESM copies of the SDK
+  and calls `init()` in both can lose zero-setup capture for clients that connect
+  later. Call `init()` from one module system.
 - If the endpoint is unreachable the SDK retries with backoff and then drops.
   Your queries are never affected.
 - `await require('@vivekumar08/query-analyser').shutdown()` drains the buffer
