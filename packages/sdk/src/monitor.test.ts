@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { describe, it, expect, vi, afterEach, beforeEach, type Mock } from 'vitest';
+import { ingestPayloadSchema } from '@query-analyser/contract';
 import { Aggregator } from './aggregator.js';
 import {
   attachClient,
@@ -303,6 +304,28 @@ describe('monitor', () => {
     it('does not keep a cursor for a database-level aggregate', () => {
       run(c, 'aggregate', { aggregate: 1, pipeline: [{ $documents: [{ a: 1 }] }] }, { duration: 5, reply: liveReply('95') });
       expect(clientStats(c)!.cursors).toBe(0);
+    });
+
+    it('skips a slow database-level aggregate (no collection), so a mixed batch still validates', () => {
+      run(c, 'aggregate', { aggregate: 1, pipeline: [{ $changeStream: {} }] }, { duration: 500, reply: { cursor: { id: 0, firstBatch: [] } } });
+      run(c, 'aggregate', { aggregate: 1, pipeline: [{ $documents: [{ a: 1 }] }] }, { duration: 500, reply: liveReply('96') });
+      run(c, 'find', { find: 'orders', filter: { s: 'x' } });
+      run(c, 'aggregate', { aggregate: 'orders', pipeline: [{ $match: { a: 1 } }] }, { reply: { cursor: { id: 0, firstBatch: [] } } });
+      const items = s.aggregator.swap().items;
+      expect(items.map((i) => i.collection).sort()).toEqual(['orders', 'orders']);
+      expect(clientStats(c)).toEqual({ inFlight: 0, cursors: 0 });
+      const wire = items.map((item) => ({
+        signature: item.signature, hash: item.hash, model: item.model, operation: item.operation,
+        filterShape: item.filterShape, sortKeys: item.sortKeys, stages: item.stages,
+        count: item.count, totalMs: item.totalMs, maxMs: item.maxMs, lastMs: item.lastMs,
+        lastTs: item.lastTs, hist: item.hist, sample: item.sample,
+        source: 'mongodb', collection: item.collection,
+      }));
+      const result = ingestPayloadSchema.safeParse({
+        app: 'a', env: 'e', host: 'h', sdkVersion: '0.3.0', bucket: '2026102814',
+        thresholdMs: 100, dropped: 0, items: wire,
+      });
+      expect(result.success).toBe(true);
     });
 
     it('keeps a cursor for a live aggregate', () => {

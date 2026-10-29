@@ -194,7 +194,11 @@ function onEnded(state: ClientState, ev: unknown, failed: boolean): void {
     }
 
     const command = entry.commandName === 'insert' ? { insert: entry.collection } : entry.command ?? {};
-    const statements = mapCommand(entry.commandName, entry.database, command);
+    // Only collection operations are captured: a database-level command
+    // (`aggregate: 1`, e.g. db.watch() or $documents) maps to collection ''
+    // and is not attributable to one, and an item with an empty model or
+    // collection would fail the ingest schema and drop the whole batch.
+    const statements = mapCommand(entry.commandName, entry.database, command).filter((st) => st.collection !== '');
     entry.command = undefined;
 
     const counted = d >= s.thresholdMs;
@@ -221,8 +225,7 @@ function onEnded(state: ClientState, ev: unknown, failed: boolean): void {
       }
     }
 
-    // A database-level aggregate has no collection; its getMore ($cmd.aggregate) could never match.
-    if (live && lastShape && statements[0]!.collection !== '') {
+    if (live && lastShape) {
       const st = statements[0]!;
       const now = Date.now();
       evictCursors(state.cursors, now);
