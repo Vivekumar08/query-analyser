@@ -28,7 +28,42 @@ export const MAX_IN_FLIGHT_AGE_MS = 600_000;
 export const MAX_CURSORS = 2_000;
 export const MAX_CURSOR_IDLE_MS = 600_000;
 
+export const MONITORING_OFF_WARNING =
+  'query-analyser: command monitoring is off for a MongoClient, so if this client was already connected its queries are not captured. Pass `monitorCommands: true` in its connect options, or call init() before connecting.';
+
+/**
+ * Connections checked out (after attach) and checked back in with no command
+ * event seen on the client, before the probe says monitoring is off. More
+ * than one, because driver 7's explicit connect() checks one connection out
+ * and in with no command (a connect-time ping that emits no command event).
+ */
+export const MONITORING_PROBE_CYCLES = 3;
+
 const ATTACHED = Symbol.for('query-analyser.client-attached');
+
+// Clients already warned about monitoring being off: at most one warning per
+// client, whether it comes from watchClient's check or from the probe.
+const warnedClients = new WeakSet<object>();
+
+/** True the first time it is called for a client, false after. */
+export function claimMonitoringWarning(client: object): boolean {
+  if (warnedClients.has(client)) return false;
+  warnedClients.add(client);
+  return true;
+}
+
+/** True when a monitorCommands setter exists on the prototype chain (driver 4+). Never throws. */
+export function hasMonitorSetter(client: object): boolean {
+  try {
+    for (let p: object | null = client; p; p = Object.getPrototypeOf(p) as object | null) {
+      const d = Object.getOwnPropertyDescriptor(p, 'monitorCommands');
+      if (d) return typeof d.set === 'function';
+    }
+  } catch {
+    // a hostile prototype chain: treat as driver 3
+  }
+  return false;
+}
 
 interface InFlight {
   startedAt: number;
@@ -49,9 +84,24 @@ interface OpenCursor {
   lastUsed: number;
 }
 
+/**
+ * Whether this client's commands raise command events at all. Setting
+ * monitorCommands on a client that is already connected has no effect
+ * (spike Q1), so the flag can read 'on' while nothing is emitted. The pool's
+ * CMAP events (public, emitted whatever monitorCommands says) show commands
+ * running: a connection checked out and back in carried a command, which
+ * would have raised commandStarted first. Only counters; off once settled.
+ */
+interface Probe {
+  active: boolean;
+  checkedOut: number;
+  silentCycles: number;
+}
+
 interface ClientState {
   inFlight: Map<unknown, InFlight>;
   cursors: Map<string, OpenCursor>;
+  probe: Probe;
 }
 
 interface EventEmitterLike {
@@ -118,7 +168,28 @@ function evictStale(state: ClientState, now: number): void {
   evictCursors(state.cursors, now);
 }
 
+function onCheckedOut(state: ClientState): void {
+  if (state.probe.active) state.probe.checkedOut++;
+}
+
+function onCheckedIn(client: object, state: ClientState): void {
+  const s = sink;
+  try {
+    const probe = state.probe;
+    // Only a connection checked out since attach counts: one already out
+    // when the listeners went on may have had its commandStarted before them.
+    if (!probe.active || probe.silentCycles >= probe.checkedOut) return;
+    probe.silentCycles++;
+    if (probe.silentCycles < MONITORING_PROBE_CYCLES || !s || s.isDisabled()) return;
+    probe.active = false;
+    if (claimMonitoringWarning(client)) report(s, new Error(MONITORING_OFF_WARNING));
+  } catch (e) {
+    report(s, e);
+  }
+}
+
 function onStarted(state: ClientState, ev: unknown): void {
+  state.probe.active = false;
   const s = sink;
   try {
     const now = Date.now();
@@ -270,19 +341,34 @@ function onGetMoreEnded(
   }
 }
 
-/** Adds the three listeners once per client (guard: Symbol.for('query-analyser.client-attached')). True when added now. */
+/**
+ * Adds the command listeners, and the two CMAP listeners of the monitoring
+ * probe, once per client (guard: Symbol.for('query-analyser.client-attached')).
+ * True when added now. The probe runs only for driver 4+ (a monitorCommands
+ * setter); on driver 3 the SDK does not detect whether monitoring is on.
+ */
 export function attachClient(client: object): boolean {
   try {
     if (!isRecord(client) || typeof (client as Partial<EventEmitterLike>).on !== 'function') return false;
     const tagged = client as Record<PropertyKey, unknown>;
     if (tagged[ATTACHED] === true) return false;
-    const state: ClientState = { inFlight: new Map(), cursors: new Map() };
+    const state: ClientState = {
+      inFlight: new Map(),
+      cursors: new Map(),
+      probe: { active: hasMonitorSetter(client), checkedOut: 0, silentCycles: 0 },
+    };
     const emitter = client as unknown as EventEmitterLike;
     const listeners: [string, (ev: unknown) => void][] = [
       ['commandStarted', (ev) => onStarted(state, ev)],
       ['commandSucceeded', (ev) => onEnded(state, ev, false)],
       ['commandFailed', (ev) => onEnded(state, ev, true)],
     ];
+    if (state.probe.active) {
+      listeners.push(
+        ['connectionCheckedOut', () => onCheckedOut(state)],
+        ['connectionCheckedIn', () => onCheckedIn(client, state)],
+      );
+    }
     const added: [string, (ev: unknown) => void][] = [];
     try {
       for (const pair of listeners) {
@@ -300,7 +386,7 @@ export function attachClient(client: object): boolean {
       }
       throw e;
     }
-    // Mark only once all three are on, so a failed attach can be retried.
+    // Mark only once all are on, so a failed attach can be retried.
     Object.defineProperty(client, ATTACHED, { value: true, enumerable: false, configurable: true });
     states.set(client, state);
     return true;

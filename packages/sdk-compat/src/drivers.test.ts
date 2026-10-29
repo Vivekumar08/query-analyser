@@ -116,6 +116,34 @@ describe.each(DRIVERS)('mongodb $major', ({ major, alias, mod }) => {
     expect(items()).toHaveLength(0);
   });
 
+  it('a client connected before init(), re-connected through the wrap, then instrumented, warns once and captures nothing', async () => {
+    const c = client();
+    await c.connect();
+    const { a, items, onError } = setup();
+    await c.connect(); // the wrap sets monitorCommands, too late to take effect
+    instrument(c);
+    expect(warnings(onError)).toHaveLength(0);
+
+    const coll = c.db('compat').collection(`reconnected_${suffix()}`);
+    for (let i = 0; i < 4; i++) await coll.find({ a: i }).toArray();
+    instrument(c);
+    await a.flush();
+    expect(warnings(onError)).toHaveLength(1);
+    expect(items()).toHaveLength(0);
+  });
+
+  it('a client connected after init(), then instrumented and queried, never warns', async () => {
+    const { a, items, onError } = setup();
+    const c = client();
+    await c.connect();
+    instrument(c);
+    const name = `fresh_${suffix()}`;
+    for (let i = 0; i < 5; i++) await c.db('compat').collection(name).find({ a: i }).toArray();
+    await a.flush();
+    expect(onError).not.toHaveBeenCalled();
+    expect(items()[0]).toMatchObject({ collection: name, count: 5 });
+  });
+
   it('pairs 50 concurrent finds of two shapes correctly', async () => {
     const { a, items } = setup();
     const c = client();

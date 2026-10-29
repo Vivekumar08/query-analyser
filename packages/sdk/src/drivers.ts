@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { attachClient, currentSink } from './monitor.js';
+import { attachClient, currentSink, hasMonitorSetter, MONITORING_OFF_WARNING } from './monitor.js';
 
 /**
  * Driver plumbing: finding the optional peers, switching on command
@@ -23,8 +23,7 @@ export type MongoClientLike = object;
 /** On a wrapped prototype (own, non-enumerable): `{ original, wrapper, hadOwn }`. Shared across SDK copies. */
 export const CONNECT_WRAP: unique symbol = Symbol.for('query-analyser.connect-wrap') as never;
 
-export const MONITORING_OFF_WARNING =
-  'query-analyser: command monitoring is off for a MongoClient, so if this client was already connected its queries are not captured. Pass `monitorCommands: true` in its connect options, or call init() before connecting.';
+export { MONITORING_OFF_WARNING };
 
 type ConnectFn = (this: unknown, ...args: unknown[]) => unknown;
 
@@ -70,14 +69,6 @@ export function resolvePeer(name: string): unknown | null {
   } catch {
     return null;
   }
-}
-
-function hasMonitorSetter(client: object): boolean {
-  for (let p: object | null = client; p; p = Object.getPrototypeOf(p) as object | null) {
-    const d = Object.getOwnPropertyDescriptor(p, 'monitorCommands');
-    if (d) return typeof d.set === 'function';
-  }
-  return false;
 }
 
 /** Read before anything touches the setter: 'on' if client.options.monitorCommands === true;
