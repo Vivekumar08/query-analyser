@@ -1,6 +1,6 @@
 {
   "name": "@vivekumar08/query-analyser",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Find your slow MongoDB queries. One line of setup.",
   "license": "MIT",
   "type": "module",
@@ -14,7 +14,7 @@
       "require": "./dist/index.cjs"
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"],
   "engines": { "node": ">=20" },
   "keywords": ["mongodb", "mongoose", "slow-query", "performance", "apm", "profiler"],
   "publishConfig": { "access": "public" },
