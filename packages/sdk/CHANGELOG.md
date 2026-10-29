@@ -12,11 +12,17 @@
   hydration, pool waits, `bufferCommands`), so latencies for the same query shape
   can drop at the upgrade. Durations are still whole milliseconds.
 - All 35 tested Mongoose 8 query shapes keep their 0.2 hash, filter shape and
-  sample. Newly captured: `insert` (no sample), `save()`, `bulkWrite` statements,
+  sample. Discriminator aggregates keep their 0.2 model name (the
+  discriminator). Known exception, by design: two base models sharing one
+  collection both resolve to the first registered. Database-level aggregates
+  (`aggregate: 1`, such as `db.watch()` or `$documents`) belong to no
+  collection and are not captured. Newly captured: `insert` (no sample), `save()`, `bulkWrite` statements,
   `Model.collection.*`, failed commands, and `estimatedDocumentCount` (shown as
   `count`).
 - Call `init()` before connecting. Otherwise connect with
-  `monitorCommands: true`; the SDK warns once when monitoring is off.
+  `monitorCommands: true`; the SDK warns once when monitoring is off,
+  including for a client connected before `init()` (then after its first few
+  commands).
 - Items now carry `source` and `collection`. Older APIs ignore them; the
   dashboard uses `collection` for the Compass command.
 - Known limitation: an app that loads both the CJS and ESM copies of the SDK and
