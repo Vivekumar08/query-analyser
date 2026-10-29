@@ -13,6 +13,8 @@ import {
   MAX_CURSOR_IDLE_MS,
   MAX_IN_FLIGHT,
   MAX_IN_FLIGHT_AGE_MS,
+  MONITORING_OFF_WARNING,
+  MONITORING_PROBE_CYCLES,
   type MonitorSink,
 } from './monitor.js';
 
@@ -462,5 +464,84 @@ describe('monitor', () => {
       command.pipeline.push({ $match: { region: 'X' } });
       expect(s.aggregator.swap().items[0]!.sampleText).toBe('{"pipeline":[{"$match":{"region":"IN"}}]}');
     });
+  });
+});
+
+/** Driver 4+ shape: a monitorCommands setter, and a flag that says 'on' though the topology may ignore it. */
+class Fake6 extends EventEmitter {
+  options = { monitorCommands: true };
+  get monitorCommands() { return this.options.monitorCommands; }
+  set monitorCommands(v: boolean) { this.options.monitorCommands = v; }
+}
+const cycle = (c: EventEmitter, n = 1) => {
+  for (let i = 0; i < n; i++) {
+    c.emit('connectionCheckedOut', { connectionId: 1, address: 'h:1' });
+    c.emit('connectionCheckedIn', { connectionId: 1, address: 'h:1' });
+  }
+};
+
+describe('monitoring-off probe (CMAP check-ins with no command events)', () => {
+  let s: MonitorSink;
+  const warned = () => (s.onError as Mock).mock.calls.filter(([e]) => (e as Error).message === MONITORING_OFF_WARNING);
+  beforeEach(() => { s = sink(); setSink(s); });
+
+  it('is a small fixed number of cycles', () => {
+    expect(MONITORING_PROBE_CYCLES).toBe(3);
+  });
+
+  it('warns once when a driver 4+ client checks connections out and in but never emits a command event', () => {
+    const c = new Fake6();
+    attachClient(c);
+    cycle(c, MONITORING_PROBE_CYCLES - 1);
+    expect(warned()).toHaveLength(0);
+    cycle(c);
+    expect(warned()).toHaveLength(1);
+    cycle(c, 10);
+    attachClient(c);
+    expect(warned()).toHaveLength(1);
+  });
+
+  it('never warns once a command event is seen, nor for a client that runs nothing', () => {
+    const quiet = new Fake6();
+    attachClient(quiet);
+    expect(warned()).toHaveLength(0);
+
+    const c = new Fake6();
+    attachClient(c);
+    cycle(c); // driver 7's connect-time ping: a checkout with no command
+    run(c, 'find', { find: 'o', filter: {} });
+    cycle(c, 20);
+    expect(warned()).toHaveLength(0);
+  });
+
+  it('only counts check-ins of connections checked out after attach', () => {
+    const c = new Fake6();
+    attachClient(c);
+    for (let i = 0; i < 10; i++) c.emit('connectionCheckedIn', { connectionId: i });
+    expect(warned()).toHaveLength(0);
+  });
+
+  it('does not probe a driver 3 client (no monitorCommands setter)', () => {
+    const c = new FakeClient();
+    attachClient(c);
+    cycle(c, 10);
+    expect(warned()).toHaveLength(0);
+  });
+
+  it('stays quiet while the SDK is disabled or has no sink', () => {
+    const c = new Fake6();
+    attachClient(c);
+    setSink(sink({ isDisabled: () => true, onError: s.onError }));
+    cycle(c, 10);
+    setSink(null);
+    cycle(c, 10);
+    expect(warned()).toHaveLength(0);
+  });
+
+  it('never throws when onError throws', () => {
+    setSink(sink({ onError: () => { throw new Error('boom'); } }));
+    const c = new Fake6();
+    attachClient(c);
+    expect(() => cycle(c, 5)).not.toThrow();
   });
 });

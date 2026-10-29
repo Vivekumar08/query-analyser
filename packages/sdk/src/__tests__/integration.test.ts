@@ -3,7 +3,7 @@ import { gunzipSync } from 'node:zlib';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { MongoClient } from 'mongodb';
-import { init, shutdown } from '../index.js';
+import { init, instrument, shutdown } from '../index.js';
 import { MONITORING_OFF_WARNING } from '../drivers.js';
 // Critical 2 test-only import: the contract is a dev dependency of the SDK
 // (never a runtime one — see types.ts for why SDK source never imports it),
@@ -376,6 +376,53 @@ describe('end to end', () => {
     } finally {
       await conn.close();
     }
+  });
+
+  // The connect wrap sets monitorCommands on a re-connect of an already
+  // connected client, where it has no effect, so the 'off' check passes. The
+  // client's own CMAP events then show commands running without command events.
+  it('warns once for a client connected before init(), re-connected, then instrumented, and captures nothing', async () => {
+    const client = new MongoClient(mongod.getUri());
+    await client.connect();
+    try {
+      const { bodies, fetchImpl } = capture();
+      const onError = vi.fn();
+      const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl, onError });
+      await client.connect();
+      instrument(client);
+      const coll = client.db('int').collection(`reconnected${suffix()}`);
+      for (let i = 0; i < 3; i++) await coll.find({ a: i }).toArray();
+      await coll.findOne({ a: 1 });
+      instrument(client);
+      await a.flush();
+      const messages = onError.mock.calls.map(([e]) => (e as Error).message);
+      expect(messages.filter((m) => m === MONITORING_OFF_WARNING)).toHaveLength(1);
+      expect(bodies).toHaveLength(0);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('never warns for a client created and connected after init(), with or without instrument()', async () => {
+    const { bodies, fetchImpl } = capture();
+    const onError = vi.fn();
+    const a = init({ apiKey: 'k', app: 'int-app', thresholdMs: 0, mongoose, fetchImpl, onError });
+    const client = new MongoClient(mongod.getUri());
+    await client.connect();
+    try {
+      instrument(client);
+      const name = `fresh${suffix()}`;
+      const coll = client.db('int').collection(name);
+      for (let i = 0; i < 5; i++) await coll.find({ a: i }).toArray();
+      await client.connect();
+      instrument(client);
+      await a.flush();
+      expect(onError).not.toHaveBeenCalled();
+      expect(itemsOf(bodies).find((i) => i.collection === name)).toMatchObject({ operation: 'find', count: 5 });
+    } finally {
+      await client.close();
+    }
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('captures the raw driver: a MongoClient from the app\'s own mongodb is captured under the collection name', async () => {

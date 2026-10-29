@@ -2,7 +2,7 @@ import { hostname } from 'node:os';
 import { bucketOf, encryptSample, importSamplePublicKey } from '@query-analyser/contract/runtime';
 import type { EncryptedSample, IngestItem, IngestPayload } from './types.js';
 import { Aggregator, type AggregatedItem } from './aggregator.js';
-import { attachClient, currentSink, setSink, type MonitorSink } from './monitor.js';
+import { attachClient, claimMonitoringWarning, currentSink, setSink, type MonitorSink } from './monitor.js';
 import { createModelResolver } from './model-registry.js';
 import {
   enableMonitoring,
@@ -47,19 +47,17 @@ const UNRESOLVED_WARNING =
 
 const defaultOnError = (e: Error): void => { process.stderr.write(`[query-analyser] ${e.message}\n`); };
 
-// Clients already warned about monitoring being off. Module-level so the
-// warning is at most once per client across init() calls and instrument().
-const warned = new WeakSet<object>();
-
 /**
  * Switches monitoring on (for a later connect) and attaches the listeners,
  * once per client. Warns first if monitoring is off, since a client that is
- * already connected will not pick the flag up. Never throws.
+ * already connected will not pick the flag up. A client whose flag reads on
+ * but whose topology ignored it (set on a re-connect of a connected client)
+ * is caught later by the monitor's probe. At most one warning per client,
+ * across init() calls, instrument() and the probe. Never throws.
  */
 function watchClient(client: MongoClientLike, report: (e: Error) => void): void {
   try {
-    if (monitorState(client) === 'off' && !warned.has(client)) {
-      warned.add(client);
+    if (monitorState(client) === 'off' && claimMonitoringWarning(client)) {
       report(new Error(MONITORING_OFF_WARNING));
     }
     enableMonitoring(client);
