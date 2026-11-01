@@ -103,6 +103,11 @@ function scanDollarTag(text: string, start: number): number {
 }
 
 /**
+ * Assumes `standard_conforming_strings = on` (the default since PostgreSQL 9.1): a backslash
+ * is an ordinary character in `'…'`, and only `E'…'` strings take backslash escapes. A server
+ * running with it off reads `\'` inside `'…'` as an escaped quote, so for such a string this
+ * lexer ends the literal early and may read part of its text as SQL words.
+ *
  * A PostgreSQL lexer: one pass with a cursor, pure, never throws. Comments and
  * whitespace are dropped. An unterminated string, quoted identifier or dollar
  * quote turns the rest of the text into one `string` token; an unterminated

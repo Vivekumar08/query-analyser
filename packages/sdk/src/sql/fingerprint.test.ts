@@ -58,7 +58,7 @@ describe('fingerprintSql', () => {
 
   it('collapses VALUES tuples with nested parentheses and keeps what follows', () =>
     expect(fingerprintSql('INSERT INTO t (a, b) VALUES (lower($1), (2)), (lower($3), (4)) ON CONFLICT DO NOTHING', plain)!.sql)
-      .toBe('INSERT INTO t(a, b) VALUES (lower(?), (?)) ON CONFLICT DO NOTHING'));
+      .toBe('INSERT INTO t (a, b) VALUES (lower(?), (?)) ON CONFLICT DO NOTHING'));
 
   it.each([
     ['SELECT a FROM t WHERE x = -5', 'SELECT a FROM t WHERE x = ?'],
@@ -228,5 +228,56 @@ describe('maskIdentifiers', () => {
     const unmasked = fingerprintSql(PRISMA, { maskIdentifiers: false })!;
     expect(masked.hash).not.toBe(unmasked.hash);
     expect(masked.verb).toBe('select');
+  });
+});
+
+describe('rule fixes before hashes freeze', () => {
+  it('strips every trailing semicolon', () => {
+    const fs = ['SELECT 1', 'SELECT 1;', 'SELECT 1;;', 'SELECT 1; -- x'].map((t) => fingerprintSql(t, plain)!);
+    expect(new Set(fs.map((f) => f.hash)).size).toBe(1);
+    expect(fs[3]!.sql).toBe('SELECT ?');
+    expect(fingerprintSql('SELECT 1; SELECT 2;', plain)!.sql).toBe('SELECT ? ; SELECT ?');
+    expect(fingerprintSql(';', plain)).toBeNull();
+  });
+
+  it('folds ASCII letters only', () => {
+    expect(fingerprintSql('ſelect 1', plain)).toBeNull();
+    expect(fingerprintSql('SELECT ſelect FROM t', plain)!.sql).toBe('SELECT ſelect FROM t');
+    expect(fingerprintSql('SELECT ÄBC FROM Ünits', plain)).toMatchObject({ sql: 'SELECT Äbc FROM Ünits', table: 'Ünits' });
+  });
+
+  it.each([
+    ['INSERT INTO t (a, b) VALUES (1, 2)', 'INSERT INTO t (a, b) VALUES (?, ?)'],
+    ['insert into s.t(a) values (1)', 'INSERT INTO s.t (a) VALUES (?)'],
+    ['SELECT * FROM unnest($1) AS u(x, y)', 'SELECT * FROM unnest(?) AS u (x, y)'],
+    ['SELECT my_fn(a), s.fn(b) FROM t', 'SELECT my_fn(a), s.fn(b) FROM t'],
+    ['SELECT $1::int[], $2::text [], $3::varchar(10)', 'SELECT ?::int[], ?::text[], ?::varchar(?)'],
+  ])('spaces %s', (input, sql) => expect(fingerprintSql(input, plain)!.sql).toBe(sql));
+
+  it('the FROM of IS [NOT] DISTINCT FROM is not a table', () => {
+    expect(fingerprintSql('SELECT a IS DISTINCT FROM b', plain)!.table).toBeNull();
+    expect(fingerprintSql('SELECT a IS NOT DISTINCT FROM b, c FROM t', plain)!.table).toBe('t');
+    expect(fingerprintSql('SELECT DISTINCT a FROM t', plain)!.table).toBe('t');
+  });
+
+  describe('masking keeps only reserved keywords, called known functions and built-in cast types', () => {
+    it('masks column names that are function names or non-reserved keywords', () =>
+      expect(fingerprintSql('SELECT count, first, rows, t.last FROM t ORDER BY a NULLS FIRST FETCH FIRST 5 ROWS ONLY', keyed)!.sql)
+        .toBe(`SELECT ${m('count')}, ${m('first')}, ${m('rows')}, ${m('t')}.${m('last')} FROM ${m('t')} ORDER BY ${m('a')} NULLS FIRST FETCH FIRST ? ROWS ONLY`));
+
+    it('keeps a known function only when it is called', () =>
+      expect(fingerprintSql('SELECT count(*), lower(a), lower FROM t', keyed)!.sql)
+        .toBe(`SELECT count(*), lower(${m('a')}), ${m('lower')} FROM ${m('t')}`));
+
+    it('keeps built-in cast types and masks user types', () =>
+      expect(fingerprintSql('SELECT $1::user_role, $2::public.x, $3::double precision, $4::character varying, $5::int[], $6::"public"."Role"', keyed)!.sql)
+        .toBe(`SELECT ?::${m('user_role')}, ?::${m('public')}.${m('x')}, ?::double precision, ?::character varying, ?::int[], ?::${m('public')}.${m('Role')}`));
+
+    it('masks a built-in type name used as a column', () =>
+      expect(fingerprintSql('SELECT date, text FROM t', keyed)!.sql).toBe(`SELECT ${m('date')}, ${m('text')} FROM ${m('t')}`));
+
+    it('keeps the window-frame and NULLS keywords readable', () =>
+      expect(fingerprintSql('SELECT sum(a) OVER (ORDER BY b ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t', keyed)!.sql)
+        .toBe(`SELECT sum(${m('a')}) OVER (ORDER BY ${m('b')} ROWS BETWEEN ? ${m('preceding')} AND ${m('current')} ${m('row')}) FROM ${m('t')}`));
   });
 });
