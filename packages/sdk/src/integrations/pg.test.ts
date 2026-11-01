@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { sqlRuntime, type StatementFrame } from '../sql/context.js';
 import { createSqlSink, type StatementEvent } from '../sql/core.js';
 import { Aggregator } from '../aggregator.js';
-import { installPgWrap, undoPgWraps, isAdapterShape, PG_QUERY_WRAP } from './pg.js';
+import { installPgWrap, installPgPoolWrap, undoPgWraps, isAdapterShape, PG_QUERY_WRAP, PG_POOL_QUERY_WRAP } from './pg.js';
 
 
 type Behaviour = { ok: unknown } | { fail: unknown };
@@ -512,8 +512,213 @@ describe('installPgWrap / undoPgWraps', () => {
     expect(() => undoPgWraps()).not.toThrow();
   });
 
-  it('the wrapper keeps the name query and the original length', () => {
+  it('the wrapper keeps the name query and length 3 (pg 8 signature: config, values, callback)', () => {
     expect(FakeClient.prototype.query.name).toBe('query');
     expect(FakeClient.prototype.query.length).toBe(3);
+  });
+});
+
+/**
+ * Behaves like pg-pool 3's Pool.prototype.query (pg-pool/index.js:431-486) with `max` clients:
+ * a values function becomes the callback; it checks out a client (now, or queued until one is
+ * released) and calls `client.query(text, values, cb)` with the caller's own config object.
+ * A queued request is served synchronously from release, i.e. in the releaser's async context,
+ * as pg-pool does (it has no AsyncResource).
+ */
+class FakePool {
+  Promise: PromiseConstructorLike = Promise;
+  private idle: FakeClient[] = [];
+  private waiting: ((c: FakeClient) => void)[] = [];
+  constructor(clients: FakeClient[]) { this.idle = [...clients]; }
+  private connect(cb: (c: FakeClient) => void): void {
+    const c = this.idle.shift();
+    if (c) process.nextTick(() => cb(c)); else this.waiting.push(cb);
+  }
+  private release(c: FakeClient): void {
+    const next = this.waiting.shift();
+    if (next) next(c); else this.idle.push(c);
+  }
+  query(text?: unknown, values?: unknown, cb?: unknown): unknown {
+    if (typeof values === 'function') { cb = values; values = undefined; }
+    let result: unknown;
+    let done = cb as Cb | undefined;
+    if (!done) {
+      result = new (this.Promise as PromiseConstructor)((resolve, reject) => { done = (err, res) => (err ? reject(err) : resolve(res)); });
+    }
+    this.connect((client) => {
+      client.query(text, values, (err: unknown, res: unknown) => { this.release(client); done!(err, res); });
+    });
+    return result;
+  }
+}
+
+const opFrame = (model: string): StatementFrame => ({ kind: 'statement', op: { kind: 'operation', model, operation: 'findMany' }, claimed: false });
+
+describe('pg wrapper: Pool.prototype.query keeps the caller frame', () => {
+  beforeEach(() => { installPgPoolWrap(FakePool); });
+
+  it('Important: under contention (max 1) each statement keeps its own frame and claims it', async () => {
+    const pool = new FakePool([new FakeClient({ ok: {} })]);
+    const frames = [opFrame('A'), opFrame('B'), opFrame('C')];
+    const cfg = (): Cfg => ({ text: 'SELECT 1', values: [], rowMode: 'array', types: { getTypeParser: () => String } });
+    await Promise.all(frames.map((f) => sqlRuntime().als.run(f, () => pool.query(cfg()))));
+    expect(recorded.map((r) => r.labels?.model)).toEqual(['A', 'B', 'C']);
+    expect(frames.map((f) => f.claimed)).toEqual([true, true, true]);
+  });
+
+  it('a queued caller with no frame does not inherit the releaser frame', async () => {
+    const pool = new FakePool([new FakeClient({ ok: {} })]);
+    const a = opFrame('A');
+    const pa = sqlRuntime().als.run(a, () => pool.query({ text: 'SELECT 1' }));
+    const pb = pool.query({ text: 'SELECT 2' });
+    await Promise.all([pa, pb]);
+    expect(recorded.map((r) => [r.text, r.labels?.model ?? null])).toEqual([['SELECT 1', 'A'], ['SELECT 2', null]]);
+  });
+
+  it('callback forms through the pool keep their frame', async () => {
+    const pool = new FakePool([new FakeClient({ ok: 1 })]);
+    const run = (m: string): Promise<unknown> => new Promise((r) => { sqlRuntime().als.run(opFrame(m), () => { pool.query({ text: 'SELECT 1' }, (_e: unknown, x: unknown) => r(x)); }); });
+    await expect(Promise.all([run('A'), run('B')])).resolves.toEqual([1, 1]);
+    expect(recorded.map((r) => r.labels?.model)).toEqual(['A', 'B']);
+  });
+
+  it('the pool wrapper hands pg-pool the same arguments and returns its result', async () => {
+    const pool = new FakePool([new FakeClient({ ok: 5 })]);
+    const cfg = { text: 'SELECT 1' };
+    const values = [1];
+    const c = (pool as unknown as { idle: FakeClient[] }).idle[0]!;
+    await expect(pool.query(cfg, values)).resolves.toBe(5);
+    expect(c.seen!.values).toBe(values);
+    expect(Object.getPrototypeOf(c.seen!.config) === cfg || c.seen!.config === cfg).toBe(true);
+    await expect(pool.query('SELECT 2')).resolves.toBe(5);
+    expect(recorded.map((r) => r.text)).toEqual(['SELECT 1', 'SELECT 2']);
+  });
+
+  it('a stashed frame is consumed once: a later direct client.query with the same config reads its own context', async () => {
+    const client = new FakeClient({ ok: {} });
+    const pool = new FakePool([client]);
+    const cfg = { text: 'SELECT 1' };
+    await sqlRuntime().als.run(opFrame('A'), () => pool.query(cfg));
+    // pg wrote pg-pool's callback onto cfg (normalizeQueryConfig), so this reuse takes the config.callback form
+    await sqlRuntime().als.run(opFrame('B'), () => client.query(cfg));
+    await tick();
+    expect(recorded.map((r) => r.labels?.model)).toEqual(['A', 'B']);
+  });
+
+  it('with no sink the pool wrapper is a pure pass-through', async () => {
+    sqlRuntime().sink = null;
+    const pool = new FakePool([new FakeClient({ ok: 1 })]);
+    await expect(pool.query({ text: 'SELECT 1' })).resolves.toBe(1);
+    expect(recorded).toHaveLength(0);
+  });
+
+  it('the pool wrapper never throws: a config whose getters throw still reaches pg-pool', () => {
+    const pool = new FakePool([]);
+    expect(() => pool.query(untouchable({}, 'config'))).not.toThrow();
+  });
+});
+
+describe('installPgPoolWrap / undoPgWraps', () => {
+  it('wraps once, keeps flags, and undo restores the original', () => {
+    class P { query(): unknown { return 'p'; } }
+    const original = P.prototype.query;
+    expect(installPgPoolWrap(P)).toBe(true);
+    expect(installPgPoolWrap(P)).toBe(false);
+    const rec = Object.getOwnPropertyDescriptor(P.prototype, PG_POOL_QUERY_WRAP)!;
+    expect(rec.enumerable).toBe(false);
+    expect(rec.value).toMatchObject({ original, hadOwn: true });
+    expect(Object.getOwnPropertyDescriptor(P.prototype, 'query')).toMatchObject({ writable: true, enumerable: false, configurable: true });
+    expect(new P().query()).toBe('p');
+    undoPgWraps();
+    expect(P.prototype.query).toBe(original);
+    expect(Object.getOwnPropertySymbols(P.prototype)).not.toContain(PG_POOL_QUERY_WRAP);
+  });
+
+  it("pg's BoundPool case: query inherited from pg-pool's Pool; undo deletes the own property", () => {
+    class PgPoolPool { query(): unknown { return 'base'; } }
+    class BoundPool extends PgPoolPool {}
+    expect(installPgPoolWrap(BoundPool)).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(BoundPool.prototype, 'query')).toBe(true);
+    undoPgWraps();
+    expect(Object.prototype.hasOwnProperty.call(BoundPool.prototype, 'query')).toBe(false);
+    expect(new BoundPool().query()).toBe('base');
+  });
+
+  it('two BoundPools over one pg-pool are each wrapped once; a subclass of a wrapped pool is not', () => {
+    class PgPoolPool { query(): unknown { return 'base'; } }
+    class B1 extends PgPoolPool {}
+    class B2 extends PgPoolPool {}
+    class Sub extends B1 {}
+    expect(installPgPoolWrap(B1)).toBe(true);
+    expect(installPgPoolWrap(B2)).toBe(true);
+    expect(installPgPoolWrap(Sub)).toBe(false);
+  });
+
+  it('a foreign wrapper on top: undo leaves it and ours becomes a pass-through; re-install revives it', async () => {
+    const pool = (): FakePool => new FakePool([new FakeClient({ ok: {} })]);
+    installPgPoolWrap(FakePool);
+    const ours = FakePool.prototype.query;
+    const foreign = function query(this: FakePool, ...a: unknown[]): unknown { return (ours as (...x: unknown[]) => unknown).apply(this, a); };
+    FakePool.prototype.query = foreign as never;
+    try {
+      undoPgWraps();
+      installPgWrap(FakeClient);
+      await sqlRuntime().als.run(opFrame('A'), () => pool().query({ text: 'SELECT 1' }));
+      expect(FakePool.prototype.query).toBe(foreign);
+      expect(installPgPoolWrap(FakePool)).toBe(false);
+      await sqlRuntime().als.run(opFrame('B'), () => pool().query({ text: 'SELECT 1' }));
+      expect(recorded.map((r) => r.labels?.model)).toEqual(['A', 'B']);
+    } finally {
+      undoPgWraps();
+      FakePool.prototype.query = ours as never;
+      undoPgWraps();
+    }
+  });
+
+  it('never throws on bad input', () => {
+    expect(installPgPoolWrap(undefined)).toBe(false);
+    expect(installPgPoolWrap(function NoQuery() {})).toBe(false);
+  });
+});
+
+describe('pg wrapper: recording does not run before the app gets its result', () => {
+  it('callback form: the frame is claimed before the callback runs; the record follows, exactly once', async () => {
+    const c = new FakeClient({ ok: {} });
+    const frame = opFrame('A');
+    const atCallback = await new Promise<{ claimed: boolean; records: number }>((r) => {
+      sqlRuntime().als.run(frame, () => { c.query('SELECT 1', () => r({ claimed: frame.claimed, records: recorded.length })); });
+    });
+    expect(atCallback).toEqual({ claimed: true, records: 0 });
+    await tick();
+    expect(recorded).toHaveLength(1);
+  });
+
+  it('promise form: the frame is claimed before the value is delivered; the record happens exactly once', async () => {
+    const c = new FakeClient({ ok: 1 });
+    const frame = opFrame('A');
+    let claimedAtValue: boolean | null = null;
+    const p = sqlRuntime().als.run(frame, () => c.query('SELECT 1')) as Promise<unknown>;
+    // a handler attached directly runs in the same job as ours: the claim is set, the record is not yet made
+    void p.then(() => { claimedAtValue = frame.claimed; });
+    await p;
+    expect(claimedAtValue).toBe(true);
+    await tick();
+    expect(recorded).toHaveLength(1);
+  });
+
+  it('a record deferred to a microtask that throws never reaches the app', async () => {
+    sqlRuntime().sink = { record: () => { throw new Error('sink'); } };
+    const saved = process.listeners('uncaughtException');
+    process.removeAllListeners('uncaughtException');
+    const seen: unknown[] = []; const on = (e: unknown): void => { seen.push(e); };
+    process.on('uncaughtException', on);
+    try {
+      await new Promise<void>((r) => { new FakeClient({ ok: {} }).query('SELECT 1', () => r()); });
+      await tick();
+      expect(seen).toEqual([]);
+    } finally {
+      process.off('uncaughtException', on);
+      for (const l of saved) process.on('uncaughtException', l as (...a: unknown[]) => void);
+    }
   });
 });
