@@ -141,7 +141,8 @@ describe('fingerprintSql', () => {
   it('stays bounded on adversarial input', () => {
     const inputs = ['SELECT 1 FROM t WHERE x IN ('.repeat(20_000), `INSERT INTO t VALUES ${'VALUES ('.repeat(30_000)}`,
       `SELECT ARRAY[${'?, '.repeat(80_000)}`, `WITH ${'a AS ('.repeat(40_000)}`, `SELECT ${"'x".repeat(130_000)}`, '('.repeat(300_000),
-      `SELECT 1 ${'+'.repeat(200_000)}`, `SELECT 1 <${'+-'.repeat(100_000)}`];
+      `SELECT 1 ${'+'.repeat(200_000)}`, `SELECT 1 <${'+-'.repeat(100_000)}`, `SELECT ${'a, '.repeat(64_000)}b`,
+      `SELECT ${Array.from({ length: 20_000 }, (_, i) => `"c${i}"`).join(', ')} FROM t`];
     const start = performance.now();
     for (const s of inputs) expect(() => fingerprintSql(s, { maskIdentifiers: true })).not.toThrow();
     expect(performance.now() - start).toBeLessThan(3_000);
