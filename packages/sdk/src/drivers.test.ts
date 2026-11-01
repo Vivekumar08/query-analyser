@@ -364,6 +364,14 @@ describe('pg copies', () => {
     put('shared/node_modules/pg', PG);
     put('shared/node_modules/@prisma/adapter-pg', 'module.exports = {};');
     put('other/node_modules/pg', PG);
+    const pc = join(FIX, 'prisma/node_modules/@prisma/client');
+    mkdirSync(join(pc, 'dist/nested'), { recursive: true });
+    writeFileSync(join(pc, 'package.json'), JSON.stringify({ name: '@prisma/client', version: '6.19.3' }));
+    writeFileSync(join(pc, 'dist/index.js'), '');
+    writeFileSync(join(pc, 'dist/nested/index.js'), '');
+    writeFileSync(join(pc, 'dist/package.json'), JSON.stringify({ name: 'not-prisma', version: '0.0.1' }));
+    mkdirSync(join(FIX, 'nopkg'), { recursive: true });
+    writeFileSync(join(FIX, 'nopkg/index.js'), '');
   });
   afterAll(() => { rmSync(FIX, { recursive: true, force: true }); });
 
@@ -445,10 +453,23 @@ describe('pg copies', () => {
     expect(requireFrom(join(FIX, 'app', 'x.js'), 'pg')).not.toBeNull();
   });
 
-  // pnpm exec sets NODE_PATH to the workspace store, so the SDK may resolve a Prisma copy under test; null only when none is reachable.
-  it('prismaClientVersion returns a version string or null, and never throws', () => {
-    const v = prismaClientVersion();
-    if (v !== null) expect(v).toMatch(/^\d+\.\d+\.\d+/);
+  it('prismaClientVersion: nothing resolvable gives null; a resolver that throws gives null', () => {
+    expect(prismaClientVersion({ resolve: () => null })).toBeNull();
+    expect(prismaClientVersion({ resolve: () => { throw new Error('x'); } })).toBeNull();
+  });
+
+  it('prismaClientVersion walks up from a subdirectory entry to the @prisma/client package.json', () => {
+    const entry = join(FIX, 'prisma/node_modules/@prisma/client/dist/index.js');
+    expect(prismaClientVersion({ resolve: (n) => (n === '@prisma/client' ? entry : null) })).toBe('6.19.3');
+  });
+
+  it('prismaClientVersion skips a package.json with another name on the way up', () => {
+    const entry = join(FIX, 'prisma/node_modules/@prisma/client/dist/nested/index.js');
+    expect(prismaClientVersion({ resolve: () => entry })).toBe('6.19.3');
+  });
+
+  it('prismaClientVersion returns null when no @prisma/client package.json is above the entry', () => {
+    expect(prismaClientVersion({ resolve: () => join(FIX, 'nopkg/index.js') })).toBeNull();
   });
 
   it('Review Focus: a statement through either copy is recorded exactly once', async () => {
