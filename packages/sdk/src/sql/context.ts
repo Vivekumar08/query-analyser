@@ -37,6 +37,6 @@ export function sqlRuntime(): SqlRuntime {
 export function labelsOf(frame: SqlFrame | undefined): Labels | null {
   if (frame === undefined) return null;
   const op = frame.kind === 'operation' ? frame : frame.op;
-  if (op === null) return { orm: 'prisma', model: null, operation: null };
+  if (op == null) return { orm: 'prisma', model: null, operation: null }; // == null: a malformed frame from another SDK version
   return { orm: 'prisma', model: op.model, operation: op.operation };
 }

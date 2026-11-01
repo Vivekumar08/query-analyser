@@ -43,4 +43,9 @@ describe('sql runtime', () => {
   it('an operation without a model (raw query) keeps a null model', () => {
     expect(labelsOf({ kind: 'operation', model: null, operation: '$queryRaw' })).toEqual({ orm: 'prisma', model: null, operation: '$queryRaw' });
   });
+
+  it('a malformed statement frame from another SDK version (op missing) does not crash', () => {
+    const frame = { kind: 'statement', claimed: false } as unknown as Parameters<typeof labelsOf>[0];
+    expect(labelsOf(frame)).toEqual({ orm: 'prisma', model: null, operation: null });
+  });
 });
