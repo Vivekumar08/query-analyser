@@ -19,6 +19,9 @@ const EXTRA = [
   'ESCAPE',
 ];
 
+/** Upper case: the Appendix C reserved words only. Masking always keeps these. */
+export const RESERVED_KEYWORDS: ReadonlySet<string> = new Set(PG_RESERVED);
+
 /** Upper case. */
 export const KEYWORDS: ReadonlySet<string> = new Set([...PG_RESERVED, ...EXTRA]);
 
@@ -28,6 +31,13 @@ export const KNOWN_FUNCTIONS: ReadonlySet<string> = new Set([
   'array_agg', 'json_agg', 'jsonb_agg', 'string_agg', 'row_number', 'rank', 'dense_rank', 'date_trunc', 'extract', 'unnest',
   'jsonb_build_object', 'json_build_object', 'to_char', 'to_timestamp', 'abs', 'round', 'floor', 'ceil', 'random',
   'gen_random_uuid', 'concat', 'substring', 'position', 'trim',
+]);
+
+/** Lower case: built-in type names kept by masking when they follow `::`. */
+export const BUILTIN_TYPES: ReadonlySet<string> = new Set([
+  'int', 'integer', 'bigint', 'smallint', 'numeric', 'decimal', 'real', 'double', 'precision', 'text', 'varchar', 'character',
+  'varying', 'char', 'boolean', 'bool', 'uuid', 'date', 'time', 'timestamp', 'timestamptz', 'interval', 'json', 'jsonb',
+  'bytea', 'inet', 'money',
 ]);
 
 /** Upper case statement verbs that are fingerprinted. */
