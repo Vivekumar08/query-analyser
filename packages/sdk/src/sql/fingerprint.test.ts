@@ -69,8 +69,23 @@ describe('fingerprintSql', () => {
     ['SELECT a FROM t WHERE x > ALL (SELECT -$1)', 'SELECT a FROM t WHERE x > ALL (SELECT ?)'],
     ['SELECT a - 1 FROM t', 'SELECT a - ? FROM t'],
     ['SELECT (a) - 1, b-2 FROM t', 'SELECT (a) - ?, b - ? FROM t'],
+    ['SELECT a FROM t WHERE x=-1', 'SELECT a FROM t WHERE x = ?'],
+    ['SELECT (-1)', 'SELECT (?)'],
+    ['SELECT CASE WHEN a THEN -1 ELSE +2 END FROM t', 'SELECT CASE WHEN a THEN ? ELSE ? END FROM t'],
+    ['SELECT a - -1 FROM t', 'SELECT a - ? FROM t'],
+    ['SELECT a FROM t LIMIT -1', 'SELECT a FROM t LIMIT ?'],
+    ['SELECT a FROM t WHERE x BETWEEN -1 AND -2 OR y = 1 AND NOT -3 < z', 'SELECT a FROM t WHERE x BETWEEN ? AND ? OR y = ? AND NOT ? < z'],
+    ['SELECT CURRENT_DATE - 1', 'SELECT CURRENT_DATE - ?'],
+    ['SELECT a FROM t WHERE created_at > CURRENT_DATE - $1', 'SELECT a FROM t WHERE created_at > CURRENT_DATE - ?'],
+    ['SELECT LOCALTIMESTAMP - $1, CURRENT_TIMESTAMP + 1, CURRENT_USER - 1', 'SELECT LOCALTIMESTAMP - ?, CURRENT_TIMESTAMP + ?, CURRENT_USER - ?'],
+    ['SELECT NULL + 1', 'SELECT NULL + ?'],
+    ['SELECT CASE WHEN a THEN b END - 1 FROM t', 'SELECT CASE WHEN a THEN b END - ? FROM t'],
+    ['SELECT TRUE - 1', 'SELECT ? - ?'],
   ])('folds a unary sign into its literal but keeps a binary one: %s', (input, sql) =>
     expect(fingerprintSql(input, plain)!.sql).toBe(sql));
+
+  it('a sign after a value keyword is binary: CURRENT_DATE - 1 and + 1 differ', () =>
+    expect(fingerprintSql('SELECT CURRENT_DATE - 1', plain)!.hash).not.toBe(fingerprintSql('SELECT CURRENT_DATE + 1', plain)!.hash));
 
   it('TRUE and FALSE are literals; NULL and DEFAULT stay', () => {
     expect(fingerprintSql('UPDATE t SET a = TRUE, b = false, c = NULL, d = DEFAULT', plain)!.sql)

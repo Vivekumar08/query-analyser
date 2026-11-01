@@ -71,16 +71,29 @@ const isSym = (tok: NToken, set: ReadonlySet<string>): boolean => (tok.k === 'pu
 const isName = (tok: NToken | undefined): tok is NToken => tok !== undefined && (tok.k === 'word' || tok.k === 'quoted');
 
 /**
+ * Keywords after which a `+`/`-` can only be a unary sign: each one expects an operand next.
+ * An allow-list, not a deny-list of value keywords (NULL, END, CURRENT_DATE, USER…): a keyword
+ * missing here only leaves a sign unfolded (two hashes for `-1` and `1`), whereas a value
+ * keyword missing from a deny-list would drop a binary operator and merge `CURRENT_DATE - ?`
+ * with `CURRENT_DATE + ?`. Failing towards more hashes is the safe direction.
+ */
+const SIGN_TAKING_KEYWORDS: ReadonlySet<string> = new Set([
+  'SELECT', 'DISTINCT', 'ALL', 'WHERE', 'AND', 'OR', 'NOT', 'CASE', 'WHEN', 'THEN', 'ELSE', 'RETURNING',
+  'LIMIT', 'OFFSET', 'FETCH', 'FIRST', 'BETWEEN', 'SYMMETRIC', 'ASYMMETRIC', 'ON', 'HAVING', 'BY', 'SET', 'VALUES',
+  'IN', 'IS', 'LIKE', 'ILIKE', 'SIMILAR', 'ESCAPE', 'TO', 'FROM', 'FOR', 'AS', 'USING', 'OVERLAPS', 'ANY', 'SOME',
+]);
+
+/**
  * Pushes a `?`, first dropping any unary `+`/`-` right before it: a sign whose previous
- * token is the statement start, an operator, a keyword, `(`, `[` or `,`. A binary sign
- * (after a name, a literal, `)` or `]`) stays.
+ * token is the statement start, an operator, a sign-taking keyword, `(`, `[` or `,`. A binary
+ * sign (after a name, a literal, `)`, `]` or a value keyword such as CURRENT_DATE) stays.
  */
 function pushLiteral(out: NToken[]): void {
   for (;;) {
     const sign = out[out.length - 1];
     if (sign === undefined || sign.k !== 'op' || (sign.t !== '-' && sign.t !== '+')) break;
     const before = out[out.length - 2];
-    const unary = before === undefined || before.k === 'op' || before.k === 'kw' ||
+    const unary = before === undefined || before.k === 'op' || (before.k === 'kw' && SIGN_TAKING_KEYWORDS.has(before.t)) ||
       (before.k === 'punct' && (before.t === '(' || before.t === '[' || before.t === ','));
     if (!unary) break;
     out.pop();
