@@ -14,6 +14,7 @@ import {
   MONITORING_OFF_WARNING,
   type MongoClientLike,
 } from './drivers.js';
+import { toWireItem } from './wire-item.js';
 import { createTransport, planChunks, MAX_CHUNK_BYTES } from './transport.js';
 
 // Minor fix 7: hand-typed and previously could drift from package.json.
@@ -106,31 +107,6 @@ const ENVELOPE_KEY_JSON = ',"encryptedSample":';
 // 12-byte IV (16), the keys and punctuation.
 const ENVELOPE_FIXED_JSON_CHARS =
   ENVELOPE_KEY_JSON.length + JSON.stringify({ v: 1, epk: 'x'.repeat(88), iv: 'x'.repeat(16), ct: '' }).length;
-
-/**
- * The wire form of a buffered item: exactly the IngestItem keys, in the
- * order the payload has always used (so no-key payloads stay byte-identical).
- */
-function toWireItem(item: AggregatedItem): IngestItem {
-  return {
-    signature: item.signature,
-    hash: item.hash,
-    model: item.model,
-    operation: item.operation,
-    filterShape: item.filterShape,
-    sortKeys: item.sortKeys,
-    stages: item.stages,
-    count: item.count,
-    totalMs: item.totalMs,
-    maxMs: item.maxMs,
-    lastMs: item.lastMs,
-    lastTs: item.lastTs,
-    hist: item.hist,
-    sample: item.sample,
-    source: 'mongodb',
-    collection: item.collection ?? item.model,
-  };
-}
 
 export interface Analyser {
   flush(): Promise<void>;
