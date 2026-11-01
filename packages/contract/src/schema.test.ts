@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ingestPayloadSchema } from './schema.js';
+import { FINE_HIST_BOUNDS, FINE_HIST_SIZE } from './runtime.js';
 
 const item = {
   signature: 'Order.find(status:eq)',
@@ -117,4 +118,22 @@ describe('ingest item source and collection', () => {
     expect(ingestPayloadSchema.parse({ ...payload, items: [{ ...item, future: 1 }] }).items[0]).not.toHaveProperty(
       'future',
     ));
+});
+
+describe('sql item keys', () => {
+  const sqlItem = { ...item, source: 'postgresql', collection: 'User', orm: 'prisma', database: 'shop', sql: 'SELECT id FROM "User" WHERE id = ?',
+    errors: 2, errorCodes: [{ code: '23505', count: 2 }], histFine: [0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0], sampleRate: 0.1 };
+  it('accepts a 0.4 SQL item with every key', () =>
+    expect(ingestPayloadSchema.parse({ ...payload, items: [sqlItem] }).items[0]).toMatchObject(sqlItem));
+  it('a 0.3 Mongo item still parses with none of the new keys', () => {
+    const parsed = ingestPayloadSchema.parse({ ...payload, items: [{ ...item, source: 'mongodb', collection: 'orders' }] }).items[0]!;
+    for (const k of ['orm', 'database', 'sql', 'errors', 'errorCodes', 'histFine', 'sampleRate']) expect(parsed).not.toHaveProperty(k);
+  });
+  it.each([
+    { histFine: [1, 2] }, { sampleRate: 0 }, { sampleRate: 1.5 }, { errors: -1 }, { errors: 1.5 },
+    { errorCodes: [{ code: '2350', count: 1 }] }, { errorCodes: [{ code: '23505', count: 0 }] },
+    { errorCodes: Array.from({ length: 9 }, (_, i) => ({ code: `2350${i}`, count: 1 })) },
+    { sql: 'x'.repeat(16_385) }, { orm: '' }, { database: 'd'.repeat(256) },
+  ])('rejects %o', (extra) => expect(ingestPayloadSchema.safeParse({ ...payload, items: [{ ...sqlItem, ...extra }] }).success).toBe(false));
+  it('FINE_HIST_SIZE is one more than the bounds', () => expect(FINE_HIST_SIZE).toBe(FINE_HIST_BOUNDS.length + 1));
 });

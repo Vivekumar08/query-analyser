@@ -19,6 +19,7 @@ import type {
   IngestItem,
   IngestPayload,
   EncryptedSample,
+  ErrorCodeCount,
 } from './runtime.js';
 import type {
   OpClass as SdkOpClass,
@@ -27,6 +28,7 @@ import type {
   IngestItem as SdkIngestItem,
   IngestPayload as SdkIngestPayload,
   EncryptedSample as SdkEncryptedSample,
+  ErrorCodeCount as SdkErrorCodeCount,
 } from '../../sdk/src/types.js';
 import { describe, it, expect } from 'vitest';
 
@@ -44,6 +46,8 @@ type _IngestItem = AssertTrue<Equal<IngestItem, SdkIngestItem>>;
 type _IngestPayload = AssertTrue<Equal<IngestPayload, SdkIngestPayload>>;
 type _EncryptedSample = AssertTrue<Equal<EncryptedSample, SdkEncryptedSample>>;
 type _ItemCarriesOrigin = AssertTrue<Equal<IngestItem['source'] | IngestItem['collection'], string | undefined>>;
+type _ErrorCodeCount = AssertTrue<Equal<ErrorCodeCount, SdkErrorCodeCount>>;
+type _ItemCarriesSql = AssertTrue<Equal<IngestItem['histFine'], number[] | undefined>>;
 // The optional envelope field must exist on the item (and so on the SDK copy).
 type _ItemCarriesEnvelope = AssertTrue<
   Equal<IngestItem['encryptedSample'], EncryptedSample | null | undefined>

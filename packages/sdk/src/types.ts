@@ -36,6 +36,11 @@ export interface EncryptedSample {
   ct: string;
 }
 
+export interface ErrorCodeCount {
+  code: string;
+  count: number;
+}
+
 export interface IngestItem {
   signature: string;
   hash: string;
@@ -55,6 +60,20 @@ export interface IngestItem {
   source?: string;
   /** The real collection name the command ran against (at most 255 characters). Absent on SDK 0.1/0.2 payloads. */
   collection?: string;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. The ORM that issued the statement (e.g. `prisma`). */
+  orm?: string;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. The database name (a label, not part of the hash). */
+  database?: string;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. The normalised SQL text, every literal replaced by `?`. */
+  sql?: string;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. Count of failed statements. */
+  errors?: number;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. Failed-statement counts by SQLSTATE (at most 8). */
+  errorCodes?: ErrorCodeCount[];
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. Fine latency histogram, FINE_HIST_SIZE buckets. */
+  histFine?: number[];
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. Fraction (0 < r <= 1) of fast, successful statements that were counted. */
+  sampleRate?: number;
   /** Present only when the SDK was given a `sampleKey`; `null` when this item's sample was skipped. */
   encryptedSample?: EncryptedSample | null;
 }
