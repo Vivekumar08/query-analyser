@@ -1,4 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import { attachClient, currentSink, hasMonitorSetter, MONITORING_OFF_WARNING } from './monitor.js';
 
 /**
@@ -48,24 +50,129 @@ function report(e: unknown): void {
   } catch { /* onError itself failed: nothing more to do */ }
 }
 
-/** Module-relative createRequire (__filename, then import.meta.url), then cwd; null when not installed. Moved from resolveMongoose. */
-export function resolvePeer(name: string): unknown | null {
+/** Runs `use` against a require for each strategy in turn: module-relative (`__filename`, then `import.meta.url`), then cwd. First success wins; null when all fail. */
+function viaStrategies<T>(use: (req: NodeRequire) => T): T | null {
   // Module-relative first, so the SDK finds the same copy the host's own
   // `require(name)` would, whatever the cwd. `__filename` exists in the CJS
   // build, `import.meta.url` in the ESM build; each is guarded.
   try {
     if (typeof __filename !== 'undefined') {
-      return createRequire(__filename)(name) as unknown;
+      return use(createRequire(__filename));
     }
   } catch { /* fall through to the next strategy */ }
   try {
     // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (typeof import.meta !== 'undefined' && import.meta.url) {
-      return createRequire(import.meta.url)(name) as unknown;
+      return use(createRequire(import.meta.url));
     }
   } catch { /* fall through to the cwd fallback */ }
   try {
-    return createRequire(process.cwd() + '/')(name) as unknown;
+    return use(createRequire(process.cwd() + '/'));
+  } catch {
+    return null;
+  }
+}
+
+/** Module-relative createRequire (__filename, then import.meta.url), then cwd; null when not installed. Moved from resolveMongoose. */
+export function resolvePeer(name: string): unknown | null {
+  return viaStrategies((req) => req(name) as unknown);
+}
+
+/** require.resolve with the same three strategies as resolvePeer; null when not installed. */
+export function resolvePeerPath(name: string): string | null {
+  return viaStrategies((req) => req.resolve(name));
+}
+
+/** createRequire(fromFile)(name); null on any failure. */
+export function requireFrom(fromFile: string, name: string): unknown | null {
+  try {
+    return createRequire(fromFile)(name) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/** The Client class of a pg module (CJS, or ESM with `default`); never reads `.native`. */
+export function pgClientClass(mod: unknown): Function | null {
+  try {
+    if (!isObject(mod)) return null;
+    const direct = (mod as { Client?: unknown }).Client;
+    if (typeof direct === 'function') return direct;
+    const d = (mod as { default?: unknown }).default;
+    if (isObject(d)) {
+      const c = (d as { Client?: unknown }).Client;
+      if (typeof c === 'function') return c;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** A pg Pool -> pool.Client; a pg Client (has connectionParameters and a query function) -> its constructor; else null. */
+export function pgClientOf(x: unknown): Function | null {
+  try {
+    if (!isObject(x)) return null;
+    const o = x as { Client?: unknown; query?: unknown; connectionParameters?: unknown; constructor?: unknown };
+    if (typeof o.query !== 'function') return null;
+    if (typeof o.Client === 'function') return o.Client;
+    if (o.connectionParameters !== undefined && typeof o.constructor === 'function' && o.constructor !== Object) return o.constructor;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Distinct Client classes, deduplicated by Client.prototype identity, from: `given`, the app's pg,
+ *  and pg required from @prisma/adapter-pg's resolved entry file. `adapterResolved` says whether that entry resolved. Never throws. */
+export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: string) => string | null }): { clients: Function[]; adapterResolved: boolean } {
+  const clients: Function[] = [];
+  const seen = new Set<unknown>();
+  const add = (C: Function | null): void => {
+    try {
+      if (!C) return;
+      const proto = (C as { prototype?: unknown }).prototype;
+      if (!isObject(proto) || seen.has(proto)) return;
+      seen.add(proto);
+      clients.push(C);
+    } catch { /* skip */ }
+  };
+  const entry = (name: string): string | null => {
+    try {
+      return (from?.appEntry ?? resolvePeerPath)(name);
+    } catch {
+      return null;
+    }
+  };
+  let adapterResolved = false;
+  try {
+    if (given != null) add(pgClientClass(given) ?? pgClientOf(given));
+    const pgPath = entry('pg');
+    if (pgPath) add(pgClientClass(requireFrom(pgPath, pgPath)));
+    const adapterPath = entry('@prisma/adapter-pg');
+    if (adapterPath) {
+      adapterResolved = true;
+      add(pgClientClass(requireFrom(adapterPath, 'pg')));
+    }
+  } catch { /* partial results are fine */ }
+  return { clients, adapterResolved };
+}
+
+/** The installed @prisma/client version (package.json found by walking up from its resolved entry), or null. */
+export function prismaClientVersion(): string | null {
+  try {
+    let dir = dirname(resolvePeerPath('@prisma/client') ?? '');
+    if (dir === '.') return null;
+    for (let i = 0; i < 8; i++) {
+      try {
+        const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { name?: unknown; version?: unknown };
+        if (pkg.name === '@prisma/client') return typeof pkg.version === 'string' ? pkg.version : null;
+      } catch { /* not here: go up */ }
+      const up = dirname(dir);
+      if (up === dir) break;
+      dir = up;
+    }
+    return null;
   } catch {
     return null;
   }

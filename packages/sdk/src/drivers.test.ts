@@ -1,6 +1,12 @@
 import { EventEmitter } from 'node:events';
-import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, vi, afterEach, beforeEach, beforeAll, afterAll } from 'vitest';
 import { Aggregator } from './aggregator.js';
+import { sqlRuntime } from './sql/context.js';
+import { installPgWrap, undoPgWraps } from './integrations/pg.js';
 import { setSink, type MonitorSink } from './monitor.js';
 import {
   CONNECT_WRAP,
@@ -8,8 +14,14 @@ import {
   enableMonitoring,
   installConnectWrap,
   monitorState,
+  pgClientClass,
+  pgClientOf,
+  prismaClientVersion,
+  resolvePgClients,
   mongooseClients,
+  requireFrom,
   resolvePeer,
+  resolvePeerPath,
   undoConnectWraps,
 } from './drivers.js';
 
@@ -327,5 +339,100 @@ describe('mongooseClients', () => {
     expect(mongooseClients({})).toEqual([]);
     const evil = { get connections(): unknown { throw new Error('x'); } };
     expect(mongooseClients(evil)).toEqual([]);
+  });
+});
+
+describe('pg copies', () => {
+  let FIX: string;
+  const put = (rel: string, src: string): void => {
+    mkdirSync(join(FIX, rel), { recursive: true });
+    writeFileSync(join(FIX, rel, 'index.js'), src);
+  };
+  const PG = 'exports.Client = class Client { query() {} };';
+  const at = (root: string) => (name: string): string | null => {
+    try { return createRequire(join(root, 'x.js')).resolve(name); } catch { return null; }
+  };
+  const load = (rel: string): { Client: Function } => createRequire(join(FIX, 'x.js'))(join(FIX, rel)) as { Client: Function };
+
+  beforeAll(() => {
+    FIX = mkdtempSync(join(tmpdir(), 'qa-pg-copies-'));
+    put('app/node_modules/pg', PG);
+    put('app/node_modules/@prisma/adapter-pg/node_modules/pg', PG);
+    put('app/node_modules/@prisma/adapter-pg', 'module.exports = {};');
+    put('shared/node_modules/pg', PG);
+    put('shared/node_modules/@prisma/adapter-pg', 'module.exports = {};');
+    put('other/node_modules/pg', PG);
+  });
+  afterAll(() => { rmSync(FIX, { recursive: true, force: true }); });
+
+  it('Review Focus: an app with two pg copies yields both Client classes', () => {
+    const r = resolvePgClients(undefined, { appEntry: at(FIX + '/app') });
+    expect(r.clients).toHaveLength(2); expect(r.adapterResolved).toBe(true);
+    expect(new Set(r.clients.map((c) => c.prototype)).size).toBe(2);
+  });
+
+  it("an adapter sharing the app's pg yields one class", () => {
+    const r = resolvePgClients(undefined, { appEntry: at(FIX + '/shared') });
+    expect(r.clients).toHaveLength(1); expect(r.adapterResolved).toBe(true);
+  });
+
+  it('a given pg module is added and deduplicated by prototype', () => {
+    const app = load('app/node_modules/pg');
+    expect(resolvePgClients(app, { appEntry: at(FIX + '/app') }).clients).toHaveLength(2);
+    expect(resolvePgClients({ default: app }, { appEntry: at(FIX + '/app') }).clients).toHaveLength(2);
+    const third = load('other/node_modules/pg');
+    expect(resolvePgClients(third, { appEntry: at(FIX + '/app') }).clients).toHaveLength(3);
+    expect(resolvePgClients(third, { appEntry: () => null })).toEqual({ clients: [third.Client], adapterResolved: false });
+  });
+
+  it('no pg anywhere yields none, and adapterResolved false', () => {
+    expect(resolvePgClients(undefined, { appEntry: () => null })).toEqual({ clients: [], adapterResolved: false });
+    expect(resolvePgClients(42, { appEntry: () => { throw new Error('x'); } })).toEqual({ clients: [], adapterResolved: false });
+  });
+
+  it('never touches pg.native', () => {
+    const mod = { Client: class {}, get native(): never { throw new Error('native loaded'); } };
+    expect(() => pgClientClass(mod)).not.toThrow(); expect(pgClientClass({ default: mod })).toBe(mod.Client);
+    expect(pgClientClass(null)).toBeNull(); expect(pgClientClass({})).toBeNull();
+  });
+
+  it('pgClientOf takes a Pool or a Client and refuses anything else', () => {
+    class Client { connectionParameters = {}; query() {} }
+    expect(pgClientOf({ Client, totalCount: 0, query() {} })).toBe(Client);
+    expect(pgClientOf(new Client())).toBe(Client);
+    expect(pgClientOf(new EventEmitter())).toBeNull(); expect(pgClientOf(null)).toBeNull();
+  });
+
+  it('resolvePeerPath and requireFrom never throw', () => {
+    expect(resolvePeerPath('definitely-not-installed-xyz')).toBeNull();
+    expect(typeof resolvePeerPath('vitest')).toBe('string');
+    expect(requireFrom(join(FIX, 'nope', 'x.js'), 'definitely-not-installed-xyz')).toBeNull();
+    expect(requireFrom(join(FIX, 'app', 'x.js'), 'pg')).not.toBeNull();
+  });
+
+  // pnpm exec sets NODE_PATH to the workspace store, so the SDK may resolve a Prisma copy under test; null only when none is reachable.
+  it('prismaClientVersion returns a version string or null, and never throws', () => {
+    const v = prismaClientVersion();
+    if (v !== null) expect(v).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  it('Review Focus: a statement through either copy is recorded exactly once', async () => {
+    const recorded: unknown[] = [];
+    sqlRuntime().sink = { record: (ev) => { recorded.push(ev); } };
+    try {
+      const { clients } = resolvePgClients(undefined, { appEntry: at(FIX + '/app') });
+      for (const C of clients) {
+        (C.prototype as { query: unknown }).query = function () { return Promise.resolve({ rows: [] }); };
+        expect(installPgWrap(C)).toBe(true);
+      }
+      for (const C of clients) await (new (C as new () => { query(s: string): Promise<unknown> })()).query('SELECT 1');
+      expect(recorded).toHaveLength(2);
+      for (const C of clients) expect(installPgWrap(C)).toBe(false);
+      for (const C of clients) await (new (C as new () => { query(s: string): Promise<unknown> })()).query('SELECT 1');
+      expect(recorded).toHaveLength(4);
+    } finally {
+      undoPgWraps();
+      sqlRuntime().sink = null;
+    }
   });
 });
