@@ -15,6 +15,12 @@ export interface SqlRuntime {
   sink: SqlSink | null;
   /** Set by init(); enables the adapter-shape inference (Decision 5). */
   prismaAdapterResolved: boolean;
+  /**
+   * Set by init() from `pgCoversAdapter()`: the pg wrap covers `@prisma/adapter-pg`'s own pg, so the
+   * pg layer counts every Prisma statement and the Prisma helper records none (Task 5 ruling).
+   * Optional: a runtime created by an older SDK copy lacks it, which reads as false.
+   */
+  pgCoversPrismaAdapter?: boolean;
 }
 
 export const SQL_RUNTIME: unique symbol = Symbol.for('query-analyser.sql-runtime') as typeof SQL_RUNTIME;
@@ -28,7 +34,7 @@ export function sqlRuntime(): SqlRuntime {
   const g = globalThis as unknown as Record<symbol, SqlRuntime | undefined>;
   const existing = g[SQL_RUNTIME];
   if (existing !== undefined) return existing;
-  const value: SqlRuntime = { als: new AsyncLocalStorage<SqlFrame>(), sink: null, prismaAdapterResolved: false };
+  const value: SqlRuntime = { als: new AsyncLocalStorage<SqlFrame>(), sink: null, prismaAdapterResolved: false, pgCoversPrismaAdapter: false };
   Object.defineProperty(globalThis, SQL_RUNTIME, { value, enumerable: false, configurable: true, writable: false });
   return value;
 }
