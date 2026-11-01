@@ -188,9 +188,9 @@ export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: str
 }
 
 /** The installed @prisma/client version (package.json found by walking up from its resolved entry), or null. */
-export function prismaClientVersion(): string | null {
+export function prismaClientVersion(from?: { resolve?: (name: string) => string | null }): string | null {
   try {
-    let dir = dirname(resolvePeerPath('@prisma/client') ?? '');
+    let dir = dirname((from?.resolve ?? resolvePeerPath)('@prisma/client') ?? '');
     if (dir === '.') return null;
     for (let i = 0; i < 8; i++) {
       try {
