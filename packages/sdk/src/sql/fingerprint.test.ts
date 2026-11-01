@@ -20,7 +20,7 @@ describe('fingerprintSql', () => {
     ['SELECT a FROM t WHERE id = ANY (ARRAY[$1, $2, $3])', 'SELECT a FROM t WHERE id = ANY (ARRAY[?])', 'select', 't'],
     [`INSERT INTO "public"."Product" ("sku","name") VALUES ($1,$2), ($3,$4) RETURNING "public"."Product"."id"`, `INSERT INTO "public"."Product" ("sku", "name") VALUES (?, ?) RETURNING "public"."Product"."id"`, 'insert', 'Product'],
     [`/* traceparent='00-ab-cd-01' */ SELECT a FROM t -- trailing`, 'SELECT a FROM t', 'select', 't'],
-    [`SELECT $tag$secret$tag$, E'x\\'y', 1.5e3, 0x1F, NULL, TRUE`, 'SELECT ?, ?, ?, ?, NULL, TRUE', 'select', null],
+    [`SELECT $tag$secret$tag$, E'x\\'y', 1.5e3, 0x1F, NULL, TRUE`, 'SELECT ?, ?, ?, ?, NULL, ?', 'select', null],
     [`SELECT $1::text, '2020-01-01'::date`, 'SELECT ?::text, ?::date', 'select', null],
     [`select COUNT(*) AS "_count$_all" from Users`, `SELECT count(*) AS "_count$_all" FROM users`, 'select', 'users'],
     ['WITH x AS (SELECT a FROM t) UPDATE u SET a = 1 FROM x', 'WITH x AS (SELECT a FROM t) UPDATE u SET a = ? FROM x', 'update', 'u'],
@@ -55,6 +55,34 @@ describe('fingerprintSql', () => {
   it('collapses VALUES tuples with nested parentheses and keeps what follows', () =>
     expect(fingerprintSql('INSERT INTO t (a, b) VALUES (lower($1), (2)), (lower($3), (4)) ON CONFLICT DO NOTHING', plain)!.sql)
       .toBe('INSERT INTO t(a, b) VALUES (lower(?), (?)) ON CONFLICT DO NOTHING'));
+
+  it.each([
+    ['SELECT a FROM t WHERE x = -5', 'SELECT a FROM t WHERE x = ?'],
+    ['SELECT a FROM t WHERE x = - -5', 'SELECT a FROM t WHERE x = ?'],
+    ['SELECT -1, +2.5', 'SELECT ?, ?'],
+    ['SELECT a FROM t WHERE id IN (-1, -2, +3)', 'SELECT a FROM t WHERE id IN (?)'],
+    ['SELECT ARRAY[-1,-2]', 'SELECT ARRAY[?]'],
+    ['SELECT a FROM t WHERE x > ALL (SELECT -$1)', 'SELECT a FROM t WHERE x > ALL (SELECT ?)'],
+    ['SELECT a - 1 FROM t', 'SELECT a - ? FROM t'],
+    ['SELECT (a) - 1, b-2 FROM t', 'SELECT (a) - ?, b - ? FROM t'],
+  ])('folds a unary sign into its literal but keeps a binary one: %s', (input, sql) =>
+    expect(fingerprintSql(input, plain)!.sql).toBe(sql));
+
+  it('TRUE and FALSE are literals; NULL and DEFAULT stay', () => {
+    expect(fingerprintSql('UPDATE t SET a = TRUE, b = false, c = NULL, d = DEFAULT', plain)!.sql)
+      .toBe('UPDATE t SET a = ?, b = ?, c = NULL, d = DEFAULT');
+    expect(fingerprintSql('SELECT 1 FROM t WHERE a = TRUE', plain)!.hash).toBe(fingerprintSql('SELECT 1 FROM t WHERE a = false', plain)!.hash);
+  });
+
+  it.each([
+    ['SELECT a FROM t WHERE id IN ($1::uuid, $2::uuid)', 'SELECT a FROM t WHERE id IN (?::uuid)'],
+    ['SELECT a FROM t WHERE id = ANY (ARRAY[$1::int, $2::int, $3::int])', 'SELECT a FROM t WHERE id = ANY (ARRAY[?::int])'],
+    ['SELECT a FROM t WHERE r IN ($1::"public"."Role", $2::"public"."Role")', 'SELECT a FROM t WHERE r IN (?::"public"."Role")'],
+    ['SELECT a FROM t WHERE id IN (-1::int, 2::int)', 'SELECT a FROM t WHERE id IN (?::int)'],
+  ])('collapses lists of typed placeholders: %s', (input, sql) => expect(fingerprintSql(input, plain)!.sql).toBe(sql));
+
+  it('does not collapse a list holding anything but placeholders', () =>
+    expect(fingerprintSql('SELECT a FROM t WHERE id IN ($1, b)', plain)!.sql).toBe('SELECT a FROM t WHERE id IN (?, b)'));
 
   it('hash is sha256 of the source prefix and the normalised SQL', () => {
     const f = fingerprintSql('SELECT 1', plain)!;

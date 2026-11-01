@@ -35,6 +35,24 @@ const isPunct = (tok: NToken | undefined, t: string): boolean => tok !== undefin
 const isSym = (tok: NToken, set: ReadonlySet<string>): boolean => (tok.k === 'punct' || tok.k === 'op') && set.has(tok.t);
 const isName = (tok: NToken | undefined): tok is NToken => tok !== undefined && (tok.k === 'word' || tok.k === 'quoted');
 
+/**
+ * Pushes a `?`, first dropping any unary `+`/`-` right before it: a sign whose previous
+ * token is the statement start, an operator, a keyword, `(`, `[` or `,`. A binary sign
+ * (after a name, a literal, `)` or `]`) stays.
+ */
+function pushLiteral(out: NToken[]): void {
+  for (;;) {
+    const sign = out[out.length - 1];
+    if (sign === undefined || sign.k !== 'op' || (sign.t !== '-' && sign.t !== '+')) break;
+    const before = out[out.length - 2];
+    const unary = before === undefined || before.k === 'op' || before.k === 'kw' ||
+      (before.k === 'punct' && (before.t === '(' || before.t === '[' || before.t === ','));
+    if (!unary) break;
+    out.pop();
+  }
+  out.push({ k: 'ph', t: '?' });
+}
+
 /** Steps 1–3: cap, replace literals, fold case. */
 function toNormalTokens(text: string): NToken[] {
   const cut = text.length > MAX_INPUT_CHARS;
@@ -44,10 +62,11 @@ function toNormalTokens(text: string): NToken[] {
   for (const r of raw) {
     switch (r.kind) {
       case 'string': case 'number': case 'param':
-        out.push({ k: 'ph', t: '?' });
+        pushLiteral(out);
         break;
       case 'word': {
         const up = r.text.toUpperCase();
+        if (up === 'TRUE' || up === 'FALSE') { pushLiteral(out); break; } // booleans are constants, as in pg_stat_statements
         if (KEYWORDS.has(up)) { out.push({ k: 'kw', t: up }); break; }
         const lower = r.text.toLowerCase();
         const tok: NToken = { k: 'word', t: lower, name: lower };
@@ -67,7 +86,20 @@ function toNormalTokens(text: string): NToken[] {
   return out;
 }
 
-/** Step 4: `IN (?, …)` → `IN (?)` and `ARRAY[?, …]` → `ARRAY[?]`. */
+/** End index of a list element at `j` (`?`, or `?::type` with a dotted name and `[]`s), or -1. */
+function listElementEnd(toks: NToken[], j: number): number {
+  if (toks[j]?.k !== 'ph') return -1;
+  j++;
+  const cast = toks[j];
+  if (cast === undefined || cast.k !== 'op' || cast.t !== '::') return j;
+  if (!isName(toks[j + 1])) return -1;
+  j += 2;
+  while (isPunct(toks[j], '.') && isName(toks[j + 1])) j += 2;
+  while (isPunct(toks[j], '[') && isPunct(toks[j + 1], ']')) j += 2;
+  return j;
+}
+
+/** Step 4: `IN (?, …)` → `IN (?)` and `ARRAY[?, …]` → `ARRAY[?]`; elements may be `?::type`. */
 function collapseLists(toks: NToken[]): NToken[] {
   const out: NToken[] = [];
   let i = 0;
@@ -78,16 +110,18 @@ function collapseLists(toks: NToken[]): NToken[] {
     const open = tok.k === 'kw' && tok.t === 'IN' ? '(' : tok.k === 'kw' && tok.t === 'ARRAY' ? '[' : null;
     if (open === null || !isPunct(toks[i], open)) continue;
     const close = open === '(' ? ')' : ']';
-    let j = i + 1;
-    let seen = false;
-    while (j < toks.length) {
-      const x = toks[j] as NToken;
-      if (x.k === 'ph') seen = true;
-      else if (!isPunct(x, ',')) break;
-      j++;
+    const firstEnd = listElementEnd(toks, i + 1);
+    if (firstEnd < 0) continue;
+    let j = firstEnd;
+    while (isPunct(toks[j], ',')) {
+      const end = listElementEnd(toks, j + 1);
+      if (end < 0) break;
+      j = end;
     }
-    if (!seen || !isPunct(toks[j], close)) continue;
-    out.push(toks[i] as NToken, { k: 'ph', t: '?' }, toks[j] as NToken);
+    if (!isPunct(toks[j], close)) continue;
+    // Keep the first element (`?` or `?::type`) only.
+    for (let k = i; k < firstEnd; k++) out.push(toks[k] as NToken);
+    out.push(toks[j] as NToken);
     i = j + 1;
   }
   return out;
