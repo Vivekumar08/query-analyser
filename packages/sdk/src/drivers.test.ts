@@ -16,6 +16,8 @@ import {
   monitorState,
   pgClientClass,
   pgClientOf,
+  pgPoolClass,
+  pgPoolOf,
   prismaClientVersion,
   resolvePgClients,
   mongooseClients,
@@ -348,11 +350,11 @@ describe('pg copies', () => {
     mkdirSync(join(FIX, rel), { recursive: true });
     writeFileSync(join(FIX, rel, 'index.js'), src);
   };
-  const PG = 'exports.Client = class Client { query() {} };';
+  const PG = 'exports.Client = class Client { query() {} }; exports.Pool = class Pool { query() {} };';
   const at = (root: string) => (name: string): string | null => {
     try { return createRequire(join(root, 'x.js')).resolve(name); } catch { return null; }
   };
-  const load = (rel: string): { Client: Function } => createRequire(join(FIX, 'x.js'))(join(FIX, rel)) as { Client: Function };
+  const load = (rel: string): { Client: Function; Pool: Function } => createRequire(join(FIX, 'x.js'))(join(FIX, rel)) as { Client: Function; Pool: Function };
 
   beforeAll(() => {
     FIX = mkdtempSync(join(tmpdir(), 'qa-pg-copies-'));
@@ -382,12 +384,12 @@ describe('pg copies', () => {
     expect(resolvePgClients({ default: app }, { appEntry: at(FIX + '/app') }).clients).toHaveLength(2);
     const third = load('other/node_modules/pg');
     expect(resolvePgClients(third, { appEntry: at(FIX + '/app') }).clients).toHaveLength(3);
-    expect(resolvePgClients(third, { appEntry: () => null })).toEqual({ clients: [third.Client], adapterResolved: false });
+    expect(resolvePgClients(third, { appEntry: () => null })).toEqual({ clients: [third.Client], pools: [third.Pool], adapterResolved: false });
   });
 
   it('no pg anywhere yields none, and adapterResolved false', () => {
-    expect(resolvePgClients(undefined, { appEntry: () => null })).toEqual({ clients: [], adapterResolved: false });
-    expect(resolvePgClients(42, { appEntry: () => { throw new Error('x'); } })).toEqual({ clients: [], adapterResolved: false });
+    expect(resolvePgClients(undefined, { appEntry: () => null })).toEqual({ clients: [], pools: [], adapterResolved: false });
+    expect(resolvePgClients(42, { appEntry: () => { throw new Error('x'); } })).toEqual({ clients: [], pools: [], adapterResolved: false });
   });
 
   it('never touches pg.native', () => {
@@ -401,6 +403,39 @@ describe('pg copies', () => {
     expect(pgClientOf({ Client, totalCount: 0, query() {} })).toBe(Client);
     expect(pgClientOf(new Client())).toBe(Client);
     expect(pgClientOf(new EventEmitter())).toBeNull(); expect(pgClientOf(null)).toBeNull();
+  });
+
+  it('two pg copies yield both Pool classes too, deduplicated by prototype', () => {
+    const r = resolvePgClients(undefined, { appEntry: at(FIX + '/app') });
+    expect(r.pools).toHaveLength(2);
+    expect(new Set(r.pools.map((p) => p.prototype)).size).toBe(2);
+    expect(r.pools).toContain(load('app/node_modules/pg').Pool);
+    expect(r.pools).toContain(load('app/node_modules/@prisma/adapter-pg/node_modules/pg').Pool);
+    expect(resolvePgClients(undefined, { appEntry: at(FIX + '/shared') }).pools).toHaveLength(1);
+    const app = load('app/node_modules/pg');
+    expect(resolvePgClients(app, { appEntry: at(FIX + '/app') }).pools).toHaveLength(2);
+  });
+
+  it('a given pool instance adds its Pool class and its Client', () => {
+    const third = load('other/node_modules/pg');
+    const pool = Object.assign(Object.create((third.Pool as { prototype: object }).prototype) as object, { Client: third.Client });
+    expect(resolvePgClients(pool, { appEntry: () => null })).toEqual({ clients: [third.Client], pools: [third.Pool], adapterResolved: false });
+  });
+
+  it('pgPoolClass reads Pool (CJS or default) and never touches pg.native', () => {
+    const mod = { Pool: class {}, get native(): never { throw new Error('native loaded'); } };
+    expect(pgPoolClass(mod)).toBe(mod.Pool); expect(pgPoolClass({ default: mod })).toBe(mod.Pool);
+    expect(pgPoolClass(null)).toBeNull(); expect(pgPoolClass({})).toBeNull(); expect(pgPoolClass({ Pool: 1 })).toBeNull();
+  });
+
+  it('pgPoolOf takes a pool instance (Client + query) and refuses a client or anything else', () => {
+    class Client { connectionParameters = {}; query() {} }
+    class Pool { Client = Client; query() {} }
+    expect(pgPoolOf(new Pool())).toBe(Pool);
+    expect(pgPoolOf(new Client())).toBeNull();
+    expect(pgPoolOf({ Client, query() {} })).toBeNull(); // a plain object: no class to wrap
+    expect(pgPoolOf(null)).toBeNull();
+    expect(pgPoolOf({ get Client(): never { throw new Error('x'); } })).toBeNull();
   });
 
   it('resolvePeerPath and requireFrom never throw', () => {

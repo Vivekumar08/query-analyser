@@ -92,18 +92,40 @@ export function requireFrom(fromFile: string, name: string): unknown | null {
   }
 }
 
-/** The Client class of a pg module (CJS, or ESM with `default`); never reads `.native`. */
-export function pgClientClass(mod: unknown): Function | null {
+/** `mod[name]` or `mod.default[name]` when it is a function; never reads `.native`. */
+function pgExport(mod: unknown, name: 'Client' | 'Pool'): Function | null {
   try {
     if (!isObject(mod)) return null;
-    const direct = (mod as { Client?: unknown }).Client;
+    const direct = (mod as Record<string, unknown>)[name];
     if (typeof direct === 'function') return direct;
     const d = (mod as { default?: unknown }).default;
     if (isObject(d)) {
-      const c = (d as { Client?: unknown }).Client;
+      const c = (d as Record<string, unknown>)[name];
       if (typeof c === 'function') return c;
     }
     return null;
+  } catch {
+    return null;
+  }
+}
+
+/** The Client class of a pg module (CJS, or ESM with `default`); never reads `.native`. */
+export function pgClientClass(mod: unknown): Function | null {
+  return pgExport(mod, 'Client');
+}
+
+/** The Pool class of a pg module (pg's BoundPool over pg-pool; CJS, or ESM with `default`); never reads `.native`. */
+export function pgPoolClass(mod: unknown): Function | null {
+  return pgExport(mod, 'Pool');
+}
+
+/** A pg Pool instance (has a Client class and a query function) -> its class; anything else (a Client, a plain object) -> null. */
+export function pgPoolOf(x: unknown): Function | null {
+  try {
+    if (!isObject(x)) return null;
+    const o = x as { Client?: unknown; query?: unknown; constructor?: unknown };
+    if (typeof o.Client !== 'function' || typeof o.query !== 'function') return null;
+    return typeof o.constructor === 'function' && o.constructor !== Object ? o.constructor : null;
   } catch {
     return null;
   }
@@ -123,20 +145,24 @@ export function pgClientOf(x: unknown): Function | null {
   }
 }
 
-/** Distinct Client classes, deduplicated by Client.prototype identity, from: `given`, the app's pg,
+/** Distinct Client and Pool classes, each deduplicated by prototype identity, from: `given`, the app's pg,
  *  and pg required from @prisma/adapter-pg's resolved entry file. `adapterResolved` says whether that entry resolved. Never throws. */
-export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: string) => string | null }): { clients: Function[]; adapterResolved: boolean } {
+export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: string) => string | null }): { clients: Function[]; pools: Function[]; adapterResolved: boolean } {
   const clients: Function[] = [];
+  const pools: Function[] = [];
   const seen = new Set<unknown>();
-  const add = (C: Function | null): void => {
+  const addTo = (list: Function[]) => (C: Function | null): void => {
     try {
       if (!C) return;
       const proto = (C as { prototype?: unknown }).prototype;
       if (!isObject(proto) || seen.has(proto)) return;
       seen.add(proto);
-      clients.push(C);
+      list.push(C);
     } catch { /* skip */ }
   };
+  const add = addTo(clients);
+  const addPool = addTo(pools);
+  const addModule = (mod: unknown): void => { add(pgClientClass(mod)); addPool(pgPoolClass(mod)); };
   const entry = (name: string): string | null => {
     try {
       return (from?.appEntry ?? resolvePeerPath)(name);
@@ -146,16 +172,19 @@ export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: str
   };
   let adapterResolved = false;
   try {
-    if (given != null) add(pgClientClass(given) ?? pgClientOf(given));
+    if (given != null) {
+      add(pgClientClass(given) ?? pgClientOf(given));
+      addPool(pgPoolClass(given) ?? pgPoolOf(given));
+    }
     const pgPath = entry('pg');
-    if (pgPath) add(pgClientClass(requireFrom(pgPath, pgPath)));
+    if (pgPath) addModule(requireFrom(pgPath, pgPath));
     const adapterPath = entry('@prisma/adapter-pg');
     if (adapterPath) {
       adapterResolved = true;
-      add(pgClientClass(requireFrom(adapterPath, 'pg')));
+      addModule(requireFrom(adapterPath, 'pg'));
     }
   } catch { /* partial results are fine */ }
-  return { clients, adapterResolved };
+  return { clients, pools, adapterResolved };
 }
 
 /** The installed @prisma/client version (package.json found by walking up from its resolved entry), or null. */
