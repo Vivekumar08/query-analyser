@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 
 vi.mock('./lexer.js', async (importOriginal) => {
   const m = await importOriginal<typeof import('./lexer.js')>();
@@ -11,6 +11,10 @@ import { fingerprintSql, maskName, createFingerprinter, MAX_SQL_CHARS, MAX_INPUT
 
 const plain = { maskIdentifiers: false };
 const sha = (s: string): string => createHash('sha256').update(s).digest('hex');
+// What init() derives from an API key (Task 8): sha256('qa-mask:' + apiKey).
+const KEY = createHash('sha256').update('qa-mask:qa_test_key').digest();
+const m = (name: string): string => maskName(name, KEY);
+const keyed = { maskIdentifiers: true, maskKey: KEY };
 
 describe('fingerprintSql', () => {
   it.each([
@@ -171,37 +175,56 @@ describe('createFingerprinter', () => {
   });
 
   it('honours the masking option', () =>
-    expect(createFingerprinter({ maskIdentifiers: true })('SELECT a FROM t')!.sql).toBe(`SELECT ${maskName('a')} FROM ${maskName('t')}`));
+    expect(createFingerprinter({ maskIdentifiers: true, maskKey: KEY })('SELECT a FROM t')!.sql).toBe(`SELECT ${m('a')} FROM ${m('t')}`));
 });
 
 describe('maskIdentifiers', () => {
   const PRISMA = `SELECT "public"."Patient"."ssn", COUNT(*) AS "_count$_all" FROM "public"."Patient" WHERE "public"."Patient"."email" = $1 AND lower(nick) = $2 AND x::text = $3 GROUP BY 1`;
 
-  it('maskName is t_ plus 8 hex characters of sha256', () => {
-    expect(maskName('Patient')).toBe(`t_${sha('Patient').slice(0, 8)}`);
-    expect(maskName('Patient')).toMatch(/^t_[0-9a-f]{8}$/);
+  it('maskName is t_ plus 16 hex characters of HMAC-SHA256 under the mask key', () => {
+    expect(m('Patient')).toBe(`t_${createHmac('sha256', KEY).update('Patient').digest('hex').slice(0, 16)}`);
+    expect(m('Patient')).toMatch(/^t_[0-9a-f]{16}$/);
+    expect(m('Patient')).toHaveLength(18);
+    expect(m('Patient')).not.toContain(sha('Patient').slice(0, 8)); // not an unkeyed, dictionary-reversible digest
+  });
+
+  it('the same key gives a stable name, a different key a different name', () => {
+    const again = createHash('sha256').update('qa-mask:qa_test_key').digest();
+    expect(maskName('Patient', again)).toBe(m('Patient'));
+    expect(maskName('Patient', 'qa-mask-as-a-string')).toBe(maskName('Patient', 'qa-mask-as-a-string'));
+    const other = createHash('sha256').update('qa-mask:another_key').digest();
+    expect(maskName('Patient', other)).not.toBe(m('Patient'));
+    expect(fingerprintSql('SELECT a FROM t', { maskIdentifiers: true, maskKey: other })!.hash)
+      .not.toBe(fingerprintSql('SELECT a FROM t', keyed)!.hash);
+  });
+
+  it('with no key it masks under a random per-process key that is stable within the process', () => {
+    expect(maskName('Patient')).toBe(maskName('Patient'));
+    expect(maskName('Patient')).toMatch(/^t_[0-9a-f]{16}$/);
+    expect(maskName('Patient')).not.toBe(m('Patient'));
+    expect(fingerprintSql('SELECT a FROM t', { maskIdentifiers: true })!.sql).toBe(`SELECT ${maskName('a')} FROM ${maskName('t')}`);
   });
 
   it('masks every schema, table, column and alias, keeps keywords, known functions and cast types', () => {
-    const f = fingerprintSql(PRISMA, { maskIdentifiers: true })!;
+    const f = fingerprintSql(PRISMA, keyed)!;
     for (const secret of ['public', 'Patient', 'ssn', '_count', 'email', 'nick', '"']) expect(f.sql).not.toContain(secret);
-    expect(f.sql).toBe(`SELECT ${maskName('public')}.${maskName('Patient')}.${maskName('ssn')}, count(*) AS ${maskName('_count$_all')} FROM ${maskName('public')}.${maskName('Patient')} WHERE ${maskName('public')}.${maskName('Patient')}.${maskName('email')} = ? AND lower(${maskName('nick')}) = ? AND ${maskName('x')}::text = ? GROUP BY ?`);
-    expect(f.table).toBe(maskName('Patient'));
+    expect(f.sql).toBe(`SELECT ${m('public')}.${m('Patient')}.${m('ssn')}, count(*) AS ${m('_count$_all')} FROM ${m('public')}.${m('Patient')} WHERE ${m('public')}.${m('Patient')}.${m('email')} = ? AND lower(${m('nick')}) = ? AND ${m('x')}::text = ? GROUP BY ?`);
+    expect(f.table).toBe(m('Patient'));
   });
 
   it('an unquoted name and the same name quoted in lower case mask alike', () =>
-    expect(fingerprintSql('SELECT a FROM Users', { maskIdentifiers: true })!.sql).toBe(fingerprintSql('SELECT "a" FROM "users"', { maskIdentifiers: true })!.sql));
+    expect(fingerprintSql('SELECT a FROM Users', keyed)!.sql).toBe(fingerprintSql('SELECT "a" FROM "users"', keyed)!.sql));
 
   it('a quoted name with doubled quotes is unquoted before masking', () =>
-    expect(fingerprintSql('SELECT 1 FROM "My ""T"""', { maskIdentifiers: true })!.table).toBe(maskName('My "T"')));
+    expect(fingerprintSql('SELECT 1 FROM "My ""T"""', keyed)!.table).toBe(m('My "T"')));
 
   it('masks unknown functions and unterminated quoted identifiers leak nothing', () => {
-    const f = fingerprintSql('SELECT secret_fn(a) FROM t WHERE "half', { maskIdentifiers: true })!;
-    expect(f.sql).toBe(`SELECT ${maskName('secret_fn')}(${maskName('a')}) FROM ${maskName('t')} WHERE ?`);
+    const f = fingerprintSql('SELECT secret_fn(a) FROM t WHERE "half', keyed)!;
+    expect(f.sql).toBe(`SELECT ${m('secret_fn')}(${m('a')}) FROM ${m('t')} WHERE ?`);
   });
 
   it('masking changes the hash', () => {
-    const masked = fingerprintSql(PRISMA, { maskIdentifiers: true })!;
+    const masked = fingerprintSql(PRISMA, keyed)!;
     const unmasked = fingerprintSql(PRISMA, { maskIdentifiers: false })!;
     expect(masked.hash).not.toBe(unmasked.hash);
     expect(masked.verb).toBe('select');
