@@ -32,10 +32,24 @@ interface PgWrapRecord {
 /** On a wrapped prototype (own, non-enumerable): `{ original, wrapper, hadOwn }`. Shared across SDK copies. */
 export const PG_QUERY_WRAP: unique symbol = Symbol.for('query-analyser.pg-query-wrap') as never;
 
+/** On a wrapped Pool prototype (pg's BoundPool): the same record shape, under its own key. */
+export const PG_POOL_QUERY_WRAP: unique symbol = Symbol.for('query-analyser.pg-pool-query-wrap') as never;
+
 /** Wrappers created by this module copy. */
 const ourWrappers = new WeakSet<QueryFn>();
-/** Prototypes whose wrapper is active (and which undoPgWraps visits). */
+/** Client prototypes whose wrapper is active (and which undoPgWraps visits). */
 const wrapped = new Set<object>();
+/** Pool prototypes whose wrapper is active. */
+const wrappedPools = new Set<object>();
+
+/**
+ * The caller's frame, captured by the Pool wrapper and keyed by the config object pg-pool later
+ * hands to `client.query` unchanged (pg-pool/index.js:467). Under contention pg-pool serves a
+ * queued request from the releasing query's async context (it has no AsyncResource), so
+ * `als.getStore()` at `Client.prototype.query` time would be the releaser's frame. The entry
+ * records "no frame" too, so a frameless caller never inherits one, and is consumed on first read.
+ */
+const callerFrame = new WeakMap<object, { frame: unknown }>();
 
 const hasOwn = (o: object, k: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(o, k);
 const isObject = (v: unknown): v is object => (typeof v === 'object' || typeof v === 'function') && v !== null;
@@ -53,17 +67,17 @@ export function isAdapterShape(config: unknown): boolean {
   }
 }
 
-function recordOf(proto: object): PgWrapRecord | null {
-  if (!hasOwn(proto, PG_QUERY_WRAP)) return null;
-  const r = (proto as Record<PropertyKey, unknown>)[PG_QUERY_WRAP];
+function recordOf(proto: object, key: symbol = PG_QUERY_WRAP): PgWrapRecord | null {
+  if (!hasOwn(proto, key)) return null;
+  const r = (proto as Record<PropertyKey, unknown>)[key];
   return isObject(r) ? (r as PgWrapRecord) : null;
 }
 
 /** True when `fn` is an SDK wrapper: ours, or one recorded by any SDK copy on the prototype chain. */
-function isSdkWrapper(proto: object, fn: unknown): boolean {
+function isSdkWrapper(proto: object, fn: unknown, key: symbol): boolean {
   if (ourWrappers.has(fn as QueryFn)) return true;
   for (let p: object | null = proto; p; p = Object.getPrototypeOf(p) as object | null) {
-    if (recordOf(p)?.wrapper === fn) return true;
+    if (recordOf(p, key)?.wrapper === fn) return true;
   }
   return false;
 }
@@ -124,7 +138,14 @@ function begin(proto: object, self: unknown, config: unknown, values: unknown, c
 
   const db = isObject(self) ? (self as { database?: unknown }).database : undefined;
   const database = typeof db === 'string' ? db : null;
-  const store: unknown = rt.als.getStore();
+  let store: unknown;
+  const stashed = isObject(config) ? callerFrame.get(config) : undefined;
+  if (stashed !== undefined) {
+    callerFrame.delete(config as object);
+    store = stashed.frame;
+  } else {
+    store = rt.als.getStore();
+  }
   const frame = isObject(store) ? (store as SqlFrame) : undefined;
   const adapterShape = frame === undefined && rt.prismaAdapterResolved && isAdapterShape(config);
   const start = performance.now();
@@ -144,8 +165,12 @@ function begin(proto: object, self: unknown, config: unknown, values: unknown, c
         } else if (adapterShape) {
           labels = { orm: 'prisma', model: null, operation: null };
         }
-        rt.sink?.record({ text, database, durationMs, failed, errorCode: failed ? sqlStateOf(err) : null, labels });
-      } catch { /* never reaches the app; the sink reports its own failures */ }
+        const ev = { text, database, durationMs, failed, errorCode: failed ? sqlStateOf(err) : null, labels };
+        const sink = rt.sink;
+        // The claim and the timing above are synchronous (the claim must be in place before the
+        // value reaches the adapter); the record itself waits a microtask, off the app's path.
+        if (sink) queueMicrotask(() => { try { sink.record(ev); } catch { /* the sink reports its own failures */ } });
+      } catch { /* never reaches the app */ }
     },
   };
 }
@@ -179,46 +204,32 @@ function observe(p: unknown, call: Call): unknown {
   }
 }
 
-/** Wraps Client.prototype.query once (across SDK copies). True when newly wrapped now. Never throws. */
-export function installPgWrap(Client: unknown): boolean {
+
+/**
+ * Wraps `Ctor.prototype.query` once (across SDK copies), as installConnectWrap does: the descriptor's
+ * flags are kept and `hadOwn` recorded under `key`; a prototype that already has the record, or that
+ * inherits an SDK wrapper, is not wrapped again (a buried wrapper of ours is switched back on).
+ */
+function installWrap(Ctor: unknown, key: symbol, active: Set<object>, make: (proto: object, orig: QueryFn) => QueryFn): boolean {
   try {
-    if (typeof Client !== 'function') return false;
-    const proto = (Client as { prototype?: unknown }).prototype;
+    if (typeof Ctor !== 'function') return false;
+    const proto = (Ctor as { prototype?: unknown }).prototype;
     if (!isObject(proto)) return false;
 
-    const existing = recordOf(proto);
+    const existing = recordOf(proto, key);
     if (existing) {
-      // Already wrapped. If the wrapper is ours and was buried under another
-      // library's patch by an earlier undo, switch it back on rather than
-      // stacking a second one.
-      if (ourWrappers.has(existing.wrapper)) wrapped.add(proto);
+      if (ourWrappers.has(existing.wrapper)) active.add(proto);
       return false;
     }
 
     const original = (proto as { query?: unknown }).query;
     if (typeof original !== 'function') return false;
-    // Inherits a query an SDK copy already wrapped (a subclass of a wrapped client).
-    if (isSdkWrapper(proto, original)) return false;
+    if (isSdkWrapper(proto, original, key)) return false;
 
     const ownDesc = Object.getOwnPropertyDescriptor(proto, 'query');
     const hadOwn = ownDesc !== undefined;
     const orig = original as QueryFn;
-
-    const wrapper = function query(this: unknown, config?: unknown, values?: unknown, callback?: unknown): unknown {
-      let call: Call | null = null;
-      let args: unknown[] | null = null;
-      try {
-        call = begin(proto, this, config, values, callback);
-        if (call !== null) args = argsFor(call, arguments);
-      } catch {
-        call = null;
-      }
-      // eslint-disable-next-line prefer-rest-params
-      if (call === null || args === null) return Reflect.apply(orig, this, arguments) as unknown;
-      // A synchronous throw from pg propagates unchanged and records nothing.
-      const result = Reflect.apply(orig, this, args) as unknown;
-      return call.form.kind === 'promise' ? observe(result, call) : result;
-    } as QueryFn;
+    const wrapper = make(proto, orig);
     ourWrappers.add(wrapper);
 
     Object.defineProperty(proto, 'query', {
@@ -229,24 +240,60 @@ export function installPgWrap(Client: unknown): boolean {
     });
     const record: PgWrapRecord = { original: orig, wrapper, hadOwn };
     try {
-      Object.defineProperty(proto, PG_QUERY_WRAP, { value: record, enumerable: false, writable: false, configurable: true });
+      Object.defineProperty(proto, key, { value: record, enumerable: false, writable: false, configurable: true });
     } catch (e) {
       if (hadOwn) Object.defineProperty(proto, 'query', ownDesc);
       else delete (proto as { query?: unknown }).query;
       throw e;
     }
-    wrapped.add(proto);
+    active.add(proto);
     return true;
   } catch {
     return false;
   }
 }
 
-/** For each prototype this copy wrapped: restore the original if the wrapper is still on top, else leave it as a pass-through. */
-export function undoPgWraps(): void {
-  for (const proto of wrapped) {
+/** Wraps Client.prototype.query once (across SDK copies). True when newly wrapped now. Never throws. */
+export function installPgWrap(Client: unknown): boolean {
+  return installWrap(Client, PG_QUERY_WRAP, wrapped, (proto, orig) => function query(this: unknown, config?: unknown, values?: unknown, callback?: unknown): unknown {
+    let call: Call | null = null;
+    let args: unknown[] | null = null;
     try {
-      const record = recordOf(proto);
+      call = begin(proto, this, config, values, callback);
+      if (call !== null) args = argsFor(call, arguments);
+    } catch {
+      call = null;
+    }
+    // eslint-disable-next-line prefer-rest-params
+    if (call === null || args === null) return Reflect.apply(orig, this, arguments) as unknown;
+    // A synchronous throw from pg propagates unchanged and records nothing.
+    const result = Reflect.apply(orig, this, args) as unknown;
+    return call.form.kind === 'promise' ? observe(result, call) : result;
+  } as QueryFn);
+}
+
+/**
+ * Wraps pg's Pool.prototype.query (pg-pool's, reached through pg's BoundPool) once. It only notes the
+ * caller's frame for a config object, then calls the original with the same arguments; the Client
+ * wrapper does the timing. True when newly wrapped now. Never throws.
+ */
+export function installPgPoolWrap(Pool: unknown): boolean {
+  return installWrap(Pool, PG_POOL_QUERY_WRAP, wrappedPools, (proto, orig) => function query(this: unknown, config?: unknown): unknown {
+    try {
+      if (isObject(config) && wrappedPools.has(proto)) {
+        const rt = sqlRuntime();
+        if (rt.sink != null) callerFrame.set(config, { frame: rt.als.getStore() });
+      }
+    } catch { /* never reaches the app */ }
+    // eslint-disable-next-line prefer-rest-params
+    return Reflect.apply(orig, this, arguments) as unknown;
+  } as QueryFn);
+}
+
+function undoWraps(key: symbol, active: Set<object>): void {
+  for (const proto of active) {
+    try {
+      const record = recordOf(proto, key);
       if (!record) continue;
       const desc = Object.getOwnPropertyDescriptor(proto, 'query');
       if (!desc || desc.value !== record.wrapper) continue; // another patch is on top: leave it (we are now inert)
@@ -255,8 +302,14 @@ export function undoPgWraps(): void {
       } else {
         delete (proto as { query?: unknown }).query;
       }
-      delete (proto as Record<PropertyKey, unknown>)[PG_QUERY_WRAP];
+      delete (proto as Record<PropertyKey, unknown>)[key];
     } catch { /* never throws */ }
   }
-  wrapped.clear();
+  active.clear();
+}
+
+/** For each Client and Pool prototype this copy wrapped: restore the original if the wrapper is still on top, else leave it as a pass-through. */
+export function undoPgWraps(): void {
+  undoWraps(PG_QUERY_WRAP, wrapped);
+  undoWraps(PG_POOL_QUERY_WRAP, wrappedPools);
 }
