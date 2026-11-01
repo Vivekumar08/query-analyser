@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { lex } from './lexer.js';
 import { KEYWORDS, KNOWN_FUNCTIONS, CAPTURED_VERBS } from './keywords.js';
 
@@ -22,8 +22,25 @@ const MAIN_VERBS = new Set(['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'MERGE']);
 const NO_SPACE_BEFORE = new Set([',', ')', ']', '.', '::']);
 const NO_SPACE_AFTER = new Set(['(', '[', '.', '::']);
 
-export function maskName(name: string): string {
-  return 't_' + createHash('sha256').update(name).digest('hex').slice(0, 8);
+export type MaskKey = Buffer | string;
+
+let processKey: Buffer | undefined;
+
+/**
+ * Masks one identifier as `'t_'` + the first 16 hex characters of HMAC-SHA256(key, name).
+ * Keyed so that a dictionary of likely names (users, email, ssn…) cannot reverse it.
+ *
+ * `init()` (Task 8) always supplies the key, derived as `sha256('qa-mask:' + apiKey)`, so
+ * masked names are stable across processes of one app. Rotating the API key therefore
+ * changes every masked name, and with it every masked fingerprint (history restarts).
+ *
+ * Without a key, a random per-process key is used: names are consistent within the
+ * process but unstable across restarts. That fallback exists only so masking never
+ * fails open; it is not what `init()` uses.
+ */
+export function maskName(name: string, key?: MaskKey): string {
+  const k = key ?? (processKey ??= randomBytes(32));
+  return 't_' + createHmac('sha256', k).update(name).digest('hex').slice(0, 16);
 }
 
 function unquote(text: string): string {
@@ -222,16 +239,16 @@ function join(toks: NToken[]): string {
   return parts.join('');
 }
 
-function mask(toks: NToken[]): NToken[] {
+function mask(toks: NToken[], key: MaskKey | undefined): NToken[] {
   return toks.map((tok) => {
-    if (tok.k === 'quoted') return { k: 'quoted', t: maskName(tok.name ?? '') };
-    if (tok.k === 'word' && !tok.type && !KNOWN_FUNCTIONS.has(tok.t)) return { k: 'word', t: maskName(tok.name ?? tok.t) };
+    if (tok.k === 'quoted') return { k: 'quoted', t: maskName(tok.name ?? '', key) };
+    if (tok.k === 'word' && !tok.type && !KNOWN_FUNCTIONS.has(tok.t)) return { k: 'word', t: maskName(tok.name ?? tok.t, key) };
     return tok;
   });
 }
 
 /** The fingerprint of one statement, or null when it is not a captured statement. Pure; never throws. */
-export function fingerprintSql(text: string, opts: { maskIdentifiers: boolean }): SqlFingerprint | null {
+export function fingerprintSql(text: string, opts: { maskIdentifiers: boolean; maskKey?: MaskKey }): SqlFingerprint | null {
   try {
     if (typeof text !== 'string') return null;
     let toks = collapseValues(collapseLists(toNormalTokens(text)));
@@ -239,8 +256,8 @@ export function fingerprintSql(text: string, opts: { maskIdentifiers: boolean })
     if (found === null) return null;
     let table = findTable(toks, found.at);
     if (opts.maskIdentifiers) {
-      toks = mask(toks);
-      if (table !== null) table = maskName(table);
+      toks = mask(toks, opts.maskKey);
+      if (table !== null) table = maskName(table, opts.maskKey);
     }
     const full = join(toks);
     const hash = createHash('sha256').update('postgresql\n' + full).digest('hex').slice(0, 16);
@@ -257,9 +274,15 @@ export function fingerprintSql(text: string, opts: { maskIdentifiers: boolean })
   }
 }
 
-/** A fingerprinter with an LRU cache keyed by the raw text. Texts over MAX_SQL_CHARS are not cached. */
-export function createFingerprinter(opts: { maskIdentifiers: boolean; maxEntries?: number }): (text: string) => SqlFingerprint | null {
+/**
+ * A fingerprinter with an LRU cache keyed by the raw text. Texts over MAX_SQL_CHARS are not cached.
+ * `maskKey` keys identifier masking (see `maskName`); `init()` passes `sha256('qa-mask:' + apiKey)`.
+ */
+export function createFingerprinter(
+  opts: { maskIdentifiers: boolean; maskKey?: MaskKey; maxEntries?: number },
+): (text: string) => SqlFingerprint | null {
   const maskIdentifiers = opts.maskIdentifiers;
+  const maskKey = opts.maskKey;
   const maxEntries = Math.max(1, Math.floor(opts.maxEntries ?? 2_000));
   const cache = new Map<string, SqlFingerprint | null>();
   return (text: string) => {
@@ -270,7 +293,7 @@ export function createFingerprinter(opts: { maskIdentifiers: boolean; maxEntries
       cache.set(text, hit);
       return hit;
     }
-    const result = fingerprintSql(text, { maskIdentifiers });
+    const result = fingerprintSql(text, { maskIdentifiers, maskKey });
     if (cacheable) {
       cache.set(text, result);
       if (cache.size > maxEntries) cache.delete(cache.keys().next().value as string);
