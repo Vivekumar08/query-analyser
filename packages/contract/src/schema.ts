@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { HIST_SIZE } from './runtime.js';
+import { HIST_SIZE, FINE_HIST_SIZE } from './runtime.js';
 
 export const opClassSchema = z.enum(['eq', 'in', 'range', 'regex', 'exists', 'ne', 'other']);
 
@@ -40,6 +40,16 @@ export const ingestItemSchema = z.object({
   sample: z.unknown().nullable(),
   source: z.string().min(1).max(40).optional(),
   collection: z.string().min(1).max(255).optional(),
+  orm: z.string().min(1).max(40).optional(),
+  database: z.string().min(1).max(255).optional(),
+  sql: z.string().min(1).max(16_384).optional(),
+  errors: z.number().int().nonnegative().optional(),
+  errorCodes: z
+    .array(z.object({ code: z.string().regex(/^[0-9A-Z]{5}$/), count: z.number().int().positive() }))
+    .max(8)
+    .optional(),
+  histFine: z.array(z.number().int().nonnegative()).length(FINE_HIST_SIZE).optional(),
+  sampleRate: z.number().gt(0).lte(1).optional(),
   // Sent only by an SDK configured with a `sampleKey`; absent otherwise.
   encryptedSample: encryptedSampleSchema.nullable().optional(),
 });
