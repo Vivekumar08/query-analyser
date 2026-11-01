@@ -203,14 +203,18 @@ export function lex(text: string): Token[] {
         if ((e === '-' && f === 45) || (e === '/' && f === 42)) break;
         j++;
       }
-      let run = text.slice(i, j);
-      if (run.length > 1) {
+      // Postgres: a multi-character operator may not end in + or - unless it contains
+      // one of ~!@#%^&|`?. The stripped tail is then all + and -, so each one is its own
+      // one-character operator. One pass over the run; never re-slices it (linear time).
+      let end = j;
+      if (j - i > 1) {
         let keep = false;
-        for (const x of run) if (OP_KEEP_TRAILING.has(x)) { keep = true; break; }
-        if (!keep) while (run.length > 1 && (run.endsWith('+') || run.endsWith('-'))) run = run.slice(0, -1);
+        for (let k = i; k < j; k++) if (OP_KEEP_TRAILING.has(text[k] as string)) { keep = true; break; }
+        if (!keep) while (end - i > 1 && (text.charCodeAt(end - 1) === 43 || text.charCodeAt(end - 1) === 45)) end--;
       }
-      out.push({ kind: 'op', text: run });
-      i += run.length;
+      out.push({ kind: 'op', text: text.slice(i, end) });
+      for (let k = end; k < j; k++) out.push({ kind: 'op', text: text[k] as string });
+      i = j;
       continue;
     }
 

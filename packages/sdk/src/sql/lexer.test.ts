@@ -54,6 +54,8 @@ describe('lex', () => {
     expect(lex('a+/* c */b').map((t) => t.text)).toEqual(['a', '+', 'b']);
     expect(lex('a=-1').map((t) => t.text)).toEqual(['a', '=', '-', '1']);
     expect(lex('a @- b').map((t) => t.text)).toEqual(['a', '@-', 'b']);
+    expect(lex('a <+- b').map((t) => t.text)).toEqual(['a', '<', '+', '-', 'b']);
+    expect(lex('+++').map((t) => t.text)).toEqual(['+', '+', '+']);
   });
 
   it('an E string keeps backslash-escaped quotes inside', () =>
@@ -73,7 +75,7 @@ describe('lex', () => {
   });
 
   it('stays linear on adversarial input', () => {
-    const inputs = ['/*'.repeat(100_000), '$a'.repeat(100_000), "E'\\".repeat(100_000), '-'.repeat(200_000), '$$'.repeat(100_000)];
+    const inputs = ['/*'.repeat(100_000), '$a'.repeat(100_000), "E'\\".repeat(100_000), '-'.repeat(200_000), '$$'.repeat(100_000), '+'.repeat(200_000), '<' + '+-'.repeat(100_000)];
     const start = performance.now();
     for (const s of inputs) lex(s);
     expect(performance.now() - start).toBeLessThan(2_000);
