@@ -323,20 +323,27 @@ const KEYWORD_CONTEXT: ReadonlyMap<string, (prev: NToken | undefined, next: NTok
  * functions when called, and built-in type names in a cast. Every other name is masked.
  */
 function mask(toks: NToken[], key: MaskKey | undefined): NToken[] {
+  // One HMAC per distinct name in this statement; bounded by the statement's token count.
+  const memo = new Map<string, string>();
+  const maskOnce = (name: string): string => {
+    let v = memo.get(name);
+    if (v === undefined) { v = maskName(name, key); memo.set(name, v); }
+    return v;
+  };
   const out: NToken[] = [];
   for (let i = 0; i < toks.length; i++) {
     const tok = toks[i] as NToken;
     const prev = toks[i - 1];
     const next = toks[i + 1];
     if (tok.k === 'quoted') {
-      out.push({ ...tok, t: maskName(tok.name ?? '', key) });
+      out.push({ ...tok, t: maskOnce(tok.name ?? '') });
     } else if (tok.k === 'word') {
       const keep = (tok.type === true && BUILTIN_TYPES.has(tok.t)) || (KNOWN_FUNCTIONS.has(tok.t) && isPunct(next, '('));
-      out.push(keep ? tok : { ...tok, t: maskName(tok.name ?? tok.t, key) });
+      out.push(keep ? tok : { ...tok, t: maskOnce(tok.name ?? tok.t) });
     } else if (tok.k === 'kw' && !RESERVED_KEYWORDS.has(tok.t)) {
       const ctx = KEYWORD_CONTEXT.get(tok.t);
       const asName = isPunct(prev, '.') || isPunct(next, '.') || (ctx !== undefined && !ctx(prev, next));
-      out.push(asName ? { k: 'word', t: maskName(asciiLower(tok.t), key) } : tok);
+      out.push(asName ? { k: 'word', t: maskOnce(asciiLower(tok.t)) } : tok);
     } else {
       out.push(tok);
     }
