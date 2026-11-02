@@ -93,21 +93,67 @@ function globalFolders(): Set<string> {
   }
 }
 
-/** The node_modules directories the app's own lookup walks (same strategies as resolvePeer), minus the global folders. */
-function appLookupDirs(name: string): string[] {
-  const globals = globalFolders();
-  const dirs = viaStrategies((req) => req.resolve.paths(name));
-  return (dirs ?? []).filter((d) => !globals.has(d));
+/** pnpm's hidden hoist of every package in the workspace (`node_modules/.pnpm/node_modules`): never the app's own install. */
+const PNPM_HIDDEN_HOIST = join('node_modules', '.pnpm', 'node_modules');
+
+/** The module-relative file the SDK resolves from: `__filename` (CJS build), else `import.meta.url` (ESM build). */
+function moduleFileOf(): string | null {
+  try {
+    if (typeof __filename !== 'undefined') return __filename;
+  } catch { /* next */ }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    if (typeof import.meta !== 'undefined' && import.meta.url) return import.meta.url;
+  } catch { /* none */ }
+  return null;
+}
+
+/** `createRequire(from).resolve.paths(name)`; [] on any failure. */
+function lookupFrom(from: string | null, name: string): string[] {
+  try {
+    if (from === null) return [];
+    const dirs = createRequire(from).resolve.paths(name);
+    return Array.isArray(dirs) ? dirs : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
- * Like resolvePeerPath, but only for a package installed in the app's own node_modules chain: a copy
- * reachable only through NODE_PATH (pnpm hoists every transitive package there) or another global folder
- * gives null. `from.lookup` replaces the chain (tests). Never throws.
+ * The node_modules directories the app's own lookup walks: the module-relative chain, then the cwd chain
+ * (an SDK hoisted to a monorepo root still finds the app's nested copy), de-duplicated in that order.
+ * Dropped: the global folders (NODE_PATH, ~/.node_modules…) and pnpm's hidden hoist directory.
+ * `from` replaces the module file and the cwd (tests).
  */
-export function resolveAppPath(name: string, from?: { lookup?: readonly string[] }): string | null {
+export function appLookupDirs(name: string, from?: { moduleFile?: string; cwd?: string }): string[] {
   try {
-    for (const dir of from?.lookup ?? appLookupDirs(name)) {
+    const globals = globalFolders();
+    const out: string[] = [];
+    const chains = [
+      lookupFrom(from?.moduleFile ?? moduleFileOf(), name),
+      lookupFrom(join(from?.cwd ?? process.cwd(), '__query_analyser__.js'), name),
+    ];
+    for (const chain of chains) {
+      for (const d of chain) {
+        if (typeof d !== 'string' || globals.has(d) || d.endsWith(PNPM_HIDDEN_HOIST) || out.includes(d)) continue;
+        out.push(d);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Like resolvePeerPath, but only for a package installed in the app's own node_modules chains (see
+ * appLookupDirs): a copy reachable only through NODE_PATH, a global folder or pnpm's hidden hoist gives null.
+ * `from.lookup` replaces the directories; `from.moduleFile` / `from.cwd` replace where the chains start (tests).
+ * Never throws.
+ */
+export function resolveAppPath(name: string, from?: { lookup?: readonly string[]; moduleFile?: string; cwd?: string }): string | null {
+  try {
+    for (const dir of from?.lookup ?? appLookupDirs(name, from)) {
       if (!existsSync(join(dir, name))) continue;
       try {
         // Resolve from the directory that owns this node_modules, so this copy is the first one found.

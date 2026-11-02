@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
@@ -850,6 +850,8 @@ describe('sql layers', () => {
   };
 
   afterEach(() => { vi.restoreAllMocks(); });
+  // Decision 18's once-per-process flag lives on the runtime, so each test starts unwarned.
+  beforeEach(() => { sqlRuntime().engineWarningReported = false; });
 
   it('init() wraps the resolved pg Client.prototype.query, and shutdown() restores it', async () => {
     const pg = createRequire(import.meta.url)('pg');
@@ -923,7 +925,7 @@ describe('sql layers', () => {
   });
 
   it('an invalid thresholdMs is reported once and treated as 100', async () => {
-    for (const thresholdMs of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    for (const thresholdMs of [-1, -0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '50' as unknown as number]) {
       const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
       const a = init({ apiKey: 'k', app: 'x', fetchImpl, onError, thresholdMs });
       expect(messages(onError)).toEqual(['query-analyser: thresholdMs must be a whole number of milliseconds, 0 or more; using 100']);
@@ -931,6 +933,19 @@ describe('sql layers', () => {
       await a.flush();
       expect(onError).toHaveBeenCalledTimes(1);
       expect(JSON.parse(bodyText(fetchImpl))).toMatchObject({ thresholdMs: 100 });
+      await shutdown();
+    }
+  });
+
+  it('a fractional thresholdMs is rounded without a warning; null and undefined mean the default', async () => {
+    const cases: Array<[number | null | undefined, number]> = [[1.5, 2], [0.4, 0], [99.5, 100], [250.2, 250], [null, 100], [undefined, 100], [0, 0]];
+    for (const [thresholdMs, sent] of cases) {
+      const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
+      const a = init({ apiKey: 'k', app: 'x', fetchImpl, onError, thresholdMs: thresholdMs as number });
+      sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
+      await a.flush();
+      expect(onError).not.toHaveBeenCalled();
+      expect(JSON.parse(bodyText(fetchImpl))).toMatchObject({ thresholdMs: sent });
       await shutdown();
     }
   });
@@ -995,6 +1010,25 @@ describe('sql layers', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it('a bundled pg given to instrument() is wrapped again by a later init(), after a shutdown()', async () => {
+    const bundled = fakePg();
+    instrument(new bundled.Pool());
+    expect(PG_QUERY_WRAP in bundled.Client.prototype).toBe(true);
+    expect(PG_POOL_QUERY_WRAP in bundled.Pool.prototype).toBe(true);
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    await shutdown();
+    expect(PG_QUERY_WRAP in bundled.Client.prototype).toBe(false);
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    expect(PG_QUERY_WRAP in bundled.Client.prototype).toBe(true);
+    expect(PG_POOL_QUERY_WRAP in bundled.Pool.prototype).toBe(true);
+    await shutdown();
+    // Remembered once per class, not per call.
+    instrument(new bundled.Pool()); instrument(new bundled.Client());
+    const seen = sqlRuntime().instrumentedPg!;
+    expect(seen.clients.filter((C) => C === bundled.Client)).toHaveLength(1);
+    expect(seen.pools.filter((P) => P === bundled.Pool)).toHaveLength(1);
+  });
+
   it('instrument() never throws, whatever it is given', () => {
     const hostile = new Proxy({}, { get() { throw new Error('boom'); }, has() { throw new Error('boom'); } });
     expect(() => instrument(hostile)).not.toThrow();
@@ -1042,7 +1076,6 @@ describe('sql layers', () => {
     expect(sqlRuntime().pgCoversPrismaAdapter).toBe(false);
   });
 
-  // The engine-path warning is once per process: every case that must NOT warn runs before the one that does.
   it('no engine-path warning for Prisma 7, with the adapter, or with an app helper', async () => {
     const noAdapter = { clients: [], pools: [], adapterResolved: false };
     const cases: Array<[string | null, boolean, boolean]> = [
@@ -1058,6 +1091,7 @@ describe('sql layers', () => {
       await shutdown();
       delete g.PRISMA_INSTRUMENTATION;
       vi.restoreAllMocks();
+      expect(sqlRuntime().engineWarningReported).toBe(false);
     }
   });
 
@@ -1069,6 +1103,19 @@ describe('sql layers', () => {
     await shutdown();
     init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError });
     expect(messages(onError)).toEqual([engineWarning('6.19.3')]);
+    expect(sqlRuntime().engineWarningReported).toBe(true);
+  });
+
+  it('the engine-path warning is not repeated by a later init() once reported (5.x)', async () => {
+    vi.spyOn(drivers, 'prismaClientVersion').mockReturnValue('5.22.0');
+    vi.spyOn(drivers, 'resolvePgClients').mockReturnValue({ clients: [], pools: [], adapterResolved: false });
+    const first = vi.fn();
+    init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError: first });
+    expect(messages(first)).toEqual([engineWarning('5.22.0')]);
+    await shutdown();
+    const second = vi.fn();
+    init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError: second });
+    expect(second).not.toHaveBeenCalled();
   });
 
   it('the engine-path warning trusts only an @prisma/client the app itself resolves', () => {

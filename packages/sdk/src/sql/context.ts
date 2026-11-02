@@ -21,6 +21,13 @@ export interface SqlRuntime {
    * Optional: a runtime created by an older SDK copy lacks it, which reads as false.
    */
   pgCoversPrismaAdapter?: boolean;
+  /** Decision 18's engine-path warning was reported (once per process, across SDK copies). Optional: older copies lack it. */
+  engineWarningReported?: boolean;
+  /**
+   * pg Client and Pool classes handed to `instrument()` (a bundled pg the SDK can't resolve). `shutdown()` unwraps
+   * them with the rest; every later `init()` wraps them again. Classes only, never the pool or client instances.
+   */
+  instrumentedPg?: { clients: Function[]; pools: Function[] };
 }
 
 export const SQL_RUNTIME: unique symbol = Symbol.for('query-analyser.sql-runtime') as typeof SQL_RUNTIME;
