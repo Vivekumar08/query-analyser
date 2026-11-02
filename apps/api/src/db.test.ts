@@ -66,4 +66,12 @@ describe('database', () => {
     await prisma.app.delete({ where: { id: app.id } });
     expect(await prisma.quotaDrop.count()).toBe(0);
   });
+  it('the histFine length checks are validated', async () => {
+    const rows = await prisma.$queryRaw<{ conname: string; convalidated: boolean }[]>`
+      SELECT conname, convalidated FROM pg_constraint WHERE conname LIKE '%histFine_length_check' ORDER BY conname`;
+    expect(rows).toEqual([
+      { conname: 'QueryDailyRollup_histFine_length_check', convalidated: true },
+      { conname: 'QueryRollup_histFine_length_check', convalidated: true },
+    ]);
+  });
 });
