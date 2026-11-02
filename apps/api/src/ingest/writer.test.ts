@@ -221,3 +221,80 @@ describe('source and collection', () => {
     expect(await find(app.id)).toMatchObject({ collection: 'orders', source: 'mongodb' });
   });
 });
+
+describe('sql items', () => {
+  const FINE = [0, 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  function sqlItem(over: Partial<IngestItem> = {}): IngestItem {
+    return {
+      signature: 'SELECT id FROM users WHERE id = ?', hash: 'b'.repeat(16), model: 'User', operation: 'findMany',
+      filterShape: [], sortKeys: [], stages: [],
+      count: 6, totalMs: 40, maxMs: 30, lastMs: 3, lastTs: 1758378000000,
+      hist: [0, 0, 0, 0, 0, 0, 0, 0], sample: null,
+      source: 'postgresql', collection: 'User', orm: 'prisma', database: 'shop',
+      sql: 'SELECT id FROM "User" WHERE id = ?', errors: 1,
+      errorCodes: [{ code: '23505', count: 1 }], histFine: FINE, sampleRate: 0.5,
+      ...over,
+    };
+  }
+  async function sig(appId: string, hash = 'b'.repeat(16)) {
+    return prisma.querySignature.findUniqueOrThrow({ where: { appId_hash: { appId, hash } } });
+  }
+  async function rolls(signatureId: string) {
+    return prisma.queryRollup.findMany({ where: { signatureId } });
+  }
+
+  it('stores orm, database, sqlText and lastErrorCode on insert', async () => {
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, payload([sqlItem()]));
+    expect(await sig(app.id)).toMatchObject({
+      orm: 'prisma', database: 'shop', sqlText: 'SELECT id FROM "User" WHERE id = ?', lastErrorCode: '23505',
+      model: 'User', operation: 'findMany', collection: 'User', source: 'postgresql',
+    });
+    const [r] = await rolls((await sig(app.id)).id);
+    expect(r).toMatchObject({ errors: 1, histFine: FINE, minSampleRate: 0.5 });
+  });
+
+  it('a 0.3 Mongo item stores nulls, errors 0 and an empty histFine', async () => {
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, payload([item()]));
+    const s = await sig(app.id, 'a'.repeat(16));
+    expect(s).toMatchObject({ orm: null, database: null, sqlText: null, lastErrorCode: null });
+    const [r] = await rolls(s.id);
+    expect(r).toMatchObject({ errors: 0, histFine: [], minSampleRate: null });
+  });
+
+  it('label rule: a pg-first row is relabelled by the first prisma item, then never again', async () => {
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, payload([sqlItem({ orm: undefined, model: 'users', operation: 'select' })]));
+    expect(await sig(app.id)).toMatchObject({ orm: null, model: 'users', operation: 'select' });
+    await writeBatch(prisma, app.id, payload([sqlItem({ orm: 'prisma', model: 'User', operation: 'findMany' })]));
+    await writeBatch(prisma, app.id, payload([sqlItem({ orm: 'prisma', model: 'User', operation: 'findFirst' })]));
+    expect(await sig(app.id)).toMatchObject({ orm: 'prisma', model: 'User', operation: 'findMany' });
+  });
+
+  it('accumulates errors and histFine, and keeps the lowest sample rate', async () => {
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, payload([sqlItem({ errors: 1, sampleRate: 0.5, errorCodes: [{ code: '23505', count: 1 }] })]));
+    await writeBatch(prisma, app.id, payload([sqlItem({ errors: 2, sampleRate: 0.1, errorCodes: [{ code: '40001', count: 2 }] })]));
+    await writeBatch(prisma, app.id, payload([sqlItem({ errors: 0, sampleRate: undefined, errorCodes: undefined })]));
+    const s = await sig(app.id);
+    expect(s.lastErrorCode).toBe('40001');
+    const [r] = await rolls(s.id);
+    expect(r).toMatchObject({ errors: 3, minSampleRate: 0.1, histFine: FINE.map((n) => n * 3) });
+  });
+
+  it('a Mongo rollup and a SQL rollup in one batch each keep their own histFine', async () => {
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, payload([item(), sqlItem()]));
+    const m = await rolls((await sig(app.id, 'a'.repeat(16))).id);
+    const q = await rolls((await sig(app.id)).id);
+    expect(m[0]!.histFine).toEqual([]);
+    expect(q[0]!.histFine).toEqual(FINE);
+  });
+
+  it('records the payload thresholdMs on the app', async () => {
+    const app = await seedApp();
+    await writeBatch(prisma, app.id, { ...payload([sqlItem()]), thresholdMs: 250 });
+    expect((await prisma.app.findUniqueOrThrow({ where: { id: app.id } })).thresholdMs).toBe(250);
+  });
+});

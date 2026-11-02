@@ -77,6 +77,29 @@ describe('compactDay', () => {
     expect(daily.hist).toEqual([1, 3, 3, 0, 0, 0, 0, 0]);
   });
 
+  it('sums errors and histFine and keeps the minimum rate over a day', async () => {
+    const fine = (n: number) => [n, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    await app.prisma.queryRollup.createMany({
+      data: [
+        { signatureId, bucketHour: new Date('2026-09-11T01:00:00.000Z'), count: 3, totalMs: 30n, maxMs: 12, hist: [0, 0, 0, 0, 0, 0, 0, 0], errors: 1, histFine: fine(2), minSampleRate: 0.5 },
+        { signatureId, bucketHour: new Date('2026-09-11T02:00:00.000Z'), count: 4, totalMs: 40n, maxMs: 15, hist: [0, 0, 0, 0, 0, 0, 0, 0], errors: 2, histFine: fine(3), minSampleRate: 0.2 },
+        { signatureId, bucketHour: new Date('2026-09-11T03:00:00.000Z'), count: 1, totalMs: 5n, maxMs: 5, hist: [0, 0, 0, 0, 0, 0, 0, 0] },
+      ],
+    });
+    await compactDay(app.prisma, new Date('2026-09-11T00:00:00.000Z'));
+    const daily = await app.prisma.queryDailyRollup.findFirstOrThrow({ where: { signatureId } });
+    expect(daily).toMatchObject({ errors: 3, minSampleRate: 0.2, histFine: fine(5).map((v, i) => (i === 1 ? 2 : v)) });
+  });
+
+  it('a day of Mongo rollups compacts with an empty histFine', async () => {
+    await app.prisma.queryRollup.createMany({
+      data: [{ signatureId, bucketHour: new Date('2026-09-12T01:00:00.000Z'), count: 3, totalMs: 30n, maxMs: 12, hist: [1, 0, 0, 0, 0, 0, 0, 0] }],
+    });
+    await compactDay(app.prisma, new Date('2026-09-12T00:00:00.000Z'));
+    const daily = await app.prisma.queryDailyRollup.findFirstOrThrow({ where: { signatureId } });
+    expect(daily).toMatchObject({ errors: 0, histFine: [], minSampleRate: null });
+  });
+
   it('is idempotent — running twice does not double the numbers', async () => {
     await app.prisma.queryRollup.create({
       data: {

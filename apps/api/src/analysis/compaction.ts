@@ -38,25 +38,49 @@ export async function compactDay(prisma: PrismaClient, day: Date): Promise<numbe
       ) q
       GROUP BY "signatureId"
     ),
+    exploded_fine AS (
+      SELECT r."signatureId", u.i, u.v
+      FROM "QueryRollup" r,
+           unnest(r."histFine") WITH ORDINALITY AS u(v, i)
+      WHERE r."bucketHour" >= ${day}
+        AND r."bucketHour" <  ${day}::timestamptz + interval '1 day'
+        AND cardinality(r."histFine") = 14
+    ),
+    hists_fine AS (
+      SELECT "signatureId", array_agg(s ORDER BY i) AS hist_fine
+      FROM (
+        SELECT "signatureId", i, sum(v)::int AS s
+        FROM exploded_fine
+        GROUP BY "signatureId", i
+      ) q
+      GROUP BY "signatureId"
+    ),
     totals AS (
       SELECT r."signatureId",
              sum(r."count")::int    AS count,
              sum(r."totalMs")       AS "totalMs",
-             max(r."maxMs")::int    AS "maxMs"
+             max(r."maxMs")::int    AS "maxMs",
+             sum(r."errors")::int   AS errors,
+             min(r."minSampleRate") AS "minSampleRate"
       FROM "QueryRollup" r
       WHERE r."bucketHour" >= ${day}
         AND r."bucketHour" <  ${day}::timestamptz + interval '1 day'
       GROUP BY r."signatureId"
     )
-    INSERT INTO "QueryDailyRollup" ("id","signatureId","day","count","totalMs","maxMs","hist")
-    SELECT gen_random_uuid(), t."signatureId", ${day}, t.count, t."totalMs", t."maxMs", h.hist
+    INSERT INTO "QueryDailyRollup" ("id","signatureId","day","count","totalMs","maxMs","hist","errors","histFine","minSampleRate")
+    SELECT gen_random_uuid(), t."signatureId", ${day}, t.count, t."totalMs", t."maxMs", h.hist,
+           t.errors, COALESCE(h2.hist_fine, '{}'), t."minSampleRate"
     FROM totals t
     JOIN hists h ON h."signatureId" = t."signatureId"
+    LEFT JOIN hists_fine h2 ON h2."signatureId" = t."signatureId"
     ON CONFLICT ("signatureId","day") DO UPDATE SET
       "count"   = EXCLUDED."count",
       "totalMs" = EXCLUDED."totalMs",
       "maxMs"   = EXCLUDED."maxMs",
-      "hist"    = EXCLUDED."hist"
+      "hist"    = EXCLUDED."hist",
+      "errors"  = EXCLUDED."errors",
+      "histFine" = EXCLUDED."histFine",
+      "minSampleRate" = EXCLUDED."minSampleRate"
   `;
 }
 
