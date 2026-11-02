@@ -4,6 +4,7 @@ import type { PrismaClient } from '../db.js';
 import type { EncryptedSample } from '@query-analyser/contract';
 import { FINE_HIST_SIZE } from '@query-analyser/contract/runtime';
 import { requireAppRole } from '../orgs/rbac.js';
+import { summarise } from './summary.js';
 import { percentilesFor, completeFine, isSqlSource, avgMs } from './percentile.js';
 
 const MAX_LIMIT = 200;
@@ -64,6 +65,8 @@ const windowQuerySchema = z.object({
   from: isoDate.optional(),
   to: isoDate.optional(),
 });
+
+const summaryQuerySchema = listQuerySchema.pick({ from: true, to: true, source: true, orm: true });
 
 /** Only `APPLIED`/`DISMISSED` are settable through the API — `OPEN` is the default, never a target. */
 const adviceStatusSchema = z.object({ status: z.enum(['APPLIED', 'DISMISSED']) });
@@ -417,6 +420,19 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
       to: to.toISOString(),
       items,
     };
+  });
+
+  app.get('/v1/apps/:id/summary', read, async (req, reply) => {
+    const parsed = summaryQuerySchema.safeParse(req.query);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid query' });
+    const window = resolveWindow(parsed.data);
+    if (!window) return reply.code(400).send({ error: 'from must not be after to' });
+    const { from, to, grain } = window;
+    const body = await summarise(app.prisma, req.appId, window, {
+      source: parsed.data.source ?? null,
+      orm: parsed.data.orm ?? null,
+    });
+    return { grain, from: from.toISOString(), to: to.toISOString(), ...body };
   });
 
   app.get('/v1/apps/:id/queries/:sig', read, async (req, reply) => {
