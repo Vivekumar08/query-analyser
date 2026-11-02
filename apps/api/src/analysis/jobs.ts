@@ -1,7 +1,7 @@
 import type { PrismaClient } from '../db.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { isForeignKeyViolation } from '../db-errors.js';
-import { compactDay, pruneHourly, pruneDailyByPlan } from './compaction.js';
+import { compactDay, pruneHourly, pruneDailyByPlan, pruneQuotaDropsByPlan } from './compaction.js';
 import { DEFAULT_RETENTION_GRACE_UNTIL } from '../plans.js';
 import { detectRegression, type HourPoint } from './regression.js';
 import { percentileFromHist } from './percentile.js';
@@ -22,8 +22,6 @@ function asJsonArray(suggestion: SuggestionField[]): Prisma.InputJsonArray {
 
 const HOURLY_RETENTION_DAYS = 7;
 const TRAILING_DAYS = 7;
-/** QuotaDrop rows feed the dashboard's quota notice; older ones are noise. */
-const QUOTA_DROP_RETENTION_DAYS = 30;
 
 export interface JobDeps {
   prisma: PrismaClient;
@@ -165,9 +163,7 @@ export async function runNightlyJobs(deps: JobDeps): Promise<NightlyResult> {
   const graceUntil = deps.retentionGraceUntil ?? new Date(`${DEFAULT_RETENTION_GRACE_UNTIL}T00:00:00.000Z`);
   const dailyPruned = await pruneDailyByPlan(deps.prisma, now, graceUntil);
 
-  const { count: quotaDropsPruned } = await deps.prisma.quotaDrop.deleteMany({
-    where: { bucketHour: { lt: daysAgo(now, QUOTA_DROP_RETENTION_DAYS) } },
-  });
+  const quotaDropsPruned = await pruneQuotaDropsByPlan(deps.prisma, now, graceUntil);
 
   return { daysCompacted, hourlyPruned, dailyPruned, adviceWritten, newExpensive, quotaDropsPruned };
 }

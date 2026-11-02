@@ -101,20 +101,29 @@ describe('runNightlyJobs', () => {
     expect(order.indexOf('compact')).toBeLessThan(order.indexOf('prune'));
   });
 
-  it('prunes QuotaDrop rows older than 30 days and keeps newer ones', async () => {
-    const org = await app.prisma.organization.create({ data: { name: 'Q', slug: 'q' } });
-    const a = await app.prisma.app.create({ data: { orgId: org.id, name: 'web', env: 'prod' } });
+  it('prunes QuotaDrop per app by plan retention, at UTC day boundaries', async () => {
+    const mk = async (slug: string, plan: string) => {
+      const org = await app.prisma.organization.create({ data: { name: slug, slug, plan } });
+      return app.prisma.app.create({ data: { orgId: org.id, name: slug, env: 'prod' } });
+    };
+    const free = await mk('qf', 'free');
+    const pro = await mk('qp', 'pro');
     const now = new Date('2026-09-20T02:00:00.000Z');
+    const past = new Date('2027-02-01T00:00:00.000Z'); // plan values apply (grace over)
+    // Cutoffs at 2026-09-20T02:00: free 30d -> 08-21T00:00 (day-truncated), pro 90d -> 06-22T00:00.
     await app.prisma.quotaDrop.createMany({
       data: [
-        { appId: a.id, bucketHour: new Date('2026-08-10T05:00:00.000Z'), droppedNew: 4 },
-        { appId: a.id, bucketHour: new Date('2026-09-10T05:00:00.000Z'), droppedNew: 7 },
+        { appId: free.id, bucketHour: new Date('2026-08-21T00:00:00.000Z'), droppedNew: 1 }, // first hour of window: kept
+        { appId: free.id, bucketHour: new Date('2026-08-20T23:00:00.000Z'), droppedNew: 2 }, // pruned
+        { appId: pro.id, bucketHour: new Date('2026-08-01T05:00:00.000Z'), droppedNew: 3 }, // inside 90d: kept
+        { appId: pro.id, bucketHour: new Date('2026-06-21T23:00:00.000Z'), droppedNew: 4 }, // pruned
       ],
     });
-    const res = await runNightlyJobs({ prisma: app.prisma, now });
-    expect(res.quotaDropsPruned).toBe(1);
+    const res = await runNightlyJobs({ prisma: app.prisma, now: new Date('2026-09-20T02:00:00.000Z'), retentionGraceUntil: new Date('2026-01-01T00:00:00.000Z') });
+    void past;
+    expect(res.quotaDropsPruned).toBe(2);
     const left = await app.prisma.quotaDrop.findMany();
-    expect(left.map((r) => r.droppedNew)).toEqual([7]);
+    expect(left.map((r) => r.droppedNew).sort()).toEqual([1, 3]);
   });
 
   it('prunes hourly at 7 days and daily by plan', async () => {

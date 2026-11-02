@@ -125,9 +125,8 @@ describe('POST /v1/ingest', () => {
     const res = await post(key, payload(3));
     expect(res.statusCode).toBe(202);
     expect(res.json()).toEqual({ accepted: 0, droppedNew: 3 });
-    const drop = await app.prisma.quotaDrop.findUniqueOrThrow({
-      where: { appId_bucketHour: { appId: a.id, bucketHour: writer.bucketToDate('2026092014') } },
-    });
+    // Recorded under the server's current hour, not the payload's bucket.
+    const drop = await app.prisma.quotaDrop.findFirstOrThrow({ where: { appId: a.id } });
     expect(drop.droppedNew).toBe(3);
     expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
   });
@@ -178,7 +177,25 @@ describe('POST /v1/ingest', () => {
     const [r1, r2] = await Promise.all([post(key, mk('x')), post(key, mk('y'))]);
     expect(r1.statusCode).toBe(202);
     expect(r2.statusCode).toBe(202);
+    const [b1, b2] = [r1.json(), r2.json()];
+    expect(b1.accepted + b2.accepted).toBe(10);
+    expect(b1.droppedNew + b2.droppedNew).toBe(10);
     expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
+    const drops = await app.prisma.quotaDrop.findMany({ where: { appId: a.id } });
+    expect(drops.reduce((n, d) => n + d.droppedNew, 0)).toBe(10);
+    expect(app.ingestStats.droppedNew).toBeGreaterThanOrEqual(10);
+  });
+
+  it('records the drop under the server hour, not a client-supplied future bucket', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 5000);
+    const body = payload(2);
+    body.bucket = '2099010100';
+    const before = Date.now();
+    expect((await post(key, body)).json()).toEqual({ accepted: 0, droppedNew: 2 });
+    const rows = await app.prisma.quotaDrop.findMany({ where: { appId: a.id } });
+    expect(rows).toHaveLength(1);
+    expect(Math.abs(rows[0]!.bucketHour.getTime() - before)).toBeLessThan(2 * 3_600_000);
   });
 
   it('still accepts a batch of already-known signatures at quota', async () => {

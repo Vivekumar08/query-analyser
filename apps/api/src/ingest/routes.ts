@@ -1,12 +1,12 @@
 import type { FastifyInstance } from 'fastify';
+import { bucketOf } from '@query-analyser/contract/runtime';
 import { ingestPayloadSchema, type IngestPayload } from '@query-analyser/contract';
 import { writeBatch, bucketToDate } from './writer.js';
+import { withAppLock } from './lock.js';
 import { hashKey } from './keys.js';
 import { isForeignKeyViolation } from '../db-errors.js';
 
 const SIGNATURE_QUOTA = 5000;
-// Tail of each app's in-flight quota check + write.
-const quotaLocks = new Map<string, Promise<void>>();
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 // A legitimate SDK instance flushes once per 10s (6 requests/min), so
 // 600/min supports ~100 instances sharing one egress IP (e.g. behind a
@@ -22,10 +22,11 @@ export interface IngestRoutesOptions {
 export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptions = {}): Promise<void> {
   const rateLimitMax = opts.rateLimitMax ?? DEFAULT_RATE_LIMIT_MAX;
 
-  // Count every 429 this route emits (rate-limit only; the quota never 429s). @fastify/rate-limit's own preHandler can reject a request with
-  // 429 before the handler below ever runs, so counting only inside the
-  // quota branch would under-report during a rate-limit storm — exactly
-  // when an operator most needs `rejected429` to be accurate. This hook is
+  // Count every 429 this route emits. The signature quota no longer 429s;
+  // @fastify/rate-limit's own preHandler can reject a request with 429
+  // before the handler below ever runs, so counting in the handler would
+  // under-report during a rate-limit storm — exactly when an operator most
+  // needs `rejected429` to be accurate. This hook is
   // scoped to this plugin's encapsulation context, so it only observes
   // responses from the /v1/ingest route declared below.
   app.addHook('onResponse', async (_req, reply) => {
@@ -70,18 +71,7 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
       // overshoot is bounded by one batch per replica).
       const appId = resolved.appId;
       const keyId = resolved.keyId;
-      const prev = quotaLocks.get(appId) ?? Promise.resolve();
-      let release!: () => void;
-      const mine = new Promise<void>((r) => { release = r; });
-      const tail = prev.then(() => mine);
-      quotaLocks.set(appId, tail);
-      await prev;
-      try {
-        return await handleBatch();
-      } finally {
-        release();
-        if (quotaLocks.get(appId) === tail) quotaLocks.delete(appId);
-      }
+      return withAppLock(appId, handleBatch);
 
       async function handleBatch() {
       const dropped = new Set<string>();
@@ -133,7 +123,8 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
         .catch((err: unknown) => req.log.warn({ err }, 'lastUsedAt update failed'));
 
       if (dropped.size > 0) {
-        const bucketHour = bucketToDate(payload.bucket);
+        // Server clock, never the client's bucket: a far-future bucket would never be pruned.
+        const bucketHour = bucketToDate(bucketOf(new Date()));
         try {
           await app.prisma.$executeRaw`
             INSERT INTO "QuotaDrop" ("appId", "bucketHour", "droppedNew")

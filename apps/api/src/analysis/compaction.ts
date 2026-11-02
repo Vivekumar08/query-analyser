@@ -114,3 +114,25 @@ export async function pruneDailyByPlan(prisma: PrismaClient, now: Date, graceUnt
       AND d.day < CASE ${Prisma.join(known, ' ')} ELSE ${cutoff('free')}::timestamptz END
   `;
 }
+
+/**
+ * Deletes QuotaDrop rows older than each app's effective plan retention (the
+ * window the dashboard notice can look back over). The cutoff is truncated to
+ * UTC midnight so a window starting at a midnight never loses its first hours.
+ *
+ * @returns the number of rows deleted
+ */
+export async function pruneQuotaDropsByPlan(prisma: PrismaClient, now: Date, graceUntil: Date): Promise<number> {
+  const cutoff = (plan: string) => {
+    const t = new Date(now.getTime() - effectiveRetentionDays(plan, now, graceUntil) * 86_400_000);
+    return new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()));
+  };
+  const known = Object.keys(PLAN_LIMITS).map((plan) => Prisma.sql`WHEN o.plan = ${plan} THEN ${cutoff(plan)}::timestamptz`);
+  return prisma.$executeRaw`
+    DELETE FROM "QuotaDrop" q
+    USING "App" a, "Organization" o
+    WHERE a.id = q."appId"
+      AND o.id = a."orgId"
+      AND q."bucketHour" < CASE ${Prisma.join(known, ' ')} ELSE ${cutoff('free')}::timestamptz END
+  `;
+}
