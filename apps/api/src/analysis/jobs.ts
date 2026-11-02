@@ -296,7 +296,8 @@ async function refreshAdviceForApp(prisma: PrismaClient, appId: string): Promise
 
   for (;;) {
     const signatures = await prisma.querySignature.findMany({
-      where: { appId },
+      // Index advice is a Mongo concept: SQL signatures never get any.
+      where: { appId, OR: [{ source: null }, { source: 'mongodb' }] },
       select: {
         id: true,
         filterShape: true,

@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { PrismaClient } from '../db.js';
 import type { EncryptedSample } from '@query-analyser/contract';
+import { FINE_HIST_SIZE } from '@query-analyser/contract/runtime';
 import { requireAppRole } from '../orgs/rbac.js';
-import { percentileFromHist, avgMs } from './percentile.js';
+import { percentileFromHist, percentiles, avgMs } from './percentile.js';
 
 const MAX_LIMIT = 200;
 const DEFAULT_LIMIT = 50;
@@ -18,7 +19,7 @@ interface ResolvedWindow {
   grain: Grain;
 }
 
-const SORT_KEYS = ['wasted', 'count', 'p95', 'maxMs'] as const;
+const SORT_KEYS = ['wasted', 'count', 'p95', 'maxMs', 'errors'] as const;
 type SortKey = (typeof SORT_KEYS)[number];
 
 function isParsableDate(v: string): boolean {
@@ -42,6 +43,9 @@ const listQuerySchema = z.object({
   to: isoDate.optional(),
   model: z.string().min(1).max(200).optional(),
   op: z.string().min(1).max(200).optional(),
+  source: z.string().min(1).max(255).optional(),
+  orm: z.string().min(1).max(255).optional(),
+  database: z.string().min(1).max(255).optional(),
   sort: z.enum(SORT_KEYS).optional(),
   // `^\d+$` admitted '0' (and '00'), which `clampLimit` then silently turned
   // into the default 50 — a caller asking for nothing got a full page.
@@ -106,6 +110,14 @@ export interface RankRow {
   totalMs: bigint;
   maxMs: number;
   hist: number[];
+  source: string;
+  orm: string | null;
+  database: string | null;
+  errors: number;
+  /** Lowest sample rate in the window; null when nothing was sampled. */
+  minSampleRate: number | null;
+  /** Summed fine histogram over rollups that have one; null when none do. May be partial: see `completeFine`. */
+  histFine: number[] | null;
 }
 
 export interface RankParams {
@@ -114,6 +126,9 @@ export interface RankParams {
   to: Date;
   model: string | null;
   op: string | null;
+  source: string | null;
+  orm: string | null;
+  database: string | null;
   limit: number;
   /** Rows skipped before `limit` is applied; rank order is `rank_key DESC, s.id ASC`. */
   offset: number;
@@ -126,7 +141,7 @@ export interface RankParams {
 }
 
 /** The sort keys the database can rank by, so `limit` selects the right rows. */
-export const SQL_SORT_KEYS = ['wasted', 'count', 'maxMs'] as const;
+export const SQL_SORT_KEYS = ['wasted', 'count', 'maxMs', 'errors'] as const;
 export type SqlSortKey = (typeof SQL_SORT_KEYS)[number];
 export const isSqlSortKey = (k: SortKey): k is SqlSortKey =>
   (SQL_SORT_KEYS as readonly string[]).includes(k);
@@ -151,11 +166,15 @@ export async function queryHourlyRanking(prisma: PrismaClient, p: RankParams): P
   return prisma.$queryRaw<RankRow[]>`
     WITH agg AS (
       SELECT s.id AS sig_id, s.hash, s.signature, s.model, s.operation,
+             COALESCE(s.source, 'mongodb') AS source, s.orm, s.database,
              SUM(r."count")::int    AS count,
              SUM(r."totalMs")::bigint AS "totalMs",
              MAX(r."maxMs")::int    AS "maxMs",
+             SUM(r.errors)::int     AS errors,
+             MIN(r."minSampleRate") AS "minSampleRate",
              CASE ${p.sort}::text
                WHEN 'count' THEN SUM(r."count")::numeric
+               WHEN 'errors' THEN SUM(r.errors)::numeric
                WHEN 'maxMs' THEN MAX(r."maxMs")::numeric
                ELSE SUM(r."totalMs")::numeric
              END AS rank_key
@@ -165,11 +184,15 @@ export async function queryHourlyRanking(prisma: PrismaClient, p: RankParams): P
         AND r."bucketHour" BETWEEN ${p.from} AND ${p.to}
         AND (${p.model}::text IS NULL OR s.model = ${p.model})
         AND (${p.op}::text IS NULL OR s.operation = ${p.op})
-      GROUP BY s.id, s.hash, s.signature, s.model, s.operation
+        AND (${p.source}::text IS NULL OR COALESCE(s.source, 'mongodb') = ${p.source})
+        AND (${p.orm}::text IS NULL OR s.orm = ${p.orm})
+        AND (${p.database}::text IS NULL OR s.database = ${p.database})
+      GROUP BY s.id, s.hash, s.signature, s.model, s.operation, s.source, s.orm, s.database
       ORDER BY rank_key DESC, s.id ASC
       LIMIT ${p.limit} OFFSET ${p.offset}
     )
-    SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
+    SELECT a.hash, a.signature, a.model, a.operation, a.source, a.orm, a.database,
+           a.count, a."totalMs", a."maxMs", a.errors, a."minSampleRate",
            (
              SELECT ARRAY(
                SELECT SUM(h)::int
@@ -178,7 +201,17 @@ export async function queryHourlyRanking(prisma: PrismaClient, p: RankParams): P
                  AND r2."bucketHour" BETWEEN ${p.from} AND ${p.to}
                GROUP BY idx ORDER BY idx
              )
-           ) AS hist
+           ) AS hist,
+           (
+             SELECT NULLIF(ARRAY(
+               SELECT SUM(h)::int
+               FROM "QueryRollup" r3, unnest(r3."histFine") WITH ORDINALITY AS u(h, idx)
+               WHERE r3."signatureId" = a.sig_id
+                 AND r3."bucketHour" BETWEEN ${p.from} AND ${p.to}
+                 AND cardinality(r3."histFine") = 14
+               GROUP BY idx ORDER BY idx
+             ), '{}'::int[])
+           ) AS "histFine"
     FROM agg a
     ORDER BY a.rank_key DESC, a.sig_id ASC
   `;
@@ -189,11 +222,15 @@ export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Pr
   return prisma.$queryRaw<RankRow[]>`
     WITH agg AS (
       SELECT s.id AS sig_id, s.hash, s.signature, s.model, s.operation,
+             COALESCE(s.source, 'mongodb') AS source, s.orm, s.database,
              SUM(d."count")::int    AS count,
              SUM(d."totalMs")::bigint AS "totalMs",
              MAX(d."maxMs")::int    AS "maxMs",
+             SUM(d.errors)::int     AS errors,
+             MIN(d."minSampleRate") AS "minSampleRate",
              CASE ${p.sort}::text
                WHEN 'count' THEN SUM(d."count")::numeric
+               WHEN 'errors' THEN SUM(d.errors)::numeric
                WHEN 'maxMs' THEN MAX(d."maxMs")::numeric
                ELSE SUM(d."totalMs")::numeric
              END AS rank_key
@@ -203,11 +240,15 @@ export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Pr
         AND d.day BETWEEN ${p.from} AND ${p.to}
         AND (${p.model}::text IS NULL OR s.model = ${p.model})
         AND (${p.op}::text IS NULL OR s.operation = ${p.op})
-      GROUP BY s.id, s.hash, s.signature, s.model, s.operation
+        AND (${p.source}::text IS NULL OR COALESCE(s.source, 'mongodb') = ${p.source})
+        AND (${p.orm}::text IS NULL OR s.orm = ${p.orm})
+        AND (${p.database}::text IS NULL OR s.database = ${p.database})
+      GROUP BY s.id, s.hash, s.signature, s.model, s.operation, s.source, s.orm, s.database
       ORDER BY rank_key DESC, s.id ASC
       LIMIT ${p.limit} OFFSET ${p.offset}
     )
-    SELECT a.hash, a.signature, a.model, a.operation, a.count, a."totalMs", a."maxMs",
+    SELECT a.hash, a.signature, a.model, a.operation, a.source, a.orm, a.database,
+           a.count, a."totalMs", a."maxMs", a.errors, a."minSampleRate",
            (
              SELECT ARRAY(
                SELECT SUM(h)::int
@@ -216,23 +257,53 @@ export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Pr
                  AND d2.day BETWEEN ${p.from} AND ${p.to}
                GROUP BY idx ORDER BY idx
              )
-           ) AS hist
+           ) AS hist,
+           (
+             SELECT NULLIF(ARRAY(
+               SELECT SUM(h)::int
+               FROM "QueryDailyRollup" d3, unnest(d3."histFine") WITH ORDINALITY AS u(h, idx)
+               WHERE d3."signatureId" = a.sig_id
+                 AND d3.day BETWEEN ${p.from} AND ${p.to}
+                 AND cardinality(d3."histFine") = 14
+               GROUP BY idx ORDER BY idx
+             ), '{}'::int[])
+           ) AS "histFine"
     FROM agg a
     ORDER BY a.rank_key DESC, a.sig_id ASC
   `;
 }
 
+/**
+ * A fine histogram counts every statement, so it is only a faithful picture of
+ * a window when its buckets add up to the window's `count`. A window that mixes
+ * rollups with and without one (a deploy, a compaction of mixed hours) sums to
+ * fewer, and reading that as complete would bias every percentile low. Such a
+ * window falls back to the coarse histogram.
+ */
+export function completeFine(histFine: number[] | null, count: number): number[] | null {
+  if (!histFine || histFine.length === 0) return null;
+  return histFine.reduce((a, b) => a + b, 0) === count ? histFine : null;
+}
+
 function toItem(r: RankRow) {
+  const pct = percentiles(r.hist, completeFine(r.histFine, r.count), r.maxMs);
   return {
     hash: r.hash,
     signature: r.signature,
     model: r.model,
     operation: r.operation,
+    source: r.source,
+    orm: r.orm,
+    errors: r.errors,
+    sampled: r.minSampleRate !== null,
+    sampleRate: r.minSampleRate,
     count: r.count,
     totalMs: r.totalMs,
     maxMs: r.maxMs,
     avgMs: avgMs(r.totalMs, r.count),
-    p95: percentileFromHist(r.hist, r.maxMs, 0.95),
+    p50: pct.p50,
+    p95: pct.p95,
+    p99: pct.p99,
   };
 }
 
@@ -263,18 +334,34 @@ function sortItems(items: ReturnType<typeof toItem>[], sort: SortKey): ReturnTyp
         return it.maxMs;
       case 'wasted':
         return Number(it.totalMs);
+      case 'errors':
+        return it.errors;
     }
   };
   return [...items].sort((a, b) => keyOf(b) - keyOf(a));
 }
 
-function pointOf(r: { count: number; totalMs: bigint; maxMs: number; hist: number[] }) {
+function pointOf(r: {
+  count: number;
+  totalMs: bigint;
+  maxMs: number;
+  hist: number[];
+  errors: number;
+  histFine: number[];
+  minSampleRate: number | null;
+}) {
+  const pct = percentiles(r.hist, completeFine(r.histFine, r.count), r.maxMs);
   return {
     count: r.count,
     totalMs: r.totalMs,
     maxMs: r.maxMs,
     avgMs: avgMs(r.totalMs, r.count),
-    p95: percentileFromHist(r.hist, r.maxMs, 0.95),
+    errors: r.errors,
+    sampled: r.minSampleRate !== null,
+    sampleRate: r.minSampleRate,
+    p50: pct.p50,
+    p95: pct.p95,
+    p99: pct.p99,
   };
 }
 
@@ -293,6 +380,9 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
     const offset = q.offset ? Number(q.offset) : 0;
     const model = q.model ?? null;
     const op = q.op ?? null;
+    const source = q.source ?? null;
+    const orm = q.orm ?? null;
+    const database = q.database ?? null;
     const sort: SortKey = q.sort ?? 'wasted';
 
     // `sort` chooses the RANKING the `LIMIT` is applied to, not the order of a
@@ -306,6 +396,9 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
       to,
       model,
       op,
+      source,
+      orm,
+      database,
       // One extra row tells us whether another page exists without a COUNT(*).
       limit: limit + 1,
       offset,
@@ -352,6 +445,19 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
     const totalMs = rollups.reduce((n, r) => n + r.totalMs, 0n);
     const maxMs = rollups.reduce((n, r) => Math.max(n, r.maxMs), 0);
     const hist = sumHists(rollups.map((r) => r.hist));
+    const errors = rollups.reduce((n, r) => n + r.errors, 0);
+    const fineRollups = rollups.filter((r) => r.histFine.length === FINE_HIST_SIZE);
+    const histFine = completeFine(
+      fineRollups.length === 0
+        ? null
+        : Array.from({ length: FINE_HIST_SIZE }, (_, i) => fineRollups.reduce((n, r) => n + (r.histFine[i] ?? 0), 0)),
+      count,
+    );
+    const rates = rollups.map((r) => r.minSampleRate).filter((x): x is number => x !== null);
+    const sampleRate = rates.length === 0 ? null : Math.min(...rates);
+    const pct = percentiles(hist, histFine, maxMs);
+    const isMongo = signature.source === null || signature.source === 'mongodb';
+    const owner = await app.prisma.app.findUnique({ where: { id: req.appId }, select: { thresholdMs: true } });
 
     return {
       hash: signature.hash,
@@ -366,12 +472,23 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
       totalMs,
       maxMs,
       avgMs: avgMs(totalMs, count),
-      p95: percentileFromHist(hist, maxMs, 0.95),
-      p99: percentileFromHist(hist, maxMs, 0.99),
+      p50: pct.p50,
+      p95: pct.p95,
+      p99: pct.p99,
       hist,
+      histFine,
+      orm: signature.orm,
+      database: signature.database,
+      sqlText: signature.sqlText,
+      lastErrorCode: signature.lastErrorCode,
+      errors,
+      sampled: sampleRate !== null,
+      sampleRate,
+      thresholdMs: owner?.thresholdMs ?? null,
       redactedSample: signature.redactedSample,
       encryptedSample: signature.encryptedSample as EncryptedSample | null,
-      advice: signature.advice,
+      // Index advice is a Mongo concept; a SQL signature never has any.
+      advice: isMongo ? signature.advice : null,
     };
   });
 

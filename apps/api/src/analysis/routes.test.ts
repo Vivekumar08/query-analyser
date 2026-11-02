@@ -116,6 +116,9 @@ describe('read APIs', () => {
       to: new Date(),
       model: null,
       op: null,
+      source: null,
+      orm: null,
+      database: null,
       limit: 50,
       offset: 0,
       sort: 'wasted',
@@ -500,5 +503,153 @@ describe('read APIs', () => {
 
     const anon = await app.inject({ method: method as 'GET', url: `/v1/apps/${appId}${path}` });
     expect(anon.statusCode).toBe(401);
+  });
+});
+
+describe('SQL read side', () => {
+  const FINE_10_IN_B2 = [0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+  async function addSql(
+    appId: string,
+    hash: string,
+    sig: { source?: string | null; orm?: string | null; database?: string | null; sqlText?: string | null; lastErrorCode?: string | null },
+    rollup: { count: number; totalMs?: bigint; maxMs?: number; hist?: number[]; errors?: number; histFine?: number[]; minSampleRate?: number | null },
+  ) {
+    const s = await app.prisma.querySignature.create({
+      data: {
+        appId,
+        hash,
+        signature: `sig-${hash}`,
+        model: 'm',
+        operation: 'select',
+        filterShape: [{ key: 'id', op: 'eq' }],
+        sortKeys: [],
+        stages: [],
+        ...sig,
+      },
+    });
+    await app.prisma.queryRollup.create({
+      data: {
+        signatureId: s.id,
+        bucketHour: new Date(Date.now() - 3_600_000),
+        totalMs: 100n,
+        maxMs: 4,
+        hist: [0, 0, 0, 0, 0, 0, 0, 0],
+        ...rollup,
+      },
+    });
+    return s;
+  }
+  const list = async (token: string, appId: string, qs = '') =>
+    app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries${qs}`, headers: as(token) });
+
+  it('filters by source, orm and database, reading a null source as mongodb', async () => {
+    const { token, appId } = await seed(); // one Mongo signature, source null
+    await addSql(appId, 'pg-prisma', { source: 'postgresql', orm: 'prisma', database: 'shop' }, { count: 3 });
+    await addSql(appId, 'pg-plain', { source: 'postgresql', orm: null, database: 'other' }, { count: 3 });
+    const hashes = async (qs: string) =>
+      ((await list(token, appId, qs)).json().items as { hash: string }[]).map((i) => i.hash).sort();
+    expect(await hashes('?source=postgresql&orm=prisma')).toEqual(['pg-prisma']);
+    expect(await hashes('?database=other')).toEqual(['pg-plain']);
+    const mongo = await hashes('?source=mongodb');
+    expect(mongo).toHaveLength(1);
+    expect(mongo[0]).toMatch(/^abcdef/);
+    expect(await hashes('?source=postgresql')).toEqual(['pg-plain', 'pg-prisma']);
+  });
+
+  it('400s a repeated source param', async () => {
+    const { token, appId } = await seed();
+    expect((await list(token, appId, '?source=a&source=b')).statusCode).toBe(400);
+  });
+
+  it('a SQL row carries errors, sampled and p50/p95/p99 from histFine', async () => {
+    const { token, appId } = await seed();
+    await addSql(appId, 'pg-1', { source: 'postgresql', orm: 'prisma', database: 'shop' }, {
+      count: 10, errors: 2, minSampleRate: 0.1, histFine: FINE_10_IN_B2,
+    });
+    const item = (await list(token, appId, '?source=postgresql')).json().items[0];
+    expect(item).toMatchObject({ source: 'postgresql', orm: 'prisma', errors: 2, sampled: true, sampleRate: 0.1 });
+    expect(item.p50).toEqual({ value: 3.5, basis: 'interpolated' });
+    expect(item.p95.basis).toBe('interpolated');
+    expect(item.p99.value).toBeLessThanOrEqual(4);
+  });
+
+  it('a partial fine histogram (sum != count) is never read as complete', async () => {
+    const { token, appId } = await seed();
+    // 10 statements counted, but only 4 carry a fine histogram (mixed window).
+    await addSql(appId, 'pg-partial', { source: 'postgresql' }, {
+      count: 10, hist: [10, 0, 0, 0, 0, 0, 0, 0], maxMs: 80,
+      histFine: [0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    });
+    const item = (await list(token, appId, '?source=postgresql')).json().items[0];
+    expect(item.p50).toEqual({ value: 50, basis: 'interpolated' }); // coarse: half of [0,100), under max 80
+    const detail = (await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/pg-partial`, headers: as(token) })).json();
+    expect(detail.histFine).toBeNull();
+    expect(detail.p50).toEqual({ value: 50, basis: 'interpolated' });
+  });
+
+  it('a Mongo row has sampled false and percentiles from hist', async () => {
+    const { token, appId } = await seed();
+    const item = (await list(token, appId)).json().items[0];
+    expect(item).toMatchObject({ source: 'mongodb', orm: null, errors: 0, sampled: false, sampleRate: null });
+    expect(item.p50.basis).toBe('interpolated');
+    expect(item.p99.value).toBeLessThanOrEqual(300);
+  });
+
+  it('sorts by errors in SQL', async () => {
+    const { token, appId } = await seed();
+    for (const [h, e] of [['e5', 5], ['e1', 1], ['e9', 9]] as const)
+      await addSql(appId, h, { source: 'postgresql' }, { count: 1, errors: e, histFine: FINE_10_IN_B2.map((n) => (n ? 1 : 0)) });
+    const body = (await list(token, appId, '?sort=errors&limit=2')).json();
+    expect(body.sortExact).toBe(true);
+    expect(body.items.map((i: { hash: string }) => i.hash)).toEqual(['e9', 'e5']);
+  });
+
+  it('daily grain carries the same SQL fields', async () => {
+    const { token, appId } = await seed();
+    const s = await addSql(appId, 'pg-day', { source: 'postgresql', orm: 'prisma' }, { count: 1 });
+    await app.prisma.queryDailyRollup.create({
+      data: {
+        signatureId: s.id, day: new Date(Date.UTC(2026, 0, 1)), count: 10, totalMs: 50n, maxMs: 4,
+        hist: [0, 0, 0, 0, 0, 0, 0, 0], errors: 3, histFine: FINE_10_IN_B2, minSampleRate: 0.5,
+      },
+    });
+    const from = new Date(Date.UTC(2025, 11, 1)).toISOString();
+    const to = new Date(Date.UTC(2026, 1, 1)).toISOString();
+    const body = (await list(token, appId, `?from=${from}&to=${to}&source=postgresql`)).json();
+    expect(body.grain).toBe('daily');
+    expect(body.items[0]).toMatchObject({ errors: 3, sampled: true, sampleRate: 0.5, orm: 'prisma' });
+    expect(body.items[0].p50).toEqual({ value: 3.5, basis: 'interpolated' });
+  });
+
+  it('detail of a SQL signature: sqlText, lastErrorCode, thresholdMs, advice null', async () => {
+    const { token, appId } = await seed();
+    await app.prisma.app.update({ where: { id: appId }, data: { thresholdMs: 250 } });
+    const s = await addSql(appId, 'pg-d', {
+      source: 'postgresql', orm: 'prisma', database: 'shop', sqlText: 'SELECT 1 WHERE id = ?', lastErrorCode: '23505',
+    }, { count: 10, errors: 1, minSampleRate: 0.2, histFine: FINE_10_IN_B2 });
+    await app.prisma.advice.create({ data: { signatureId: s.id, suggestion: [{ field: 'id', dir: 1 }], rationale: 'x' } });
+    const d = (await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/pg-d`, headers: as(token) })).json();
+    expect(d).toMatchObject({
+      orm: 'prisma', database: 'shop', sqlText: 'SELECT 1 WHERE id = ?', lastErrorCode: '23505', errors: 1,
+      sampled: true, sampleRate: 0.2, thresholdMs: 250, advice: null, histFine: FINE_10_IN_B2,
+    });
+    expect(d.p50).toEqual({ value: 3.5, basis: 'interpolated' });
+  });
+
+  it('detail of a Mongo signature keeps its advice and has histFine null', async () => {
+    const { token, appId, sigHash, sigId } = await seed();
+    await app.prisma.advice.create({ data: { signatureId: sigId, suggestion: [{ field: 'email', dir: 1 }], rationale: 'x' } });
+    const d = (await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/${sigHash}`, headers: as(token) })).json();
+    expect(d.advice).not.toBeNull();
+    expect(d).toMatchObject({ histFine: null, sampled: false, sampleRate: null, errors: 0, orm: null, sqlText: null });
+  });
+
+  it('series points carry errors, p50 and p99', async () => {
+    const { token, appId } = await seed();
+    await addSql(appId, 'pg-s', { source: 'postgresql' }, { count: 10, errors: 4, histFine: FINE_10_IN_B2 });
+    const body = (await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/pg-s/series`, headers: as(token) })).json();
+    expect(body.points[0]).toMatchObject({ errors: 4, p50: { value: 3.5, basis: 'interpolated' } });
+    expect(body.points[0].p99.value).toBeLessThanOrEqual(4);
   });
 });

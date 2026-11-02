@@ -235,6 +235,17 @@ describe('refreshAdvice (via runNightlyJobs)', () => {
     expect(nullAfter).toBeNull();
   });
 
+  it('writes no advice for a postgresql signature', async () => {
+    const id = await seedSignature([{ key: 'email', op: 'eq' }], []);
+    await app.prisma.querySignature.update({ where: { id }, data: { source: 'postgresql' } });
+    const mongoId = await seedSignature([{ key: 'email', op: 'eq' }], []);
+    await app.prisma.querySignature.update({ where: { id: mongoId }, data: { source: 'mongodb' } });
+    const result = await runNightlyJobs({ prisma: app.prisma, now: new Date('2026-09-20T02:00:00.000Z') });
+    expect(result.adviceWritten).toBe(1);
+    expect(await app.prisma.advice.findUnique({ where: { signatureId: id } })).toBeNull();
+    expect(await app.prisma.advice.findUnique({ where: { signatureId: mongoId } })).not.toBeNull();
+  });
+
   /**
    * `refreshAdvice` now pages apps and signatures by id cursor instead of one
    * unbounded `findMany`, and skips signatures whose shape already matches
