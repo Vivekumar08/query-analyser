@@ -20,6 +20,7 @@ import {
   pgPoolOf,
   prismaClientVersion,
   resolveAppPath,
+  resolveAppPaths,
   resolvePgClients,
   mongooseClients,
   requireFrom,
@@ -564,14 +565,14 @@ describe('resolveAppPath: real install layouts (Task 8 fix round 1)', () => {
     const app = join(ROOT, 'npm-flat');
     const moduleFile = sdkAt(join(app, SDK));
     pkg(join(app, 'node_modules/pg'), 'pg');
-    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBe(real(join(app, 'node_modules/pg/index.js')));
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null })).toBe(real(join(app, 'node_modules/pg/index.js')));
   });
 
   it('standard pnpm: the peer link beside the SDK in the store', () => {
     const app = join(ROOT, 'pnpm-std');
     const moduleFile = sdkAt(join(app, STORE_SDK));
     pkg(join(app, 'node_modules/.pnpm/@vivekumar08+query-analyser@0.4.0/node_modules/pg'), 'pg');
-    expect(resolveAppPath('pg', { moduleFile, cwd: app }))
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null }))
       .toBe(real(join(app, 'node_modules/.pnpm/@vivekumar08+query-analyser@0.4.0/node_modules/pg/index.js')));
   });
 
@@ -579,7 +580,7 @@ describe('resolveAppPath: real install layouts (Task 8 fix round 1)', () => {
     const app = join(ROOT, 'pnpm-nolink');
     const moduleFile = sdkAt(join(app, STORE_SDK));
     pkg(join(app, 'node_modules/pg'), 'pg');
-    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBe(real(join(app, 'node_modules/pg/index.js')));
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null })).toBe(real(join(app, 'node_modules/pg/index.js')));
   });
 
   it('pnpm\'s hidden hoist (.pnpm/node_modules) is not the app: a sibling\'s Prisma is ignored', () => {
@@ -590,7 +591,7 @@ describe('resolveAppPath: real install layouts (Task 8 fix round 1)', () => {
     pkg(join(root, 'node_modules/.pnpm/node_modules/@prisma/adapter-pg'), '@prisma/adapter-pg');
     pkg(join(root, 'node_modules/.pnpm/node_modules/@prisma/client'), '@prisma/client');
     pkg(join(root, 'node_modules/.pnpm/node_modules/pg'), 'pg');
-    const from = { moduleFile, cwd: app };
+    const from = { moduleFile, cwd: app, entry: null };
     expect(resolveAppPath('@prisma/adapter-pg', from)).toBeNull();
     expect(resolveAppPath('@prisma/client', from)).toBeNull();
     expect(resolveAppPath('pg', from)).toBeNull();
@@ -603,7 +604,7 @@ describe('resolveAppPath: real install layouts (Task 8 fix round 1)', () => {
     const app = join(root, 'apps/x');
     const moduleFile = sdkAt(join(root, SDK));
     pkg(join(app, 'node_modules/pg'), 'pg');
-    const from = { moduleFile, cwd: app };
+    const from = { moduleFile, cwd: app, entry: null };
     expect(resolveAppPath('pg', from)).toBe(real(join(app, 'node_modules/pg/index.js')));
     const { clients } = resolvePgClients(undefined, { appEntry: (n) => resolveAppPath(n, from) });
     const nested = createRequire(join(app, 'x.js'))('pg') as { Client: Function };
@@ -622,21 +623,86 @@ describe('resolveAppPath: real install layouts (Task 8 fix round 1)', () => {
     mkdirSync(app, { recursive: true });
     const moduleFile = sdkAt(join(root, SDK));
     pkg(join(root, 'node_modules/pg'), 'pg');
-    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBe(real(join(root, 'node_modules/pg/index.js')));
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null })).toBe(real(join(root, 'node_modules/pg/index.js')));
   });
 
-  it('the module-relative copy wins over the cwd one', () => {
-    const root = join(ROOT, 'order');
+  /** npm/yarn workspaces nest an app's pg only when the root holds a conflicting one. */
+  const conflicting = (name: string): { root: string; app: string; moduleFile: string } => {
+    const root = join(ROOT, name);
     const app = join(root, 'apps/x');
     const moduleFile = sdkAt(join(root, SDK));
     pkg(join(root, 'node_modules/pg'), 'pg');
     pkg(join(app, 'node_modules/pg'), 'pg');
-    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBe(real(join(root, 'node_modules/pg/index.js')));
+    writeFileSync(join(app, 'server.js'), '');
+    return { root, app, moduleFile };
+  };
+  const pgAt = (dir: string) => createRequire(join(dir, 'x.js'))('pg') as { Client: Function; Pool: Function };
+
+  it('root pg plus the app\'s nested pg, cwd = the app: both copies are found and both wrapped', () => {
+    const { root, app, moduleFile } = conflicting('conflict-cwd');
+    const from = { moduleFile, cwd: app, entry: null };
+    expect(resolveAppPaths('pg', from)).toEqual([real(join(app, 'node_modules/pg/index.js')), real(join(root, 'node_modules/pg/index.js'))]);
+    const { clients, pools } = resolvePgClients(undefined, { appEntries: (n) => resolveAppPaths(n, from) });
+    expect(clients).toEqual([pgAt(app).Client, pgAt(root).Client]);
+    expect(pools).toEqual([pgAt(app).Pool, pgAt(root).Pool]);
+    try {
+      for (const C of clients) installPgWrap(C);
+      expect(PG_QUERY_WRAP in pgAt(app).Client.prototype).toBe(true);
+      expect(PG_QUERY_WRAP in pgAt(root).Client.prototype).toBe(true);
+    } finally {
+      undoPgWraps();
+    }
+  });
+
+  it('the same layout with cwd = the monorepo root and the entry script in the app: the app\'s pg is wrapped', () => {
+    const { root, app, moduleFile } = conflicting('conflict-entry');
+    const from = { moduleFile, cwd: root, entry: join(app, 'server.js') };
+    expect(resolveAppPath('pg', from)).toBe(real(join(app, 'node_modules/pg/index.js')));
+    const { clients } = resolvePgClients(undefined, { appEntries: (n) => resolveAppPaths(n, from) });
+    expect(clients).toContain(pgAt(app).Client);
+    expect(clients).toContain(pgAt(root).Client);
+  });
+
+  it('Prisma: the app\'s own nested copy wins over a sibling\'s at the root', () => {
+    const root = join(ROOT, 'prisma-nested');
+    const app = join(root, 'apps/x');
+    const moduleFile = sdkAt(join(root, SDK));
+    const prisma = (dir: string, version: string): void => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@prisma/client', version, main: 'index.js' }));
+      writeFileSync(join(dir, 'index.js'), '');
+    };
+    prisma(join(root, 'node_modules/@prisma/client'), '5.22.0');
+    prisma(join(app, 'node_modules/@prisma/client'), '7.10.0');
+    pkg(join(root, 'node_modules/@prisma/adapter-pg'), '@prisma/adapter-pg');
+    pkg(join(root, 'node_modules/@prisma/adapter-pg/node_modules/pg'), 'pg');
+    pkg(join(app, 'node_modules/@prisma/adapter-pg'), '@prisma/adapter-pg');
+    pkg(join(app, 'node_modules/@prisma/adapter-pg/node_modules/pg'), 'pg');
+    for (const from of [{ moduleFile, cwd: app, entry: null }, { moduleFile, cwd: root, entry: join(app, 'server.js') }]) {
+      expect(prismaClientVersion({ resolve: (n) => resolveAppPath(n, from) })).toBe('7.10.0');
+      const r = resolvePgClients(undefined, { appEntries: (n) => resolveAppPaths(n, from) });
+      expect(r.adapterResolved).toBe(true);
+      expect(r.adapterPg).toBe(createRequire(join(app, 'node_modules/@prisma/adapter-pg/index.js'))('pg'));
+    }
+  });
+
+  it('a throwing process.cwd() loses only the cwd chain', () => {
+    const app = join(ROOT, 'cwd-throws');
+    const moduleFile = sdkAt(join(app, SDK));
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    const spy = vi.spyOn(process, 'cwd').mockImplementation(() => { throw new Error('ENOENT: uv_cwd'); });
+    try {
+      expect(resolveAppPath('pg', { moduleFile, entry: null })).toBe(real(join(app, 'node_modules/pg/index.js')));
+      expect(resolveAppPaths('pg', { moduleFile, entry: null })).toEqual([real(join(app, 'node_modules/pg/index.js'))]);
+      expect(resolveAppPath('pg')).not.toBeNull(); // the defaults too: the SDK's own devDependency
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('nothing installed anywhere gives null', () => {
     const app = join(ROOT, 'empty');
     const moduleFile = sdkAt(join(app, SDK));
-    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBeNull();
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null })).toBeNull();
   });
 });

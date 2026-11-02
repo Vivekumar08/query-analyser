@@ -928,7 +928,7 @@ describe('sql layers', () => {
     for (const thresholdMs of [-1, -0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, '50' as unknown as number]) {
       const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
       const a = init({ apiKey: 'k', app: 'x', fetchImpl, onError, thresholdMs });
-      expect(messages(onError)).toEqual(['query-analyser: thresholdMs must be a whole number of milliseconds, 0 or more; using 100']);
+      expect(messages(onError)).toEqual(['query-analyser: thresholdMs must be a finite number of milliseconds, 0 or more (fractions are rounded); using 100']);
       sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
       await a.flush();
       expect(onError).toHaveBeenCalledTimes(1);
