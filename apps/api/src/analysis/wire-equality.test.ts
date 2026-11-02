@@ -3,7 +3,7 @@
  * this API's internal types become after serialisation.
  *
  * This check lives here, in `apps/api`, rather than in the contract package:
- * `RankRow` is owned by this package (`./routes.js`), and this package's own
+ * `RankItem` (the list route's emitted row) is owned by this package (`./routes.js`), and this package's own
  * `tsconfig` program already includes Fastify's `declare module`
  * augmentations and the generated Prisma client, so no `/// <reference />`
  * directives are needed to pull them in. The contract, by contrast, must stay
@@ -20,11 +20,11 @@
  * assertion at the bottom exists: it gives the check a home in `vitest run`
  * output too, even though the real assertion is the type-level one above it.
  *
- * If someone changes `RankRow` here without changing `RankedQueryRow` in the
+ * If someone changes `RankItem` here without changing `RankedQueryRow` in the
  * contract — or vice versa — this file stops compiling.
  */
 import type { Serialized, RankedQueryRow } from '@query-analyser/contract';
-import type { RankRow } from './routes.js';
+import type { RankItem } from './routes.js';
 import { describe, it, expect } from 'vitest';
 
 // Mutually-assignable (structural equality). `Equal<A, B>` is `true` only when
@@ -34,7 +34,7 @@ type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ?
   : false;
 type AssertTrue<T extends true> = T;
 
-type _RankedRow = AssertTrue<Equal<Serialized<RankRow>, RankedQueryRow>>;
+type _RankedRow = AssertTrue<Equal<Serialized<RankItem>, RankedQueryRow>>;
 
 describe('wire shapes are the serialisation of the API internal shapes', () => {
   it('compiles (the real assertion is the type-level check above)', () => {

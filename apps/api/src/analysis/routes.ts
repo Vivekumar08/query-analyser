@@ -4,7 +4,7 @@ import type { PrismaClient } from '../db.js';
 import type { EncryptedSample } from '@query-analyser/contract';
 import { FINE_HIST_SIZE } from '@query-analyser/contract/runtime';
 import { requireAppRole } from '../orgs/rbac.js';
-import { percentileFromHist, percentiles, avgMs } from './percentile.js';
+import { percentilesFor, completeFine, isSqlSource, avgMs } from './percentile.js';
 
 const MAX_LIMIT = 200;
 const DEFAULT_LIMIT = 50;
@@ -273,20 +273,10 @@ export async function queryDailyRanking(prisma: PrismaClient, p: RankParams): Pr
   `;
 }
 
-/**
- * A fine histogram counts every statement, so it is only a faithful picture of
- * a window when its buckets add up to the window's `count`. A window that mixes
- * rollups with and without one (a deploy, a compaction of mixed hours) sums to
- * fewer, and reading that as complete would bias every percentile low. Such a
- * window falls back to the coarse histogram.
- */
-export function completeFine(histFine: number[] | null, count: number): number[] | null {
-  if (!histFine || histFine.length === 0) return null;
-  return histFine.reduce((a, b) => a + b, 0) === count ? histFine : null;
-}
+export type RankItem = ReturnType<typeof toItem>;
 
 function toItem(r: RankRow) {
-  const pct = percentiles(r.hist, completeFine(r.histFine, r.count), r.maxMs);
+  const pct = percentilesFor(isSqlSource(r.source), r.hist, r.histFine, r.count, r.maxMs);
   return {
     hash: r.hash,
     signature: r.signature,
@@ -329,7 +319,7 @@ function sortItems(items: ReturnType<typeof toItem>[], sort: SortKey): ReturnTyp
       case 'count':
         return it.count;
       case 'p95':
-        return it.p95.value;
+        return it.p95?.value ?? Number.NEGATIVE_INFINITY;
       case 'maxMs':
         return it.maxMs;
       case 'wasted':
@@ -341,7 +331,7 @@ function sortItems(items: ReturnType<typeof toItem>[], sort: SortKey): ReturnTyp
   return [...items].sort((a, b) => keyOf(b) - keyOf(a));
 }
 
-function pointOf(r: {
+function pointOf(sql: boolean, r: {
   count: number;
   totalMs: bigint;
   maxMs: number;
@@ -350,7 +340,7 @@ function pointOf(r: {
   histFine: number[];
   minSampleRate: number | null;
 }) {
-  const pct = percentiles(r.hist, completeFine(r.histFine, r.count), r.maxMs);
+  const pct = percentilesFor(sql, r.hist, r.histFine, r.count, r.maxMs);
   return {
     count: r.count,
     totalMs: r.totalMs,
@@ -455,8 +445,8 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
     );
     const rates = rollups.map((r) => r.minSampleRate).filter((x): x is number => x !== null);
     const sampleRate = rates.length === 0 ? null : Math.min(...rates);
-    const pct = percentiles(hist, histFine, maxMs);
-    const isMongo = signature.source === null || signature.source === 'mongodb';
+    const isMongo = !isSqlSource(signature.source);
+    const pct = percentilesFor(!isMongo, hist, histFine, count, maxMs);
     const owner = await app.prisma.app.findUnique({ where: { id: req.appId }, select: { thresholdMs: true } });
 
     return {
@@ -503,10 +493,11 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
 
     const signature = await app.prisma.querySignature.findFirst({
       where: { appId: req.appId, hash: sig },
-      select: { id: true },
+      select: { id: true, source: true },
     });
     if (!signature) return reply.code(404).send({ error: 'Not Found' });
 
+    const sqlSig = isSqlSource(signature.source);
     const points =
       grain === 'hourly'
         ? (
@@ -514,13 +505,13 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
               where: { signatureId: signature.id, bucketHour: { gte: from, lte: to } },
               orderBy: { bucketHour: 'asc' },
             })
-          ).map((r) => ({ at: r.bucketHour, ...pointOf(r) }))
+          ).map((r) => ({ at: r.bucketHour, ...pointOf(sqlSig, r) }))
         : (
             await app.prisma.queryDailyRollup.findMany({
               where: { signatureId: signature.id, day: { gte: from, lte: to } },
               orderBy: { day: 'asc' },
             })
-          ).map((r) => ({ at: r.day, ...pointOf(r) }));
+          ).map((r) => ({ at: r.day, ...pointOf(sqlSig, r) }));
 
     return { grain, from: from.toISOString(), to: to.toISOString(), points };
   });

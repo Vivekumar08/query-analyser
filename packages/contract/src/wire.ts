@@ -38,15 +38,18 @@ export interface RankedQueryRow {
   /** Summed milliseconds. A string: see NumericString. */
   totalMs: NumericString;
   maxMs: number;
-  hist: number[];
   source: string;
   orm: string | null;
-  database: string | null;
   errors: number;
-  /** Lowest sample rate over the window; null when nothing was sampled. */
-  minSampleRate: number | null;
-  /** Summed fine histogram; null when no rollup in the window has one. */
-  histFine: number[] | null;
+  /** True when any under-threshold statement in the window was sampled: show "estimated". */
+  sampled: boolean;
+  /** Lowest sample rate in the window; null when nothing was sampled. */
+  sampleRate: number | null;
+  avgMs: number;
+  /** SQL: null unless the window has a complete fine histogram. Mongo: always set. */
+  p50: PercentileResult | null;
+  p95: PercentileResult | null;
+  p99: PercentileResult | null;
 }
 
 /**

@@ -574,7 +574,7 @@ describe('SQL read side', () => {
     expect(item.p99.value).toBeLessThanOrEqual(4);
   });
 
-  it('a partial fine histogram (sum != count) is never read as complete', async () => {
+  it('a partial fine histogram (sum != count) gives null percentiles for SQL, never the coarse hist', async () => {
     const { token, appId } = await seed();
     // 10 statements counted, but only 4 carry a fine histogram (mixed window).
     await addSql(appId, 'pg-partial', { source: 'postgresql' }, {
@@ -582,18 +582,56 @@ describe('SQL read side', () => {
       histFine: [0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     });
     const item = (await list(token, appId, '?source=postgresql')).json().items[0];
-    expect(item.p50).toEqual({ value: 50, basis: 'interpolated' }); // coarse: half of [0,100), under max 80
+    expect(item).toMatchObject({ p50: null, p95: null, p99: null });
     const detail = (await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/pg-partial`, headers: as(token) })).json();
-    expect(detail.histFine).toBeNull();
-    expect(detail.p50).toEqual({ value: 50, basis: 'interpolated' });
+    expect(detail).toMatchObject({ histFine: null, p50: null, p95: null, p99: null });
+    const series = (await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/pg-partial/series`, headers: as(token) })).json();
+    expect(series.points[0]).toMatchObject({ p50: null, p95: null, p99: null });
+  });
+
+  it('a SQL row with no fine histogram at all has null percentiles', async () => {
+    const { token, appId } = await seed();
+    await addSql(appId, 'pg-nofine', { source: 'postgresql' }, { count: 5, hist: [5, 0, 0, 0, 0, 0, 0, 0] });
+    const item = (await list(token, appId, '?source=postgresql')).json().items[0];
+    expect(item.p95).toBeNull();
+  });
+
+  it('sort=p95 puts null percentiles last and keeps the order of the rest', async () => {
+    const { token, appId } = await seed();
+    await addSql(appId, 'pg-null', { source: 'postgresql' }, { count: 5, totalMs: 99999n });
+    await addSql(appId, 'pg-fast', { source: 'postgresql' }, { count: 10, histFine: FINE_10_IN_B2 });
+    const body = (await list(token, appId, '?sort=p95')).json();
+    const hashes = body.items.map((i: { hash: string }) => i.hash);
+    expect(hashes[hashes.length - 1]).toBe('pg-null');
+    const p95s = body.items.filter((i: { p95: unknown }) => i.p95).map((i: { p95: { value: number } }) => i.p95.value);
+    expect(p95s).toEqual([...p95s].sort((a, b) => b - a));
   });
 
   it('a Mongo row has sampled false and percentiles from hist', async () => {
     const { token, appId } = await seed();
     const item = (await list(token, appId)).json().items[0];
     expect(item).toMatchObject({ source: 'mongodb', orm: null, errors: 0, sampled: false, sampleRate: null });
-    expect(item.p50.basis).toBe('interpolated');
-    expect(item.p99.value).toBeLessThanOrEqual(300);
+    // seeded coarse hist [0,0,10,...], max 300: bucket [250,500) interpolates above 300, so the max caps it
+    expect(item.p50).toEqual({ value: 300, basis: 'interpolated' });
+    expect(item.p95).toEqual({ value: 300, basis: 'interpolated' });
+    expect(item.p99).toEqual({ value: 300, basis: 'interpolated' });
+  });
+
+  it('pins the key order of a Mongo list item and Mongo detail', async () => {
+    const { token, appId, sigHash } = await seed();
+    const item = (await list(token, appId)).json().items[0];
+    expect(Object.keys(item)).toEqual([
+      'hash', 'signature', 'model', 'operation', 'source', 'orm', 'errors', 'sampled', 'sampleRate',
+      'count', 'totalMs', 'maxMs', 'avgMs', 'p50', 'p95', 'p99',
+    ]);
+    const d = (await app.inject({ method: 'GET', url: `/v1/apps/${appId}/queries/${sigHash}`, headers: as(token) })).json();
+    expect(Object.keys(d)).toEqual([
+      'hash', 'signature', 'model', 'operation', 'source', 'collection', 'firstSeen', 'lastSeen', 'count', 'totalMs',
+      'maxMs', 'avgMs', 'p50', 'p95', 'p99', 'hist', 'histFine', 'orm', 'database', 'sqlText', 'lastErrorCode',
+      'errors', 'sampled', 'sampleRate', 'thresholdMs', 'redactedSample', 'encryptedSample', 'advice',
+    ]);
+    expect(d.p50).toEqual({ value: 300, basis: 'interpolated' });
+    expect(d.p95).toEqual({ value: 300, basis: 'interpolated' });
   });
 
   it('sorts by errors in SQL', async () => {

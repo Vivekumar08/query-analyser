@@ -72,3 +72,41 @@ export function percentiles(
     p99: percentileFromHist(h, maxMs, 0.99, b),
   };
 }
+
+/**
+ * A fine histogram counts every statement, so it is only a faithful picture of
+ * a window when its buckets add up to the window's `count`. A window that mixes
+ * rollups with and without one sums to fewer, and reading that as complete
+ * would bias every percentile low.
+ */
+export function completeFine(histFine: number[] | null, count: number): number[] | null {
+  if (!histFine || histFine.length !== FINE_HIST_SIZE) return null;
+  return histFine.reduce((a, b) => a + b, 0) === count ? histFine : null;
+}
+
+export const isSqlSource = (source: string | null | undefined): boolean =>
+  source !== null && source !== undefined && source !== 'mongodb';
+
+export interface PercentileSet {
+  p50: PercentileResult | null;
+  p95: PercentileResult | null;
+  p99: PercentileResult | null;
+}
+
+/**
+ * Mongo reads the coarse histogram (slow-only, which is all Mongo records) when
+ * there is no complete fine one. SQL never does: its coarse histogram holds only
+ * the statements over the threshold, so it would overstate every percentile.
+ * SQL without a complete fine histogram has no percentiles (`null`).
+ */
+export function percentilesFor(
+  sql: boolean,
+  hist: number[],
+  histFine: number[] | null,
+  count: number,
+  maxMs: number,
+): PercentileSet {
+  const fine = completeFine(histFine, count);
+  if (sql) return fine ? percentiles(hist, fine, maxMs) : { p50: null, p95: null, p99: null };
+  return percentiles(hist, fine, maxMs);
+}

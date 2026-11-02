@@ -377,3 +377,50 @@ describe('runHourlyJobs', () => {
     expect(alerts).toHaveLength(0);
   });
 });
+
+describe('runHourlyJobs regression on SQL signatures', () => {
+  const now = new Date('2026-09-20T02:30:00.000Z');
+  const latestHour = new Date('2026-09-20T01:00:00.000Z');
+  const fineAt = (bucket: number, n: number) => Array.from({ length: 14 }, (_, i) => (i === bucket ? n : 0));
+
+  async function seedSql(latestFine: number[]) {
+    const org = await app.prisma.organization.create({ data: { name: 'S', slug: `s-${Math.random()}` } });
+    const a = await app.prisma.app.create({ data: { orgId: org.id, name: 's', env: 'production' } });
+    const sig = await app.prisma.querySignature.create({
+      data: {
+        appId: a.id, hash: `h${Math.random()}`.slice(0, 16), signature: 's', model: 'm', operation: 'select',
+        filterShape: [], sortKeys: [], stages: [], source: 'postgresql',
+      },
+    });
+    for (const h of [18, 19, 20, 21]) {
+      await app.prisma.queryRollup.create({
+        data: {
+          signatureId: sig.id, bucketHour: new Date(`2026-09-19T${h}:00:00.000Z`), count: 30, totalMs: 100n, maxMs: 4,
+          hist: [0, 0, 0, 0, 0, 0, 0, 0], histFine: fineAt(2, 30),
+        },
+      });
+    }
+    await app.prisma.queryRollup.create({
+      data: {
+        signatureId: sig.id, bucketHour: latestHour, count: 30, totalMs: 100n, maxMs: 900,
+        // coarse hist holds slow statements only; the real latency lives in histFine
+        hist: [0, 0, 0, 0, 0, 0, 10, 0], histFine: latestFine,
+      },
+    });
+    return sig.id;
+  }
+
+  it('alerts on a real regression read from a complete fine histogram', async () => {
+    const id = await seedSql(fineAt(9, 30));
+    const res = await runHourlyJobs({ prisma: app.prisma, now });
+    expect(res.alertsCreated).toBe(1);
+    expect(await app.prisma.alert.count({ where: { signatureId: id } })).toBe(1);
+  });
+
+  it('skips a SQL signature whose latest fine histogram is partial', async () => {
+    const id = await seedSql(fineAt(9, 10)); // 10 of 30 statements
+    const res = await runHourlyJobs({ prisma: app.prisma, now });
+    expect(res.alertsCreated).toBe(0);
+    expect(await app.prisma.alert.count({ where: { signatureId: id } })).toBe(0);
+  });
+});

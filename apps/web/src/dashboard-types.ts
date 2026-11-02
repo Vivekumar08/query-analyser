@@ -114,7 +114,8 @@ export interface SeriesPoint { at: string; count: number; totalMs: string; maxMs
 export interface SeriesResponse { grain: 'hourly' | 'daily'; from: string; to: string; points: SeriesPoint[] }
 
 /** One row of the ranked list. The list route returns `avgMs` and `p95` per row, but NOT `hist` (toItem drops it). */
-export type QueryRow = Omit<Serialized<RankedQueryRow>, 'hist'> & { avgMs: number; p95: PercentileResult };
+/** Task 15: p50/p95/p99 are nullable for SQL (no complete fine histogram); `sampled`/`sampleRate` drive "estimated". */
+export type QueryRow = Serialized<RankedQueryRow>;
 
 /**
  * GET /v1/apps/:id/queries — an envelope, NOT a bare array. `sortExact` is
