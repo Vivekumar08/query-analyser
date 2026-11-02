@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { describe, it, expect, vi, afterEach, beforeEach, beforeAll, afterAll } from 'vitest';
 import { Aggregator } from './aggregator.js';
 import { sqlRuntime } from './sql/context.js';
-import { installPgWrap, undoPgWraps } from './integrations/pg.js';
+import { installPgWrap, undoPgWraps, PG_QUERY_WRAP } from './integrations/pg.js';
 import { setSink, type MonitorSink } from './monitor.js';
 import {
   CONNECT_WRAP,
@@ -536,5 +536,107 @@ describe('pg copies', () => {
       undoPgWraps();
       sqlRuntime().sink = null;
     }
+  });
+});
+
+describe('resolveAppPath: real install layouts (Task 8 fix round 1)', () => {
+  let ROOT: string;
+  /** A package dir with a package.json and an index.js exporting pg-shaped classes. */
+  const pkg = (dir: string, name: string): void => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, version: '1.0.0', main: 'index.js' }));
+    writeFileSync(join(dir, 'index.js'), 'exports.Client = class Client { query() {} }; exports.Pool = class Pool { query() {} };');
+  };
+  /** The SDK's built entry at `dir` (only its location matters). */
+  const sdkAt = (dir: string): string => {
+    mkdirSync(join(dir, 'dist'), { recursive: true });
+    writeFileSync(join(dir, 'dist/index.cjs'), '');
+    return join(dir, 'dist/index.cjs');
+  };
+  const SDK = 'node_modules/@vivekumar08/query-analyser';
+  const STORE_SDK = 'node_modules/.pnpm/@vivekumar08+query-analyser@0.4.0/node_modules/@vivekumar08/query-analyser';
+  const real = (p: string): string => realpathSync(p);
+
+  beforeAll(() => { ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'qa-layouts-'))); });
+  afterAll(() => { rmSync(ROOT, { recursive: true, force: true }); });
+
+  it('npm flat: the app\'s pg next to the SDK', () => {
+    const app = join(ROOT, 'npm-flat');
+    const moduleFile = sdkAt(join(app, SDK));
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBe(real(join(app, 'node_modules/pg/index.js')));
+  });
+
+  it('standard pnpm: the peer link beside the SDK in the store', () => {
+    const app = join(ROOT, 'pnpm-std');
+    const moduleFile = sdkAt(join(app, STORE_SDK));
+    pkg(join(app, 'node_modules/.pnpm/@vivekumar08+query-analyser@0.4.0/node_modules/pg'), 'pg');
+    expect(resolveAppPath('pg', { moduleFile, cwd: app }))
+      .toBe(real(join(app, 'node_modules/.pnpm/@vivekumar08+query-analyser@0.4.0/node_modules/pg/index.js')));
+  });
+
+  it('pnpm with no peer link: the app\'s own pg up the chain', () => {
+    const app = join(ROOT, 'pnpm-nolink');
+    const moduleFile = sdkAt(join(app, STORE_SDK));
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBe(real(join(app, 'node_modules/pg/index.js')));
+  });
+
+  it('pnpm\'s hidden hoist (.pnpm/node_modules) is not the app: a sibling\'s Prisma is ignored', () => {
+    const root = join(ROOT, 'pnpm-mono');
+    const app = join(root, 'apps/x');
+    mkdirSync(app, { recursive: true });
+    const moduleFile = sdkAt(join(root, STORE_SDK));
+    pkg(join(root, 'node_modules/.pnpm/node_modules/@prisma/adapter-pg'), '@prisma/adapter-pg');
+    pkg(join(root, 'node_modules/.pnpm/node_modules/@prisma/client'), '@prisma/client');
+    pkg(join(root, 'node_modules/.pnpm/node_modules/pg'), 'pg');
+    const from = { moduleFile, cwd: app };
+    expect(resolveAppPath('@prisma/adapter-pg', from)).toBeNull();
+    expect(resolveAppPath('@prisma/client', from)).toBeNull();
+    expect(resolveAppPath('pg', from)).toBeNull();
+    const r = resolvePgClients(undefined, { appEntry: (n) => resolveAppPath(n, from) });
+    expect(r).toEqual({ clients: [], pools: [], adapterResolved: false });
+  });
+
+  it('npm monorepo, SDK hoisted to the root, the app\'s pg nested, cwd = the app: found through cwd and wrapped', () => {
+    const root = join(ROOT, 'npm-mono-nested');
+    const app = join(root, 'apps/x');
+    const moduleFile = sdkAt(join(root, SDK));
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    const from = { moduleFile, cwd: app };
+    expect(resolveAppPath('pg', from)).toBe(real(join(app, 'node_modules/pg/index.js')));
+    const { clients } = resolvePgClients(undefined, { appEntry: (n) => resolveAppPath(n, from) });
+    const nested = createRequire(join(app, 'x.js'))('pg') as { Client: Function };
+    expect(clients).toEqual([nested.Client]);
+    try {
+      expect(installPgWrap(nested.Client)).toBe(true);
+      expect(PG_QUERY_WRAP in nested.Client.prototype).toBe(true);
+    } finally {
+      undoPgWraps();
+    }
+  });
+
+  it('npm monorepo with both hoisted: the root copy', () => {
+    const root = join(ROOT, 'npm-mono-hoisted');
+    const app = join(root, 'apps/x');
+    mkdirSync(app, { recursive: true });
+    const moduleFile = sdkAt(join(root, SDK));
+    pkg(join(root, 'node_modules/pg'), 'pg');
+    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBe(real(join(root, 'node_modules/pg/index.js')));
+  });
+
+  it('the module-relative copy wins over the cwd one', () => {
+    const root = join(ROOT, 'order');
+    const app = join(root, 'apps/x');
+    const moduleFile = sdkAt(join(root, SDK));
+    pkg(join(root, 'node_modules/pg'), 'pg');
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBe(real(join(root, 'node_modules/pg/index.js')));
+  });
+
+  it('nothing installed anywhere gives null', () => {
+    const app = join(ROOT, 'empty');
+    const moduleFile = sdkAt(join(app, SDK));
+    expect(resolveAppPath('pg', { moduleFile, cwd: app })).toBeNull();
   });
 });

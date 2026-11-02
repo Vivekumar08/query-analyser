@@ -58,8 +58,6 @@ const UNRESOLVED_WARNING =
 // Decision 18, verbatim.
 const engineWarning = (version: string): string =>
   `query-analyser: @prisma/client ${version} without @prisma/adapter-pg runs its SQL inside the query engine, which the SDK captures only when your app already enables Prisma tracing. Use @prisma/adapter-pg, or Prisma 7, to capture these queries.`;
-/** Decision 18's warning is reported at most once per process. */
-let engineWarningReported = false;
 
 const SAMPLE_RATE_WARNING = 'query-analyser: sql.sampleRate must be a number greater than 0 and at most 1; using 1';
 const DEFAULT_THRESHOLD_MS = 100;
@@ -73,10 +71,13 @@ function resolveSampleRate(requested: unknown, report: (e: Error) => void): numb
   return 1;
 }
 
-/** `thresholdMs`, as the ingest API accepts it (a non-negative integer). Invalid -> reported, 100. */
+/**
+ * `thresholdMs`, as the ingest API accepts it (a non-negative integer). null/undefined -> 100; a finite
+ * fraction >= 0 is rounded (no warning); anything else (negative, NaN, Infinity, not a number) -> reported, 100.
+ */
 function resolveThresholdMs(requested: unknown, report: (e: Error) => void): number {
-  if (requested === undefined) return DEFAULT_THRESHOLD_MS;
-  if (typeof requested === 'number' && Number.isInteger(requested) && requested >= 0) return requested;
+  if (requested === undefined || requested === null) return DEFAULT_THRESHOLD_MS;
+  if (typeof requested === 'number' && Number.isFinite(requested) && requested >= 0) return Math.round(requested);
   report(new Error(THRESHOLD_WARNING));
   return DEFAULT_THRESHOLD_MS;
 }
@@ -99,17 +100,43 @@ function majorOf(version: string | null): number | null {
   return m ? Number(m[1]) : null;
 }
 
-/** Wraps the Client and Pool classes of a `pg` module, Pool or Client (`instrument()` and repeated `init()`). Never throws. */
-function wrapPg(x: unknown): boolean {
+/**
+ * Wraps the Client and Pool classes of a `pg` module, Pool or Client (`instrument()` and repeated `init()`).
+ * With `remember`, the classes are kept on the runtime so every later `init()` wraps them again. Never throws.
+ */
+function wrapPg(x: unknown, remember = false): boolean {
   try {
     // Only what was given: a module, a Pool (and its Client) or a Client. Nothing is resolved here.
     const { clients, pools } = resolvePgClients(x, { appEntry: () => null });
     for (const C of clients) installPgWrap(C);
     for (const P of pools) installPgPoolWrap(P);
+    if (remember) rememberInstrumented(clients, pools);
     return clients.length > 0 || pools.length > 0;
   } catch {
     return false;
   }
+}
+
+/** The classes instrument() was given, as plain arrays (a runtime from another SDK copy may hold anything). */
+function instrumentedPg(): { clients: Function[]; pools: Function[] } {
+  try {
+    const seen: unknown = sqlRuntime().instrumentedPg;
+    if (typeof seen !== 'object' || seen === null) return { clients: [], pools: [] };
+    const { clients, pools } = seen as { clients?: unknown; pools?: unknown };
+    const fns = (v: unknown): Function[] => (Array.isArray(v) ? v.filter((f): f is Function => typeof f === 'function') : []);
+    return { clients: fns(clients), pools: fns(pools) };
+  } catch {
+    return { clients: [], pools: [] };
+  }
+}
+
+function rememberInstrumented(clients: Function[], pools: Function[]): void {
+  try {
+    const seen = instrumentedPg();
+    for (const C of clients) if (!seen.clients.includes(C)) seen.clients.push(C);
+    for (const P of pools) if (!seen.pools.includes(P)) seen.pools.push(P);
+    sqlRuntime().instrumentedPg = seen;
+  } catch { /* never throws */ }
 }
 
 const defaultOnError = (e: Error): void => { process.stderr.write(`[query-analyser] ${e.message}\n`); };
@@ -453,6 +480,10 @@ export function init(options: InitOptions): Analyser {
     const { clients: pgClients, pools: pgPools, adapterResolved, adapterPg } = resolvePgClients(options.pg);
     for (const C of pgClients) installPgWrap(C);
     for (const P of pgPools) installPgPoolWrap(P);
+    // A bundled pg given to instrument() before an earlier shutdown() is wrapped again.
+    const bundled = instrumentedPg();
+    for (const C of bundled.clients) installPgWrap(C);
+    for (const P of bundled.pools) installPgPoolWrap(P);
     rt.prismaAdapterResolved = adapterResolved;
     // After the wraps: whether the adapter's own pg is now one of the wrapped copies.
     rt.pgCoversPrismaAdapter = pgCoversAdapter(adapterResolved, adapterPg);
@@ -461,8 +492,8 @@ export function init(options: InitOptions): Analyser {
     // Only an @prisma/client in the app's own node_modules counts (not one reachable through NODE_PATH).
     const prismaVersion = prismaClientVersion({ resolve: resolveAppPath });
     const major = majorOf(prismaVersion);
-    if (prismaVersion !== null && (major === 5 || major === 6) && !adapterResolved && !appHelperPresent() && !engineWarningReported) {
-      engineWarningReported = true;
+    if (prismaVersion !== null && (major === 5 || major === 6) && !adapterResolved && !appHelperPresent() && rt.engineWarningReported !== true) {
+      rt.engineWarningReported = true;
       reportSafely(new Error(engineWarning(prismaVersion)));
     }
     sqlFound = pgClients.length > 0 || options.pg != null || prismaVersion !== null || resolveAppPath('@prisma/client') !== null;
@@ -638,7 +669,7 @@ export function instrument(client: MongoClientLike): void {
     };
     if (typeof client !== 'object' || client === null) return;
     // A pg Pool or Client (a bundled pg the SDK can't resolve) is wrapped, never watched as a MongoClient.
-    if (wrapPg(client)) return;
+    if (wrapPg(client, true)) return;
     watchClient(client, report);
   } catch { /* never throw into app code */ }
 }
