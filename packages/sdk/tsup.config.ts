@@ -15,7 +15,7 @@ export default defineConfig({
   // The contract is a workspace package and is NOT published — inline it so
   // the published SDK has zero runtime dependencies.
   noExternal: [/@query-analyser\/contract/],
-  external: ['mongoose', 'mongodb'],
+  external: ['mongoose', 'mongodb', 'pg', '@prisma/client', '@prisma/adapter-pg'],
   // Minor fix 7: SDK_VERSION is wired from package.json at build time so it
   // cannot drift from the published version. See src/index.ts.
   define: { __SDK_VERSION__: JSON.stringify(pkg.version) },

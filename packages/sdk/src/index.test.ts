@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { EventEmitter } from 'node:events';
 import mongoose from 'mongoose';
@@ -6,7 +8,12 @@ import mongoose from 'mongoose';
 // key pair and to decrypt what the SDK sent.
 import { generateSampleKeyPair, decryptSample } from '@query-analyser/contract/runtime';
 import sdkDefault, { init, instrument, shutdown } from './index.js';
+import * as drivers from './drivers.js';
 import { CONNECT_WRAP, MONITORING_OFF_WARNING, resolvePeer } from './drivers.js';
+import { PG_QUERY_WRAP, PG_POOL_QUERY_WRAP } from './integrations/pg.js';
+import { PRISMA_HOOK } from './integrations/prisma.js';
+import { sqlRuntime } from './sql/context.js';
+import { maskName } from './sql/fingerprint.js';
 import { currentSink } from './monitor.js';
 import { buildSignature, type SignatureResult } from './signature.js';
 import { MAX_CHUNK_BYTES } from './transport.js';
@@ -824,5 +831,251 @@ describe('chunked flushes', () => {
     expect(sent.items.map((i) => i.hash)).toEqual([small.hash]);
     expect(onError).toHaveBeenCalledTimes(1);
     expect((onError.mock.calls[0]![0] as Error).message).toMatch(/too large/);
+  });
+});
+
+describe('sql layers', () => {
+  const g = globalThis as unknown as Record<string, any>;
+  const SAMPLE_RATE_WARNING = 'query-analyser: sql.sampleRate must be a number greater than 0 and at most 1; using 1';
+  const engineWarning = (version: string) =>
+    `query-analyser: @prisma/client ${version} without @prisma/adapter-pg runs its SQL inside the query engine, which the SDK captures only when your app already enables Prisma tracing. Use @prisma/adapter-pg, or Prisma 7, to capture these queries.`;
+  const messages = (onError: { mock: { calls: unknown[][] } }) => onError.mock.calls.map(([e]) => (e as Error).message);
+  const stmt = (text: string, durationMs = 3) =>
+    ({ text, database: 'd', durationMs, failed: false, errorCode: null, labels: null });
+  /** A pg-shaped module of fresh classes (never the real pg), so a test owns its prototypes. */
+  const fakePg = () => {
+    class Client { connectionParameters = {}; query() { return Promise.resolve({}); } }
+    class Pool { Client = Client; query() { return Promise.resolve({}); } }
+    return { Client, Pool };
+  };
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('init() wraps the resolved pg Client.prototype.query, and shutdown() restores it', async () => {
+    const pg = createRequire(import.meta.url)('pg');
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    expect(PG_QUERY_WRAP in pg.Client.prototype).toBe(true);
+    expect(PG_POOL_QUERY_WRAP in pg.Pool.prototype).toBe(true);
+    await shutdown();
+    expect(PG_QUERY_WRAP in pg.Client.prototype).toBe(false);
+    expect(PG_POOL_QUERY_WRAP in pg.Pool.prototype).toBe(false);
+  });
+
+  it('init({ pg }) wraps the given module, also on a repeated init(), but not under the disabled no-op', async () => {
+    const first = fakePg(); const later = fakePg(); const off = fakePg();
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch, pg: first });
+    expect(PG_QUERY_WRAP in first.Client.prototype).toBe(true);
+    expect(PG_POOL_QUERY_WRAP in first.Pool.prototype).toBe(true);
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch, pg: later });
+    expect(PG_QUERY_WRAP in later.Client.prototype).toBe(true);
+    expect(PG_POOL_QUERY_WRAP in later.Pool.prototype).toBe(true);
+    await shutdown();
+    expect(PG_QUERY_WRAP in first.Client.prototype).toBe(false);
+    expect(PG_QUERY_WRAP in later.Client.prototype).toBe(false);
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch, enabled: false });
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch, pg: off });
+    expect(PG_QUERY_WRAP in off.Client.prototype).toBe(false);
+  });
+
+  it('installs the own Prisma helper on V7 only, and shutdown() removes it', async () => {
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(true);
+    expect(g.V6_PRISMA_INSTRUMENTATION).toBeUndefined();
+    expect(g.PRISMA_INSTRUMENTATION).toBeUndefined();
+    await shutdown();
+    expect('V7_PRISMA_INSTRUMENTATION' in globalThis).toBe(false);
+    expect(PRISMA_HOOK in globalThis).toBe(false);
+  });
+
+  it('each flush re-installs a deleted watched key, but a flush after shutdown() does not', async () => {
+    const a = init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    delete g.V7_PRISMA_INSTRUMENTATION;
+    await a.flush();
+    expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(true);
+    await a.shutdown();
+    await a.flush();
+    expect('V7_PRISMA_INSTRUMENTATION' in globalThis).toBe(false);
+    expect(PRISMA_HOOK in globalThis).toBe(false);
+  });
+
+  it('a bad sql.sampleRate is reported once and treated as 1', async () => {
+    for (const sampleRate of [0, -1, 2, Number.NaN, Number.POSITIVE_INFINITY, '0.5' as unknown as number]) {
+      const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
+      const a = init({ apiKey: 'k', app: 'x', fetchImpl, onError, sql: { sampleRate } });
+      expect(messages(onError)).toEqual([SAMPLE_RATE_WARNING]);
+      for (let i = 0; i < 3; i++) sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
+      await a.flush();
+      expect(messages(onError)).toEqual([SAMPLE_RATE_WARNING]);
+      expect(sentItems(fetchImpl)[0]).toMatchObject({ source: 'postgresql', count: 3 });
+      expect(sentItems(fetchImpl)[0]!.sampleRate).toBeUndefined();
+      await shutdown();
+    }
+  });
+
+  it('a valid sql.sampleRate reaches the sink without a warning', async () => {
+    const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const a = init({ apiKey: 'k', app: 'x', fetchImpl, onError, sql: { sampleRate: 0.25 } });
+    sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
+    await a.flush();
+    expect(onError).not.toHaveBeenCalled();
+    expect(sentItems(fetchImpl)[0]).toMatchObject({ source: 'postgresql', count: 4, sampleRate: 0.25 });
+  });
+
+  it('an invalid thresholdMs is reported once and treated as 100', async () => {
+    for (const thresholdMs of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
+      const a = init({ apiKey: 'k', app: 'x', fetchImpl, onError, thresholdMs });
+      expect(messages(onError)).toEqual(['query-analyser: thresholdMs must be a whole number of milliseconds, 0 or more; using 100']);
+      sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
+      await a.flush();
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(bodyText(fetchImpl))).toMatchObject({ thresholdMs: 100 });
+      await shutdown();
+    }
+  });
+
+  it('a SQL statement recorded through the runtime sink is flushed as a postgresql item', async () => {
+    const fetchImpl = vi.fn(okFetch); const a = init({ apiKey: 'k', app: 'x', fetchImpl });
+    sqlRuntime().sink!.record({ text: 'SELECT 1 FROM t', database: 'd', durationMs: 3, failed: false, errorCode: null, labels: null });
+    await a.flush();
+    expect(sentItems(fetchImpl)[0]).toMatchObject({ source: 'postgresql', model: 't', operation: 'select', count: 1 });
+  });
+
+  it('shutdown() clears the SQL sink it set, and the coverage flags', async () => {
+    const a = init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    const sink = sqlRuntime().sink;
+    expect(sink).not.toBeNull();
+    await a.shutdown();
+    expect(sqlRuntime().sink).toBeNull();
+    expect(sqlRuntime().prismaAdapterResolved).toBe(false);
+    expect(sqlRuntime().pgCoversPrismaAdapter).toBe(false);
+  });
+
+  it('a stale shutdown() never clears a newer SQL sink', async () => {
+    const a = init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    await a.shutdown();
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    const newer = sqlRuntime().sink;
+    await a.shutdown();
+    expect(sqlRuntime().sink).toBe(newer);
+    expect(newer).not.toBeNull();
+  });
+
+  it('Mongo payloads are unchanged with the SQL layers active', async () => {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', mongoose, fetchImpl, sql: { maskIdentifiers: true, sampleRate: 0.5 } });
+    expect(sqlRuntime().sink).not.toBeNull();
+    const sig = seed(a);
+    await a.flush();
+    const items = sentItems(fetchImpl);
+    expect(items).toHaveLength(1);
+    expect(Object.keys(items[0]!)).toEqual(WIRE_ITEM_KEYS);
+    expect(items[0]).toMatchObject({ hash: sig.hash, signature: sig.signature, model: 'M', source: 'mongodb' });
+  });
+
+  it('instrument(pool) wraps a bundled pg the SDK cannot resolve', () => {
+    class Client { connectionParameters = {}; query() { return Promise.resolve({}); } }
+    instrument({ Client, totalCount: 0, query() {} });
+    expect(PG_QUERY_WRAP in Client.prototype).toBe(true);
+  });
+
+  it('instrument() takes a pg Client or a Pool instance, and never treats it as a MongoClient', () => {
+    const onError = vi.fn();
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch, onError });
+    const viaClient = fakePg(); const viaPool = fakePg();
+    class EmitterPool extends EventEmitter { Client = viaPool.Client; query() { return Promise.resolve({}); } }
+    instrument(new viaClient.Client());
+    const pool = new EmitterPool();
+    instrument(pool);
+    expect(PG_QUERY_WRAP in viaClient.Client.prototype).toBe(true);
+    expect(PG_QUERY_WRAP in viaPool.Client.prototype).toBe(true);
+    expect(PG_POOL_QUERY_WRAP in EmitterPool.prototype).toBe(true);
+    expect(pool.listenerCount('commandStarted')).toBe(0);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('instrument() never throws, whatever it is given', () => {
+    const hostile = new Proxy({}, { get() { throw new Error('boom'); }, has() { throw new Error('boom'); } });
+    expect(() => instrument(hostile)).not.toThrow();
+    expect(() => instrument(null as unknown as object)).not.toThrow();
+  });
+
+  it('maskIdentifiers reaches the sink, keyed by sha256(qa-mask: + apiKey)', async () => {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', fetchImpl, sql: { maskIdentifiers: true } });
+    sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
+    await a.flush();
+    const item = sentItems(fetchImpl)[0]!;
+    expect(String(item.model).startsWith('t_')).toBe(true);
+    expect(item.model).toBe(maskName('t', createHash('sha256').update('qa-mask:k').digest()));
+    expect(item.database).toBe(maskName('d', createHash('sha256').update('qa-mask:k').digest()));
+    expect(JSON.stringify(item)).not.toMatch(/"t"|"d"/);
+  });
+
+  it('without maskIdentifiers, names stay readable', async () => {
+    const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', fetchImpl, sql: { maskIdentifiers: false } });
+    sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
+    await a.flush();
+    expect(sentItems(fetchImpl)[0]).toMatchObject({ model: 't', database: 'd' });
+  });
+
+  it('sets pgCoversPrismaAdapter after wrapping the adapter\'s pg, and shutdown() resets it', async () => {
+    const adapterPg = fakePg();
+    vi.spyOn(drivers, 'resolvePgClients').mockReturnValue({
+      clients: [adapterPg.Client], pools: [adapterPg.Pool], adapterResolved: true, adapterPg,
+    });
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    expect(sqlRuntime().prismaAdapterResolved).toBe(true);
+    expect(sqlRuntime().pgCoversPrismaAdapter).toBe(true);
+    await shutdown();
+    expect(sqlRuntime().prismaAdapterResolved).toBe(false);
+    expect(sqlRuntime().pgCoversPrismaAdapter).toBe(false);
+  });
+
+  it('pgCoversPrismaAdapter stays false when the adapter does not resolve', () => {
+    const app = fakePg();
+    vi.spyOn(drivers, 'resolvePgClients').mockReturnValue({ clients: [app.Client], pools: [], adapterResolved: false });
+    init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
+    expect(sqlRuntime().prismaAdapterResolved).toBe(false);
+    expect(sqlRuntime().pgCoversPrismaAdapter).toBe(false);
+  });
+
+  // The engine-path warning is once per process: every case that must NOT warn runs before the one that does.
+  it('no engine-path warning for Prisma 7, with the adapter, or with an app helper', async () => {
+    const noAdapter = { clients: [], pools: [], adapterResolved: false };
+    const cases: Array<[string | null, boolean, boolean]> = [
+      [null, false, false], ['7.10.0', false, false], ['6.19.3', true, false], ['6.19.3', false, true], ['8.0.0', false, false],
+    ];
+    for (const [version, adapterResolved, appHelper] of cases) {
+      vi.spyOn(drivers, 'prismaClientVersion').mockReturnValue(version);
+      vi.spyOn(drivers, 'resolvePgClients').mockReturnValue({ ...noAdapter, adapterResolved });
+      if (appHelper) g.PRISMA_INSTRUMENTATION = { helper: { isEnabled: () => true } };
+      const onError = vi.fn();
+      init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError });
+      expect(messages(onError).filter((m) => m.includes('without @prisma/adapter-pg'))).toEqual([]);
+      await shutdown();
+      delete g.PRISMA_INSTRUMENTATION;
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('the engine-path warning fires once for Prisma 6 without the adapter or app tracing', async () => {
+    vi.spyOn(drivers, 'prismaClientVersion').mockReturnValue('6.19.3');
+    vi.spyOn(drivers, 'resolvePgClients').mockReturnValue({ clients: [], pools: [], adapterResolved: false });
+    const onError = vi.fn();
+    init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError });
+    await shutdown();
+    init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch, onError });
+    expect(messages(onError)).toEqual([engineWarning('6.19.3')]);
+  });
+
+  it('the engine-path warning trusts only an @prisma/client the app itself resolves', () => {
+    const spy = vi.spyOn(drivers, 'prismaClientVersion');
+    init({ apiKey: 'k', app: 'x', mongoose, fetchImpl: okFetch });
+    expect(spy).toHaveBeenCalledTimes(1);
+    const resolve = (spy.mock.calls[0]![0] as { resolve: (n: string) => string | null }).resolve;
+    expect(resolve).toBe(drivers.resolveAppPath);
   });
 });
