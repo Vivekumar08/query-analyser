@@ -15,10 +15,15 @@ import { PG_QUERY_WRAP } from './pg.js';
  * The accessor sees every plain assignment the app makes; an app `delete` removes it, and
  * `ensurePrismaHook()` (every flush) re-defines it.
  *
- * Statements: when the pg wrap covers the adapter's pg (`sqlRuntime().pgCoversPrismaAdapter`),
- * the pg layer counts every statement and this hook records none; it only sets operation frames
- * so pg records carry the Prisma model and operation. Otherwise it records unclaimed `db_query`
- * spans, and engine `db_query` spans that have no `js:query` child.
+ * Statements:
+ * - JS `db_query` spans (Prisma 7): when the pg wrap covers the adapter's pg
+ *   (`sqlRuntime().pgCoversPrismaAdapter`), pg counts them and this hook records none; it only
+ *   sets operation frames so pg records carry the Prisma model and operation. Otherwise it records
+ *   the ones no layer underneath claimed.
+ * - Engine `db_query` spans (5.22/6.x): recorded unless they have a `js:query` child (the adapter
+ *   ran them, so pg counted them), whatever the coverage flag says.
+ * The V7 key yields the own helper only when no app helper is on V7 or on the unversioned key,
+ * which Prisma 7 falls back to.
  *
  * Privacy: it reads only a span's name, ids, times and its SQL text attribute, and the
  * operation's `model` and `method`. Every SDK step is guarded; an app helper's own throw
@@ -157,11 +162,18 @@ const ENGINE_LABELS: Labels = { orm: 'prisma', model: null, operation: null };
 function emit(rt: SqlRuntime, text: string, durationMs: number, failed: boolean, errorCode: string | null, labels: Labels | null): void {
   try {
     const sink = rt.sink;
-    if (sink) sink.record({ text, database: null, durationMs, failed, errorCode, labels });
+    if (!sink) return;
+    const ev = { text, database: null, durationMs, failed, errorCode, labels };
+    // As in pg.ts: the record waits a microtask, off the app's path.
+    queueMicrotask(() => { try { sink.record(ev); } catch { /* the sink reports its own failures */ } });
   } catch { /* never reaches the app */ }
 }
 
-/** The pg layer counts every Prisma statement: the helper records none (Task 5 ruling). */
+/**
+ * The pg layer counts every JS `db_query` statement: the helper records none of them (Task 5
+ * ruling). Engine spans are not gated by this: pg never sees an engine statement, and the
+ * per-span `js:query`-child rule already skips the ones the adapter ran (Decision 5, spike Q3).
+ */
 const pgCounts = (rt: SqlRuntime): boolean => rt.pgCoversPrismaAdapter === true;
 
 /** Engine statements carry no SQLSTATE: never failed, no code (Decision 12). */
@@ -291,7 +303,7 @@ export function wrapAppHelper(app: object): object {
     dispatchEngineSpans(spans: unknown, ...rest: unknown[]): unknown {
       try {
         const rt = sqlRuntime();
-        if (rt.sink != null && !pgCounts(rt)) {
+        if (rt.sink != null) {
           const store: unknown = rt.als.getStore();
           emitEngine(rt, statementsFromBatch(spans), labelsOf(isObject(store) ? (store as SqlFrame) : undefined));
         }
@@ -301,7 +313,7 @@ export function wrapAppHelper(app: object): object {
     createEngineSpan(event: unknown, ...rest: unknown[]): unknown {
       try {
         const rt = sqlRuntime();
-        if (rt.sink != null && !pgCounts(rt)) emitEngine(rt, tracker.observe(event), ENGINE_LABELS);
+        if (rt.sink != null) emitEngine(rt, tracker.observe(event), ENGINE_LABELS);
       } catch { /* never reaches the app */ }
       return call('createEngineSpan', [event, ...rest]);
     },
@@ -355,6 +367,8 @@ function storedValues(r: HookRecord | undefined): unknown[] {
   return WATCHED_KEYS.map((k) => g[k]);
 }
 
+const hasAppHelper = (v: unknown): boolean => isObject(v) && isObject((v as { helper?: unknown }).helper);
+
 /** What Prisma reads from `globalThis[key]`. */
 function valueFor(key: WatchedKey, stored: Map<string, unknown>): unknown {
   let value: unknown;
@@ -367,6 +381,10 @@ function valueFor(key: WatchedKey, stored: Map<string, unknown>): unknown {
     if (sqlRuntime().sink == null) return value;
     if (value == null) {
       if (key !== OWN_HELPER_KEY) return value;
+      // Prisma 7 reads `V7?.helper ?? PRISMA_INSTRUMENTATION?.helper`. An app helper on the
+      // unversioned key must not be hidden by ours: answer undefined, so Prisma falls back to it
+      // (already wrapped by that key's getter), exactly as it would without the SDK.
+      if (hasAppHelper(stored.get('PRISMA_INSTRUMENTATION'))) return undefined;
       ownHolder ??= { helper: createOwnHelper() };
       return ownHolder;
     }
@@ -419,11 +437,15 @@ export function installPrismaHook(): boolean {
   }
 }
 
-/** Re-defines any watched accessor an app deleted (or replaced with a data property). Called on every flush. */
+/** Re-defines any watched accessor an app deleted (or replaced with a data property), or installs the hook when no copy owns it. Called on every flush. */
 export function ensurePrismaHook(): void {
   try {
     const r = hookRecord();
-    if (r === undefined || r.owner !== owner) return;
+    if (r === undefined) {
+      installPrismaHook(); // the owning copy shut down while this copy's sink is live
+      return;
+    }
+    if (r.owner !== owner) return;
     for (const key of WATCHED_KEYS) {
       if (!isOurs(key)) defineAccessor(key, r.stored);
     }
@@ -452,7 +474,7 @@ export function undoPrismaHook(): void {
 /** True when an app helper is present on any watched key. */
 export function appHelperPresent(): boolean {
   try {
-    return storedValues(hookRecord()).some((v) => isObject(v) && isObject((v as { helper?: unknown }).helper));
+    return storedValues(hookRecord()).some(hasAppHelper);
   } catch {
     return false;
   }

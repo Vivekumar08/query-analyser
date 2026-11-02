@@ -201,6 +201,7 @@ describe('own helper', () => {
     const h = createOwnHelper() as any;
     await h.runInChildSpan(opSpan('findMany', 'User'), () =>
       h.runInChildSpan(dbSpan('SELECT 1'), async () => 'rows'));
+    await tick();
     expect(rec.events).toEqual([expect.objectContaining({ text: 'SELECT 1', labels: { orm: 'prisma', model: 'User', operation: 'findMany' } })]);
     const ev = rec.events[0]!;
     expect(ev).toEqual({ text: 'SELECT 1', database: null, durationMs: expect.any(Number), failed: false, errorCode: null, labels: ev.labels });
@@ -219,10 +220,12 @@ describe('own helper', () => {
     expect(rt.als.getStore()).toBeUndefined();
   });
 
-  it('a db_query with no enclosing operation is a Prisma statement with no model', () => {
+  it('a db_query with no enclosing operation is a Prisma statement with no model', async () => {
     const h = createOwnHelper() as any;
     h.runInChildSpan('db_query', () => 1); // a string name: no attributes, so no text
     h.runInChildSpan(dbSpan('SELECT 3'), () => 1);
+    expect(rec.events).toEqual([]); // the record waits a microtask, off the app's path
+    await tick();
     expect(rec.events.map((e) => [e.text, e.labels])).toEqual([['SELECT 3', { orm: 'prisma', model: null, operation: null }]]);
   });
 
@@ -230,6 +233,7 @@ describe('own helper', () => {
     const h = createOwnHelper() as any;
     await h.runInChildSpan(opSpan('findMany', 'User'), () =>
       h.runInChildSpan(dbSpan('SELECT 1'), async () => { (rt.als.getStore() as StatementFrame).claimed = true; return 'rows'; }));
+    await tick();
     expect(rec.events).toEqual([]);
   });
 
@@ -239,6 +243,7 @@ describe('own helper', () => {
     let seen: SqlFrame | undefined;
     await h.runInChildSpan(opSpan('findMany', 'User'), () =>
       h.runInChildSpan(dbSpan('SELECT 1'), async () => { seen = rt.als.getStore(); return 'rows'; }));
+    await tick();
     expect(rec.events).toEqual([]);
     expect(seen).toMatchObject({ kind: 'statement', op: { model: 'User', operation: 'findMany' } });
   });
@@ -247,6 +252,7 @@ describe('own helper', () => {
     rt.sink = null;
     const h = createOwnHelper() as any;
     await h.runInChildSpan(dbSpan('SELECT 1'), async () => 1);
+    await tick();
     expect(rec.events).toEqual([]);
   });
 
@@ -262,6 +268,7 @@ describe('own helper', () => {
     await expect(h.runInChildSpan(dbSpan('INSERT 1'), async () => { throw err; })).rejects.toBe(err);
     expect(() => h.runInChildSpan(dbSpan('INSERT 2'), () => { throw err; })).toThrow(err);
     expect(() => h.runInChildSpan(opSpan('m'), () => { throw err; })).toThrow(err);
+    await tick();
     const failed = rec.events.filter((e) => e.failed);
     expect(failed.map((e) => [e.text, e.errorCode])).toEqual([['INSERT 1', '23505'], ['INSERT 2', '23505']]);
   });
@@ -277,13 +284,14 @@ describe('own helper', () => {
     expect(h.runInChildSpan(dbSpan('SELECT 1'), () => odd)).toBe(odd);
   });
 
-  it('never throws from malformed span options', () => {
+  it('never throws from malformed span options', async () => {
     const h = createOwnHelper() as any;
     const evil = { get name(): string { throw new Error('evil'); } };
     expect(h.runInChildSpan(evil, () => 7)).toBe(7);
     expect(h.runInChildSpan(null, () => 8)).toBe(8);
     expect(h.runInChildSpan({ name: 'operation', attributes: null }, () => 9)).toBe(9);
     expect(h.runInChildSpan({ name: 'db_query', attributes: { 'db.query.text': 42 } }, () => 10)).toBe(10);
+    await tick();
     expect(rec.events).toEqual([]);
   });
 });
@@ -302,6 +310,7 @@ describe('wrapAppHelper', () => {
     expect(app.runInChildSpan.mock.calls[0]![0]).toEqual(opSpan('create', 'User')); // options passed unchanged
     expect(args).toEqual([app.span, app.ctx, app.span, app.ctx]);
     expect(frame).toMatchObject({ kind: 'statement', op: { model: 'User', operation: 'create' }, claimed: false });
+    await tick();
     expect(rec.events.map((e) => [e.text, e.labels])).toEqual([['INSERT 1', { orm: 'prisma', model: 'User', operation: 'create' }]]);
   });
 
@@ -315,34 +324,44 @@ describe('wrapAppHelper', () => {
     expect(app.getTraceParent.mock.contexts[0]).toBe(app);
   });
 
-  it('6.1+: records statements from dispatchEngineSpans with the current labels, then delegates', () => {
+  it('6.1+: records statements from dispatchEngineSpans with the current labels, then delegates', async () => {
     const app = appHelper();
     const w = wrapAppHelper(app) as any;
     const spans = [{ id: 'a', parentId: 'op', name: 'prisma:engine:db_query', startTime: [1, 0], endTime: [1, 4_000_000], attributes: { 'db.query.text': 'SELECT 9' } }];
     w.runInChildSpan(opSpan('findFirst', 'Post'), () => w.dispatchEngineSpans(spans, 'extra'));
     expect(app.dispatchEngineSpans).toHaveBeenCalledWith(spans, 'extra');
+    await tick();
     expect(rec.events).toEqual([{ text: 'SELECT 9', database: null, durationMs: 4, failed: false, errorCode: null, labels: { orm: 'prisma', model: 'Post', operation: 'findFirst' } }]);
   });
 
-  it('5.22/6.0: records statements from createEngineSpan with Prisma labels and no model, then delegates', () => {
+  it('5.22/6.0: records statements from createEngineSpan with Prisma labels and no model, then delegates', async () => {
     const app = appHelper();
     const w = wrapAppHelper(app) as any;
     const ev = { span: true, spans: [{ span_id: 's1', parent_span_id: 'p', name: 'prisma:engine:db_query', start_time: [2, 0], end_time: [2, 500_000], attributes: { 'db.statement': 'SELECT 7' } }] };
     w.createEngineSpan(ev);
     expect(app.createEngineSpan).toHaveBeenCalledWith(ev);
+    await tick();
     expect(rec.events).toEqual([{ text: 'SELECT 7', database: null, durationMs: 0.5, failed: false, errorCode: null, labels: { orm: 'prisma', model: null, operation: null } }]);
   });
 
-  it('records no engine or db_query statements when the pg wrap covers the adapter', () => {
+  it('with pg covering the adapter: no JS db_query record, but engine spans still follow the js:query-child rule', async () => {
     rt.pgCoversPrismaAdapter = true;
     const app = appHelper();
     const w = wrapAppHelper(app) as any;
     w.runInChildSpan(dbSpan('SELECT 1'), () => 1);
-    w.dispatchEngineSpans([{ id: 'a', parentId: 'op', name: 'prisma:engine:db_query', startTime: [1, 0], endTime: [1, 1], attributes: { 'db.query.text': 'SELECT 1' } }]);
-    w.createEngineSpan({ span: true, spans: [{ span_id: 's', name: 'prisma:engine:db_query', start_time: [1, 0], end_time: [1, 1], attributes: { 'db.statement': 'SELECT 1' } }] });
-    expect(rec.events).toEqual([]);
+    w.dispatchEngineSpans([
+      { id: 'a', parentId: 'op', name: 'prisma:engine:db_query', startTime: [1, 0], endTime: [1, 1_000_000], attributes: { 'db.query.text': 'SELECT adapter' } },
+      { id: 'c', parentId: 'a', name: 'prisma:engine:js:query:sql', startTime: [1, 0], endTime: [1, 1] },
+      { id: 'b', parentId: 'op', name: 'prisma:engine:db_query', startTime: [1, 0], endTime: [1, 2_000_000], attributes: { 'db.query.text': 'SELECT engine6' } },
+    ]);
+    const child = { span: true, spans: [{ span_id: 'k', parent_span_id: 'p1', name: 'prisma:engine:js:query:sql', start_time: [1, 0], end_time: [1, 1] }] };
+    w.createEngineSpan(child);
+    w.createEngineSpan({ span: true, spans: [{ span_id: 'p1', name: 'prisma:engine:db_query', start_time: [1, 0], end_time: [1, 1], attributes: { 'db.statement': 'SELECT adapter5' } }] });
+    w.createEngineSpan({ span: true, spans: [{ span_id: 'p2', name: 'prisma:engine:db_query', start_time: [1, 0], end_time: [1, 3_000_000], attributes: { 'db.statement': 'SELECT engine5' } }] });
+    await tick();
+    expect(rec.events.map((e) => [e.text, e.durationMs])).toEqual([['SELECT engine6', 2], ['SELECT engine5', 3]]);
     expect(app.dispatchEngineSpans).toHaveBeenCalledOnce();
-    expect(app.createEngineSpan).toHaveBeenCalledOnce();
+    expect(app.createEngineSpan).toHaveBeenCalledTimes(3);
   });
 
   it('never throws from a malformed span; a throwing app helper method throws its own error, unchanged', () => {
@@ -429,5 +448,66 @@ describe('pgCoversAdapter', () => {
     expect(pgCoversAdapter(true, null)).toBe(false);
     class Sub extends Client {}
     expect(pgCoversAdapter(true, { Client: Sub })).toBe(false); // the record must be the adapter's own Client.prototype
+  });
+});
+
+describe('fix round 1', () => {
+  /** Prisma 7.10's lookup: `V7?.helper ?? PRISMA_INSTRUMENTATION?.helper`. */
+  const prisma7Helper = (): any => g.V7_PRISMA_INSTRUMENTATION?.helper ?? g.PRISMA_INSTRUMENTATION?.helper;
+
+  it('an app helper only on the unversioned key is not hidden by the own V7 helper (app first)', () => {
+    const app = appHelper();
+    g.PRISMA_INSTRUMENTATION = { helper: app };
+    installPrismaHook(); rt.sink = rec;
+    expect(g.V7_PRISMA_INSTRUMENTATION).toBeUndefined();
+    const h = prisma7Helper();
+    expect(h).not.toBe(app);
+    expect(h.getTraceParent()).toBe('00-aa-bb-01');
+    expect(h.runInChildSpan(opSpan('m'), () => 1)).toBe(1);
+    expect(app.runInChildSpan).toHaveBeenCalledOnce();
+  });
+
+  it('the same when the app writes the unversioned key after install, and the own helper returns once it is cleared', () => {
+    installPrismaHook(); rt.sink = rec;
+    expect(prisma7Helper().getTraceParent()).toBe(DISABLED_TRACEPARENT);
+    const app = appHelper();
+    g.PRISMA_INSTRUMENTATION = { helper: app };
+    expect(g.V7_PRISMA_INSTRUMENTATION).toBeUndefined();
+    expect(prisma7Helper().getTraceParent()).toBe('00-aa-bb-01');
+    g.PRISMA_INSTRUMENTATION = undefined;
+    expect(prisma7Helper().getTraceParent()).toBe(DISABLED_TRACEPARENT);
+  });
+
+  it('an app value on V7 still wins over the unversioned key', () => {
+    installPrismaHook(); rt.sink = rec;
+    const v7 = appHelper(); v7.getTraceParent.mockReturnValue('00-v7-v7-01');
+    g.PRISMA_INSTRUMENTATION = { helper: appHelper() };
+    g.V7_PRISMA_INSTRUMENTATION = { helper: v7 };
+    expect(prisma7Helper().getTraceParent()).toBe('00-v7-v7-01');
+  });
+
+  it('ensurePrismaHook installs the hook when no copy owns it any more', () => {
+    installPrismaHook(); rt.sink = rec;
+    undoPrismaHook(); // the owning copy shut down; another copy's sink is still live
+    expect((g as any)[PRISMA_HOOK]).toBeUndefined();
+    expect(g.V7_PRISMA_INSTRUMENTATION).toBeUndefined();
+    ensurePrismaHook();
+    expect((g as any)[PRISMA_HOOK]).toBeDefined();
+    expect(g.V7_PRISMA_INSTRUMENTATION.helper.getTraceParent()).toBe(DISABLED_TRACEPARENT);
+  });
+
+  it('$transaction and same-tick batches: every statement carries the first operation\'s label (Decision 5, documented)', async () => {
+    rt.sink = rec;
+    const h = createOwnHelper() as any;
+    await h.runInChildSpan({ name: 'transaction', attributes: { method: '$transaction' } }, () =>
+      h.runInChildSpan(opSpan('count', 'User'), () => Promise.all([
+        h.runInChildSpan(dbSpan('SELECT COUNT(*) FROM "public"."User"'), async () => 1),
+        h.runInChildSpan(dbSpan('SELECT COUNT(*) FROM "public"."Product"'), async () => 2),
+      ])));
+    await tick();
+    expect(rec.events.map((e) => e.labels)).toEqual([
+      { orm: 'prisma', model: 'User', operation: 'count' },
+      { orm: 'prisma', model: 'User', operation: 'count' },
+    ]);
   });
 });
