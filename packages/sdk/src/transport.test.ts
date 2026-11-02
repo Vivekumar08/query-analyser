@@ -42,6 +42,13 @@ describe('transport', () => {
     expect(sent.items).toHaveLength(50);
   });
 
+  it('a 202 with droppedNew is delivered, not retried', async () => {
+    const fetchImpl = vi.fn(() => Promise.resolve(new Response('{"accepted":0,"droppedNew":3}', { status: 202 })));
+    const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl });
+    expect(await t.send(payload)).toEqual({ status: 'ok' });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('treats 401 as permanently disabled', async () => {
     const fetchImpl = vi.fn(() => Promise.resolve(new Response('bad key', { status: 401 })));
     const t = createTransport({ endpoint: 'https://x', apiKey: 'k', fetchImpl });

@@ -101,6 +101,22 @@ describe('runNightlyJobs', () => {
     expect(order.indexOf('compact')).toBeLessThan(order.indexOf('prune'));
   });
 
+  it('prunes QuotaDrop rows older than 30 days and keeps newer ones', async () => {
+    const org = await app.prisma.organization.create({ data: { name: 'Q', slug: 'q' } });
+    const a = await app.prisma.app.create({ data: { orgId: org.id, name: 'web', env: 'prod' } });
+    const now = new Date('2026-09-20T02:00:00.000Z');
+    await app.prisma.quotaDrop.createMany({
+      data: [
+        { appId: a.id, bucketHour: new Date('2026-08-10T05:00:00.000Z'), droppedNew: 4 },
+        { appId: a.id, bucketHour: new Date('2026-09-10T05:00:00.000Z'), droppedNew: 7 },
+      ],
+    });
+    const res = await runNightlyJobs({ prisma: app.prisma, now });
+    expect(res.quotaDropsPruned).toBe(1);
+    const left = await app.prisma.quotaDrop.findMany();
+    expect(left.map((r) => r.droppedNew)).toEqual([7]);
+  });
+
   it('prunes hourly at 7 days and daily by plan', async () => {
     await seedRollup(new Date('2026-09-19T03:00:00.000Z'));
 

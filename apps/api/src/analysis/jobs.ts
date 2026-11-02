@@ -22,6 +22,8 @@ function asJsonArray(suggestion: SuggestionField[]): Prisma.InputJsonArray {
 
 const HOURLY_RETENTION_DAYS = 7;
 const TRAILING_DAYS = 7;
+/** QuotaDrop rows feed the dashboard's quota notice; older ones are noise. */
+const QUOTA_DROP_RETENTION_DAYS = 30;
 
 export interface JobDeps {
   prisma: PrismaClient;
@@ -41,6 +43,7 @@ export interface NightlyResult {
   dailyPruned: number;
   adviceWritten: number;
   newExpensive: number;
+  quotaDropsPruned: number;
 }
 
 /**
@@ -162,7 +165,11 @@ export async function runNightlyJobs(deps: JobDeps): Promise<NightlyResult> {
   const graceUntil = deps.retentionGraceUntil ?? new Date(`${DEFAULT_RETENTION_GRACE_UNTIL}T00:00:00.000Z`);
   const dailyPruned = await pruneDailyByPlan(deps.prisma, now, graceUntil);
 
-  return { daysCompacted, hourlyPruned, dailyPruned, adviceWritten, newExpensive };
+  const { count: quotaDropsPruned } = await deps.prisma.quotaDrop.deleteMany({
+    where: { bucketHour: { lt: daysAgo(now, QUOTA_DROP_RETENTION_DAYS) } },
+  });
+
+  return { daysCompacted, hourlyPruned, dailyPruned, adviceWritten, newExpensive, quotaDropsPruned };
 }
 
 const NEW_SIGNATURE_WINDOW_MS = 24 * 3_600_000;

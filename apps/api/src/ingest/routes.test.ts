@@ -46,7 +46,7 @@ describe('POST /v1/ingest', () => {
     const { app: a, key } = await seedKey();
     const res = await post(key, payload(2));
     expect(res.statusCode).toBe(202);
-    expect(res.json()).toEqual({ accepted: 2 });
+    expect(res.json()).toEqual({ accepted: 2, droppedNew: 0 });
     expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(2);
   });
 
@@ -64,7 +64,7 @@ describe('POST /v1/ingest', () => {
     const { key } = await seedKey();
     const res = await post(key, gzipSync(JSON.stringify(payload(3))), { 'content-encoding': 'gzip' });
     expect(res.statusCode).toBe(202);
-    expect(res.json()).toEqual({ accepted: 3 });
+    expect(res.json()).toEqual({ accepted: 3, droppedNew: 0 });
   });
 
   it('stamps lastUsedAt on the key', async () => {
@@ -111,18 +111,74 @@ describe('POST /v1/ingest', () => {
     expect((await post(key, p)).statusCode).toBe(400);
   });
 
-  it('429s when the app is over its signature quota', async () => {
-    const { app: a, key } = await seedKey();
-    // Fill the quota directly.
-    await app.prisma.querySignature.createMany({
-      data: Array.from({ length: 5000 }, (_, i) => ({
-        appId: a.id, hash: `q${i}`.padStart(16, '0'), signature: 's', model: 'M', operation: 'find',
+  const fillQuota = (appId: string, n: number) =>
+    app.prisma.querySignature.createMany({
+      data: Array.from({ length: n }, (_, i) => ({
+        appId, hash: `q${i}`.padStart(16, '0'), signature: 's', model: 'M', operation: 'find',
         filterShape: [], sortKeys: [], stages: [],
       })),
     });
-    const res = await post(key, payload());
-    expect(res.statusCode).toBe(429);
-    expect(res.json()).toMatchObject({ error: 'signature quota exceeded', limit: 5000 });
+
+  it('at the quota, drops new shapes, answers 202 with droppedNew and records the drop', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 5000);
+    const res = await post(key, payload(3));
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: 0, droppedNew: 3 });
+    const drop = await app.prisma.quotaDrop.findUniqueOrThrow({
+      where: { appId_bucketHour: { appId: a.id, bucketHour: writer.bucketToDate('2026092014') } },
+    });
+    expect(drop.droppedNew).toBe(3);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
+  });
+
+  it('Review Focus: a 6,000-shape app stores every known item and the new ones up to the quota', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 4990);
+    const known = Array.from({ length: 50 }, (_, i) => `q${i}`.padStart(16, '0'));
+    const body = payload(1050);
+    body.items.forEach((it, i) => { it.hash = i < 50 ? known[i]! : `n${i}`.padStart(16, '0'); });
+    const res = await post(key, body);
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: 60, droppedNew: 990 });
+    const hourly = (h: string) => app.prisma.queryRollup.count({ where: { signature: { appId: a.id, hash: h } } });
+    expect(await app.prisma.queryRollup.count({ where: { signature: { appId: a.id, hash: { in: known } } } })).toBe(50);
+    const newHashes = body.items.slice(50).map((i) => i.hash);
+    const stored = await app.prisma.querySignature.findMany({ where: { appId: a.id, hash: { in: newHashes } }, select: { hash: true } });
+    expect(stored.map((r) => r.hash).sort()).toEqual(newHashes.slice(0, 10).sort());
+    expect(await hourly(newHashes[10]!)).toBe(0);
+    const dropRow = () => app.prisma.quotaDrop.findFirstOrThrow({ where: { appId: a.id } });
+    expect((await dropRow()).droppedNew).toBe(990);
+    const again = await post(key, body);
+    expect(again.json()).toEqual({ accepted: 60, droppedNew: 990 });
+    expect((await dropRow()).droppedNew).toBe(1980);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
+  });
+
+  it('a 0.3 Mongo payload at the quota is partially accepted the same way', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 4999);
+    const body = payload(3);
+    body.sdkVersion = '0.3.0';
+    body.items.forEach((it, i) => { it.hash = `m${i}`.padStart(16, '0'); it.source = 'mongodb'; it.collection = 'orders'; });
+    const res = await post(key, body);
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: 1, droppedNew: 2 });
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
+  });
+
+  it('two batches racing at the boundary do not push the count past the quota', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 4990);
+    const mk = (prefix: string) => {
+      const b = payload(10);
+      b.items.forEach((it, i) => { it.hash = `${prefix}${i}`.padStart(16, '0'); });
+      return b;
+    };
+    const [r1, r2] = await Promise.all([post(key, mk('x')), post(key, mk('y'))]);
+    expect(r1.statusCode).toBe(202);
+    expect(r2.statusCode).toBe(202);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
   });
 
   it('still accepts a batch of already-known signatures at quota', async () => {
@@ -134,7 +190,9 @@ describe('POST /v1/ingest', () => {
         filterShape: [], sortKeys: [], stages: [],
       })),
     });
-    expect((await post(key, payload(1))).statusCode).toBe(202);
+    const res = await post(key, payload(1));
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: 1, droppedNew: 0 });
   });
 
   it('413s a body over the limit', async () => {

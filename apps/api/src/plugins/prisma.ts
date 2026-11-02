@@ -14,7 +14,7 @@ export default fp(async function prismaPlugin(app: FastifyInstance) {
   // `rejected429`); the 403 suspended-org branch and the 500 branch are not
   // counted at all. `batches` therefore does not reconcile against
   // `accepted + rejected401 + rejected400 + rejected429` — that's expected.
-  app.decorate('ingestStats', { batches: 0, accepted: 0, rejected401: 0, rejected400: 0, rejected429: 0, since: new Date().toISOString() });
+  app.decorate('ingestStats', { batches: 0, accepted: 0, rejected401: 0, rejected400: 0, rejected429: 0, droppedNew: 0, since: new Date().toISOString() });
   app.addHook('onClose', async () => {
     await prisma.$disconnect();
   });
@@ -26,6 +26,7 @@ export interface IngestStats {
   rejected401: number;
   rejected400: number;
   rejected429: number;
+  droppedNew: number;
   since: string;
 }
 
