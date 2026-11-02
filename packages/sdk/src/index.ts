@@ -61,7 +61,7 @@ const engineWarning = (version: string): string =>
 
 const SAMPLE_RATE_WARNING = 'query-analyser: sql.sampleRate must be a number greater than 0 and at most 1; using 1';
 const DEFAULT_THRESHOLD_MS = 100;
-const THRESHOLD_WARNING = `query-analyser: thresholdMs must be a whole number of milliseconds, 0 or more; using ${DEFAULT_THRESHOLD_MS}`;
+const THRESHOLD_WARNING = `query-analyser: thresholdMs must be a finite number of milliseconds, 0 or more (fractions are rounded); using ${DEFAULT_THRESHOLD_MS}`;
 
 /** `sql.sampleRate`, validated once here so the sink never reports per statement. Invalid -> reported, 1. */
 function resolveSampleRate(requested: unknown, report: (e: Error) => void): number {

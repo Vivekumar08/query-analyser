@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createRequire, Module } from 'node:module';
 import { dirname, join } from 'node:path';
 import { attachClient, currentSink, hasMonitorSetter, MONITORING_OFF_WARNING } from './monitor.js';
@@ -108,36 +108,97 @@ function moduleFileOf(): string | null {
   return null;
 }
 
-/** `createRequire(from).resolve.paths(name)`; [] on any failure. */
-function lookupFrom(from: string | null, name: string): string[] {
+/** The app's entry script: `require.main.filename` (CJS), else `process.argv[1]`; its real path, as Node resolves from it. */
+function entryFileOf(): string | null {
   try {
+    let file: unknown;
+    try {
+      file = typeof require !== 'undefined' ? require.main?.filename : undefined;
+    } catch { /* ESM: no require */ }
+    if (typeof file !== 'string' || file === '') file = process.argv[1];
+    if (typeof file !== 'string' || file === '') return null;
+    try {
+      return realpathSync(file);
+    } catch {
+      return file;
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** Where each chain starts. `null` switches a chain off; `undefined` means the process's own value (tests inject). */
+export interface ChainBases {
+  /** The entry script (default: `require.main.filename`, else `process.argv[1]`). */
+  entry?: string | null;
+  /** The working directory (default: `process.cwd()`). */
+  cwd?: string | null;
+  /** The SDK's own module file (default: `__filename`, else `import.meta.url`). */
+  moduleFile?: string | null;
+}
+
+/** `createRequire(base()).resolve.paths(name)` minus the global folders and pnpm's hidden hoist; [] on any failure (including `base()` throwing). */
+function chainFrom(base: () => string | null, name: string, globals: Set<string>): string[] {
+  try {
+    const from = base();
     if (from === null) return [];
     const dirs = createRequire(from).resolve.paths(name);
-    return Array.isArray(dirs) ? dirs : [];
+    if (!Array.isArray(dirs)) return [];
+    return dirs.filter((d): d is string => typeof d === 'string' && !globals.has(d) && !d.endsWith(PNPM_HIDDEN_HOIST));
   } catch {
     return [];
   }
 }
 
 /**
- * The node_modules directories the app's own lookup walks: the module-relative chain, then the cwd chain
- * (an SDK hoisted to a monorepo root still finds the app's nested copy), de-duplicated in that order.
- * Dropped: the global folders (NODE_PATH, ~/.node_modules…) and pnpm's hidden hoist directory.
- * `from` replaces the module file and the cwd (tests).
+ * The app's node_modules lookup chains, most app-specific first: from the entry script, from the cwd, then
+ * from the SDK's own module (an SDK hoisted to a monorepo root still reaches the app's nested copies).
+ * Each chain drops the global folders (NODE_PATH, ~/.node_modules…) and pnpm's hidden hoist directory, and
+ * each base is evaluated in its own guard, so one failing chain (a deleted cwd) never loses the others.
  */
-export function appLookupDirs(name: string, from?: { moduleFile?: string; cwd?: string }): string[] {
+export function appLookupChains(name: string, from?: ChainBases): string[][] {
+  const globals = globalFolders();
+  const pick = (v: string | null | undefined, dflt: () => string | null): (() => string | null) =>
+    () => (v === undefined ? dflt() : v);
+  const cwd = from?.cwd;
+  return [
+    chainFrom(pick(from?.entry, entryFileOf), name, globals),
+    chainFrom(() => {
+      const dir = cwd === undefined ? process.cwd() : cwd;
+      return dir === null ? null : join(dir, '__query_analyser__.js');
+    }, name, globals),
+    chainFrom(pick(from?.moduleFile, moduleFileOf), name, globals),
+  ];
+}
+
+/** The first copy of `name` along `dirs`, resolved from the directory that owns that node_modules; null when none (or not loadable). */
+function firstIn(dirs: readonly string[], name: string): string | null {
+  for (const dir of dirs) {
+    try {
+      if (!existsSync(join(dir, name))) continue;
+    } catch {
+      continue;
+    }
+    try {
+      return createRequire(join(dirname(dir), '__query_analyser__.js')).resolve(name);
+    } catch {
+      return null; // installed here but not loadable: the app could not use it either
+    }
+  }
+  return null;
+}
+
+/**
+ * The first copy of `name` along each of the app's chains (appLookupChains), distinct, in chain priority order.
+ * `from.lookup` replaces the chains with one directory list (tests). Never throws.
+ */
+export function resolveAppPaths(name: string, from?: ChainBases & { lookup?: readonly string[] }): string[] {
   try {
-    const globals = globalFolders();
+    const chains = from?.lookup ? [from.lookup] : appLookupChains(name, from);
     const out: string[] = [];
-    const chains = [
-      lookupFrom(from?.moduleFile ?? moduleFileOf(), name),
-      lookupFrom(join(from?.cwd ?? process.cwd(), '__query_analyser__.js'), name),
-    ];
     for (const chain of chains) {
-      for (const d of chain) {
-        if (typeof d !== 'string' || globals.has(d) || d.endsWith(PNPM_HIDDEN_HOIST) || out.includes(d)) continue;
-        out.push(d);
-      }
+      const hit = firstIn(chain, name);
+      if (hit !== null && !out.includes(hit)) out.push(hit);
     }
     return out;
   } catch {
@@ -146,26 +207,12 @@ export function appLookupDirs(name: string, from?: { moduleFile?: string; cwd?: 
 }
 
 /**
- * Like resolvePeerPath, but only for a package installed in the app's own node_modules chains (see
- * appLookupDirs): a copy reachable only through NODE_PATH, a global folder or pnpm's hidden hoist gives null.
- * `from.lookup` replaces the directories; `from.moduleFile` / `from.cwd` replace where the chains start (tests).
- * Never throws.
+ * Like resolvePeerPath, but only for a package installed in the app's own node_modules chains: the most
+ * app-specific copy (entry script, then cwd, then the SDK's module). A copy reachable only through NODE_PATH,
+ * a global folder or pnpm's hidden hoist gives null. Never throws.
  */
-export function resolveAppPath(name: string, from?: { lookup?: readonly string[]; moduleFile?: string; cwd?: string }): string | null {
-  try {
-    for (const dir of from?.lookup ?? appLookupDirs(name, from)) {
-      if (!existsSync(join(dir, name))) continue;
-      try {
-        // Resolve from the directory that owns this node_modules, so this copy is the first one found.
-        return createRequire(join(dirname(dir), '__query_analyser__.js')).resolve(name);
-      } catch {
-        return null; // installed here but not loadable: the app could not use it either
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
+export function resolveAppPath(name: string, from?: ChainBases & { lookup?: readonly string[] }): string | null {
+  return resolveAppPaths(name, from)[0] ?? null;
 }
 
 /** createRequire(fromFile)(name); null on any failure. */
@@ -230,10 +277,15 @@ export function pgClientOf(x: unknown): Function | null {
   }
 }
 
-/** Distinct Client and Pool classes, each deduplicated by prototype identity, from: `given`, the app's pg,
- *  and pg required from @prisma/adapter-pg's resolved entry file (both found only in the app's own node_modules chain). `adapterResolved` says whether that entry resolved,
- *  and `adapterPg` is the pg module it uses. Never throws. */
-export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: string) => string | null }): {
+/** Distinct Client and Pool classes, each deduplicated by prototype identity, from: `given`, the app's pg (the first
+ *  copy along each of the app's chains), and pg required from the most app-specific @prisma/adapter-pg entry file.
+ *  `adapterResolved` says whether that entry resolved, and `adapterPg` is the pg module it uses. Never throws. */
+export function resolvePgClients(given?: unknown, from?: {
+  /** One entry per name (tests). */
+  appEntry?: (name: string) => string | null;
+  /** Every app copy of a name, in priority order (default: resolveAppPaths). */
+  appEntries?: (name: string) => readonly string[];
+}): {
   clients: Function[];
   pools: Function[];
   adapterResolved: boolean;
@@ -255,11 +307,16 @@ export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: str
   const add = addTo(clients);
   const addPool = addTo(pools);
   const addModule = (mod: unknown): void => { add(pgClientClass(mod)); addPool(pgPoolClass(mod)); };
-  const entry = (name: string): string | null => {
+  const entries = (name: string): readonly string[] => {
     try {
-      return (from?.appEntry ?? resolveAppPath)(name);
+      if (from?.appEntries) return from.appEntries(name);
+      if (from?.appEntry) {
+        const p = from.appEntry(name);
+        return p ? [p] : [];
+      }
+      return resolveAppPaths(name);
     } catch {
-      return null;
+      return [];
     }
   };
   let adapterResolved = false;
@@ -269,9 +326,10 @@ export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: str
       add(pgClientClass(given) ?? pgClientOf(given));
       addPool(pgPoolClass(given) ?? pgPoolOf(given));
     }
-    const pgPath = entry('pg');
-    if (pgPath) addModule(requireFrom(pgPath, pgPath));
-    const adapterPath = entry('@prisma/adapter-pg');
+    // pg: the first copy along every chain (an app's nested pg beside a conflicting root one); wrapping an extra copy is harmless.
+    for (const pgPath of entries('pg')) addModule(requireFrom(pgPath, pgPath));
+    // The adapter: the most app-specific copy only.
+    const adapterPath = entries('@prisma/adapter-pg')[0];
     if (adapterPath) {
       adapterResolved = true;
       const mod = requireFrom(adapterPath, 'pg');
