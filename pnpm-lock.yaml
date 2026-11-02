@@ -222,6 +222,9 @@ importers:
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.4
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.23.1
       mongodb:
         specifier: ^6.20.0
         version: 6.21.0(@aws-sdk/credential-providers@3.1166.0)(socks@2.8.10)
@@ -231,6 +234,9 @@ importers:
       mongoose:
         specifier: ^8.9.0
         version: 8.24.4(@aws-sdk/credential-providers@3.1166.0)(socks@2.8.10)
+      pg:
+        specifier: ^8.23.0
+        version: 8.23.0
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(jiti@2.7.0)(postcss@8.5.28)(tsx@4.23.15)(typescript@5.9.3)

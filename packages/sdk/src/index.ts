@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { bucketOf, encryptSample, importSamplePublicKey } from '@query-analyser/contract/runtime';
 import type { EncryptedSample, IngestItem, IngestPayload } from './types.js';
@@ -9,11 +10,18 @@ import {
   installConnectWrap,
   monitorState,
   mongooseClients,
+  prismaClientVersion,
+  resolveAppPath,
   resolvePeer,
+  resolvePgClients,
   undoConnectWraps,
   MONITORING_OFF_WARNING,
   type MongoClientLike,
 } from './drivers.js';
+import { installPgPoolWrap, installPgWrap, undoPgWraps } from './integrations/pg.js';
+import { appHelperPresent, ensurePrismaHook, installPrismaHook, pgCoversAdapter, undoPrismaHook } from './integrations/prisma.js';
+import { sqlRuntime } from './sql/context.js';
+import { createSqlSink, type SqlSink } from './sql/core.js';
 import { toWireItem } from './wire-item.js';
 import { createTransport, planChunks, MAX_CHUNK_BYTES } from './transport.js';
 
@@ -43,8 +51,66 @@ function resolveMaxSignatures(requested: number | undefined, onError: (e: Error)
   return value;
 }
 
+// Decision 17, verbatim.
 const UNRESOLVED_WARNING =
-  'query-analyser: neither mongoose nor mongodb could be resolved and no mongoClient was given; pass init({ mongoose }) or init({ mongoClient })';
+  'query-analyser: none of mongoose, mongodb, pg or @prisma/client could be resolved and no client was given; pass init({ mongoose }), init({ mongoClient }) or init({ pg })';
+
+// Decision 18, verbatim.
+const engineWarning = (version: string): string =>
+  `query-analyser: @prisma/client ${version} without @prisma/adapter-pg runs its SQL inside the query engine, which the SDK captures only when your app already enables Prisma tracing. Use @prisma/adapter-pg, or Prisma 7, to capture these queries.`;
+/** Decision 18's warning is reported at most once per process. */
+let engineWarningReported = false;
+
+const SAMPLE_RATE_WARNING = 'query-analyser: sql.sampleRate must be a number greater than 0 and at most 1; using 1';
+const DEFAULT_THRESHOLD_MS = 100;
+const THRESHOLD_WARNING = `query-analyser: thresholdMs must be a whole number of milliseconds, 0 or more; using ${DEFAULT_THRESHOLD_MS}`;
+
+/** `sql.sampleRate`, validated once here so the sink never reports per statement. Invalid -> reported, 1. */
+function resolveSampleRate(requested: unknown, report: (e: Error) => void): number {
+  if (requested === undefined) return 1;
+  if (typeof requested === 'number' && Number.isFinite(requested) && requested > 0 && requested <= 1) return requested;
+  report(new Error(SAMPLE_RATE_WARNING));
+  return 1;
+}
+
+/** `thresholdMs`, as the ingest API accepts it (a non-negative integer). Invalid -> reported, 100. */
+function resolveThresholdMs(requested: unknown, report: (e: Error) => void): number {
+  if (requested === undefined) return DEFAULT_THRESHOLD_MS;
+  if (typeof requested === 'number' && Number.isInteger(requested) && requested >= 0) return requested;
+  report(new Error(THRESHOLD_WARNING));
+  return DEFAULT_THRESHOLD_MS;
+}
+
+/** `options.sql`, read once and guarded (a throwing getter means the defaults). */
+function readSqlOptions(options: InitOptions): { sampleRate: unknown; maskIdentifiers: boolean } {
+  try {
+    const o: unknown = options.sql;
+    if (typeof o !== 'object' || o === null) return { sampleRate: undefined, maskIdentifiers: false };
+    const { sampleRate, maskIdentifiers } = o as { sampleRate?: unknown; maskIdentifiers?: unknown };
+    return { sampleRate, maskIdentifiers: maskIdentifiers === true };
+  } catch {
+    return { sampleRate: undefined, maskIdentifiers: false };
+  }
+}
+
+/** Major version of a semver string, or null. */
+function majorOf(version: string | null): number | null {
+  const m = version === null ? null : /^(\d+)\./.exec(version);
+  return m ? Number(m[1]) : null;
+}
+
+/** Wraps the Client and Pool classes of a `pg` module, Pool or Client (`instrument()` and repeated `init()`). Never throws. */
+function wrapPg(x: unknown): boolean {
+  try {
+    // Only what was given: a module, a Pool (and its Client) or a Client. Nothing is resolved here.
+    const { clients, pools } = resolvePgClients(x, { appEntry: () => null });
+    for (const C of clients) installPgWrap(C);
+    for (const P of pools) installPgPoolWrap(P);
+    return clients.length > 0 || pools.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 const defaultOnError = (e: Error): void => { process.stderr.write(`[query-analyser] ${e.message}\n`); };
 
@@ -91,6 +157,18 @@ export interface InitOptions {
    * unset (or empty), payloads are exactly as without this option.
    */
   sampleKey?: string;
+  /**
+   * The app's `pg` module, for a copy the SDK can't resolve on its own (a bundled one). The app's own
+   * `pg` and `@prisma/adapter-pg`'s are found without it.
+   */
+  pg?: object;
+  /** PostgreSQL capture (`pg`, and Prisma through `pg` or the app's own Prisma tracing). */
+  sql?: {
+    /** Replace table, column, schema and database names with keyed hashes before anything leaves the process. */
+    maskIdentifiers?: boolean;
+    /** Fraction (0 < r <= 1, default 1) of fast, successful statements to time; slow and failed ones are always counted. */
+    sampleRate?: number;
+  };
 }
 
 // Distinct encryption-failure causes reported per analyser; past this, new
@@ -175,6 +253,7 @@ export function init(options: InitOptions): Analyser {
     if (activeEnabled) {
       const report = (e: Error): void => { try { onError(e); } catch { /* never throw from reporting */ } };
       for (const client of givenClients(options.mongoClient)) watchClient(client, report);
+      if (options.pg != null) wrapPg(options.pg);
     }
     return active;
   }
@@ -210,7 +289,11 @@ export function init(options: InitOptions): Analyser {
     return noop;
   }
 
-  const thresholdMs = options.thresholdMs ?? 100;
+  const reportSafely = (e: Error) => { try { onError(e); } catch { /* never throw from reporting */ } };
+  // Validated once here: an invalid value is reported once and the default used, never per statement.
+  const thresholdMs = resolveThresholdMs(options.thresholdMs, reportSafely);
+  const sql = readSqlOptions(options);
+  const sampleRate = resolveSampleRate(sql.sampleRate, reportSafely);
   const flushIntervalMs = options.flushIntervalMs ?? 10_000;
   const aggregator = new Aggregator(maxSignatures);
   const transport = createTransport({
@@ -219,8 +302,6 @@ export function init(options: InitOptions): Analyser {
     fetchImpl: options.fetchImpl,
     onError,
   });
-
-  const reportSafely = (e: Error) => { try { onError(e); } catch { /* never throw from reporting */ } };
 
   // Sample encryption. The key is validated asynchronously (Web Crypto has no
   // sync import), so it starts 'pending': the monitor already captures raw
@@ -308,6 +389,7 @@ export function init(options: InitOptions): Analyser {
   // MongoClient; mongoose (when there is one) is only read to name models.
   // Never throws: every step below is guarded and failures go to onError.
   let mg: object | null = null;
+  let mongoFound = true; // a failure while looking means: don't claim nothing was found
   try {
     mg = options.mongoose ?? (resolvePeer('mongoose') as object | null);
   } catch (err) {
@@ -345,10 +427,49 @@ export function init(options: InitOptions): Analyser {
     const clients = new Set<object>([...(mg ? mongooseClients(mg) : []), ...given]);
     for (const client of clients) watchClient(client, reportSafely);
 
-    if (!mg && !drv && given.length === 0) reportSafely(new Error(UNRESOLVED_WARNING));
+    mongoFound = mg !== null || drv !== null || given.length > 0;
   } catch (err) {
     reportSafely(err instanceof Error ? err : new Error(String(err)));
   }
+
+  // SQL layers: pg (every copy the SDK can reach, plus options.pg) and the Prisma tracing hook.
+  // Guarded on its own, so a failure here never undoes the Mongo layer, and vice versa.
+  let sqlSink: SqlSink | null = null;
+  let sqlFound = true; // as mongoFound
+  try {
+    const rt = sqlRuntime();
+    sqlSink = createSqlSink({
+      aggregator,
+      thresholdMs,
+      sampleRate,
+      maskIdentifiers: sql.maskIdentifiers,
+      // Keys identifier masking, stable across processes of one app (rotating the key changes masked names).
+      maskKey: createHash('sha256').update('qa-mask:' + options.apiKey).digest(),
+      isDisabled: () => disabled,
+      onError: reportSafely,
+    });
+    rt.sink = sqlSink;
+
+    const { clients: pgClients, pools: pgPools, adapterResolved, adapterPg } = resolvePgClients(options.pg);
+    for (const C of pgClients) installPgWrap(C);
+    for (const P of pgPools) installPgPoolWrap(P);
+    rt.prismaAdapterResolved = adapterResolved;
+    // After the wraps: whether the adapter's own pg is now one of the wrapped copies.
+    rt.pgCoversPrismaAdapter = pgCoversAdapter(adapterResolved, adapterPg);
+    installPrismaHook();
+
+    // Only an @prisma/client in the app's own node_modules counts (not one reachable through NODE_PATH).
+    const prismaVersion = prismaClientVersion({ resolve: resolveAppPath });
+    const major = majorOf(prismaVersion);
+    if (prismaVersion !== null && (major === 5 || major === 6) && !adapterResolved && !appHelperPresent() && !engineWarningReported) {
+      engineWarningReported = true;
+      reportSafely(new Error(engineWarning(prismaVersion)));
+    }
+    sqlFound = pgClients.length > 0 || options.pg != null || prismaVersion !== null || resolveAppPath('@prisma/client') !== null;
+  } catch (err) {
+    reportSafely(err instanceof Error ? err : new Error(String(err)));
+  }
+  if (!mongoFound && !sqlFound) reportSafely(new Error(UNRESOLVED_WARNING));
   const installedModels = resolver.modelCount();
 
   const doFlush = async (): Promise<void> => {
@@ -358,6 +479,11 @@ export function init(options: InitOptions): Analyser {
     // beforeExit, so an unhandled rejection here would, by default since
     // Node 15, crash the host process. The SDK's contract is that it never
     // takes the host down, so every failure must resolve, not reject.
+    // Decision 16: put back any watched Prisma key the app deleted. Only while this analyser's
+    // sink is live, so a flush after shutdown() never re-installs what shutdown() removed.
+    try {
+      if (sqlSink !== null && sqlRuntime().sink === sqlSink) ensurePrismaHook();
+    } catch { /* never throws */ }
     try {
       const { items, dropped } = aggregator.swap();
       if (items.length === 0 && dropped === 0) return;
@@ -467,6 +593,19 @@ export function init(options: InitOptions): Analyser {
         setSink(null);
         undoConnectWraps();
       }
+      // The same for the SQL layers: only this analyser's own sink, wraps and hook.
+      try {
+        const rt = sqlRuntime();
+        if (sqlSink !== null && rt.sink === sqlSink) {
+          rt.sink = null;
+          undoPgWraps();
+          undoPrismaHook();
+          rt.prismaAdapterResolved = false;
+          rt.pgCoversPrismaAdapter = false;
+        }
+      } catch (err) {
+        reportSafely(err instanceof Error ? err : new Error(String(err)));
+      }
       // Important 3: see clearActiveIfSelf's comment above `active`.
       clearActiveIfSelf(analyser);
     },
@@ -483,8 +622,10 @@ export function init(options: InitOptions): Analyser {
 /**
  * Captures queries from this client: for a client the SDK can't reach on its
  * own (a bundled or nested driver copy), or one connected before init().
- * Safe to call on every request with the same cached client (attaches once,
- * warns at most once), and before or after init(). Never throws.
+ * Accepts a MongoClient, or a `pg` Pool or Client from a bundled `pg` (its
+ * class is wrapped once). Safe to call on every request with the same cached
+ * client (attaches once, warns at most once), and before or after init().
+ * Never throws.
  */
 export function instrument(client: MongoClientLike): void {
   try {
@@ -496,6 +637,8 @@ export function instrument(client: MongoClientLike): void {
       } catch { /* never throw from reporting */ }
     };
     if (typeof client !== 'object' || client === null) return;
+    // A pg Pool or Client (a bundled pg the SDK can't resolve) is wrapped, never watched as a MongoClient.
+    if (wrapPg(client)) return;
     watchClient(client, report);
   } catch { /* never throw into app code */ }
 }

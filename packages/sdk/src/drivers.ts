@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { existsSync, readFileSync } from 'node:fs';
+import { createRequire, Module } from 'node:module';
 import { dirname, join } from 'node:path';
 import { attachClient, currentSink, hasMonitorSetter, MONITORING_OFF_WARNING } from './monitor.js';
 
@@ -83,6 +83,45 @@ export function resolvePeerPath(name: string): string | null {
   return viaStrategies((req) => req.resolve(name));
 }
 
+/** NODE_PATH and the other global folders: a package found only there is not one the app installed. */
+function globalFolders(): Set<string> {
+  try {
+    const g = (Module as unknown as { globalPaths?: unknown }).globalPaths;
+    return new Set(Array.isArray(g) ? g.filter((p): p is string => typeof p === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/** The node_modules directories the app's own lookup walks (same strategies as resolvePeer), minus the global folders. */
+function appLookupDirs(name: string): string[] {
+  const globals = globalFolders();
+  const dirs = viaStrategies((req) => req.resolve.paths(name));
+  return (dirs ?? []).filter((d) => !globals.has(d));
+}
+
+/**
+ * Like resolvePeerPath, but only for a package installed in the app's own node_modules chain: a copy
+ * reachable only through NODE_PATH (pnpm hoists every transitive package there) or another global folder
+ * gives null. `from.lookup` replaces the chain (tests). Never throws.
+ */
+export function resolveAppPath(name: string, from?: { lookup?: readonly string[] }): string | null {
+  try {
+    for (const dir of from?.lookup ?? appLookupDirs(name)) {
+      if (!existsSync(join(dir, name))) continue;
+      try {
+        // Resolve from the directory that owns this node_modules, so this copy is the first one found.
+        return createRequire(join(dirname(dir), '__query_analyser__.js')).resolve(name);
+      } catch {
+        return null; // installed here but not loadable: the app could not use it either
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** createRequire(fromFile)(name); null on any failure. */
 export function requireFrom(fromFile: string, name: string): unknown | null {
   try {
@@ -146,8 +185,15 @@ export function pgClientOf(x: unknown): Function | null {
 }
 
 /** Distinct Client and Pool classes, each deduplicated by prototype identity, from: `given`, the app's pg,
- *  and pg required from @prisma/adapter-pg's resolved entry file. `adapterResolved` says whether that entry resolved. Never throws. */
-export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: string) => string | null }): { clients: Function[]; pools: Function[]; adapterResolved: boolean } {
+ *  and pg required from @prisma/adapter-pg's resolved entry file (both found only in the app's own node_modules chain). `adapterResolved` says whether that entry resolved,
+ *  and `adapterPg` is the pg module it uses. Never throws. */
+export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: string) => string | null }): {
+  clients: Function[];
+  pools: Function[];
+  adapterResolved: boolean;
+  /** The pg module required from the adapter's entry (for pgCoversAdapter); absent when that failed. */
+  adapterPg?: unknown;
+} {
   const clients: Function[] = [];
   const pools: Function[] = [];
   const seen = new Set<unknown>();
@@ -165,12 +211,13 @@ export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: str
   const addModule = (mod: unknown): void => { add(pgClientClass(mod)); addPool(pgPoolClass(mod)); };
   const entry = (name: string): string | null => {
     try {
-      return (from?.appEntry ?? resolvePeerPath)(name);
+      return (from?.appEntry ?? resolveAppPath)(name);
     } catch {
       return null;
     }
   };
   let adapterResolved = false;
+  let adapterPg: unknown;
   try {
     if (given != null) {
       add(pgClientClass(given) ?? pgClientOf(given));
@@ -181,10 +228,12 @@ export function resolvePgClients(given?: unknown, from?: { appEntry?: (name: str
     const adapterPath = entry('@prisma/adapter-pg');
     if (adapterPath) {
       adapterResolved = true;
-      addModule(requireFrom(adapterPath, 'pg'));
+      const mod = requireFrom(adapterPath, 'pg');
+      if (mod !== null) adapterPg = mod;
+      addModule(mod);
     }
   } catch { /* partial results are fine */ }
-  return { clients, pools, adapterResolved };
+  return adapterPg === undefined ? { clients, pools, adapterResolved } : { clients, pools, adapterResolved, adapterPg };
 }
 
 /** The installed @prisma/client version (package.json found by walking up from its resolved entry), or null. */

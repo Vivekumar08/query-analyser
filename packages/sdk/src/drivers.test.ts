@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +19,7 @@ import {
   pgPoolClass,
   pgPoolOf,
   prismaClientVersion,
+  resolveAppPath,
   resolvePgClients,
   mongooseClients,
   requireFrom,
@@ -470,6 +471,51 @@ describe('pg copies', () => {
 
   it('prismaClientVersion returns null when no @prisma/client package.json is above the entry', () => {
     expect(prismaClientVersion({ resolve: () => join(FIX, 'nopkg/index.js') })).toBeNull();
+  });
+
+  it('resolvePgClients returns the adapter\'s own pg module (the app\'s when they are one copy)', () => {
+    expect(resolvePgClients(undefined, { appEntry: at(FIX + '/app') }).adapterPg)
+      .toBe(load('app/node_modules/@prisma/adapter-pg/node_modules/pg'));
+    expect(resolvePgClients(undefined, { appEntry: at(FIX + '/shared') }).adapterPg).toBe(load('shared/node_modules/pg'));
+    // Only the fixture's own chain (the plain `at` resolver would also see pnpm's NODE_PATH).
+    const otherOnly = (n: string) => resolveAppPath(n, { lookup: [join(FIX, 'other/node_modules')] });
+    const other = resolvePgClients(undefined, { appEntry: otherOnly });
+    expect(other.adapterResolved).toBe(false);
+    expect(other.adapterPg).toBeUndefined();
+    expect(other.clients).toEqual([load('other/node_modules/pg').Client]);
+  });
+
+  it('resolveAppPath finds a package in the app\'s node_modules chain, and nothing else', () => {
+    const pc = join(FIX, 'appprisma/node_modules/@prisma/client');
+    mkdirSync(join(pc, 'dist'), { recursive: true });
+    writeFileSync(join(pc, 'package.json'), JSON.stringify({ name: '@prisma/client', version: '6.19.3', main: 'dist/index.js' }));
+    writeFileSync(join(pc, 'dist/index.js'), '');
+    const lookup = [join(FIX, 'appprisma/sub/node_modules'), join(FIX, 'appprisma/node_modules')];
+    expect(resolveAppPath('@prisma/client', { lookup })).toBe(realpathSync(join(pc, 'dist/index.js')));
+    expect(prismaClientVersion({ resolve: (n) => resolveAppPath(n, { lookup }) })).toBe('6.19.3');
+    expect(resolveAppPath('@prisma/client', { lookup: [join(FIX, 'app/node_modules')] })).toBeNull();
+    expect(resolveAppPath('@prisma/client', { lookup: [] })).toBeNull();
+  });
+
+  it('resolveAppPath ignores a package reachable only through NODE_PATH (a hoisted transitive copy)', () => {
+    const glob = join(FIX, 'global');
+    const pc = join(glob, '@prisma/client');
+    mkdirSync(pc, { recursive: true });
+    writeFileSync(join(pc, 'package.json'), JSON.stringify({ name: '@prisma/client', version: '6.19.3' }));
+    writeFileSync(join(pc, 'index.js'), '');
+    const Module = createRequire(import.meta.url)('node:module') as { _initPaths(): void };
+    const before = process.env.NODE_PATH;
+    try {
+      process.env.NODE_PATH = glob;
+      Module._initPaths();
+      expect(resolvePeerPath('@prisma/client')).toBe(realpathSync(join(pc, 'index.js'))); // the plain resolver is fooled
+      expect(resolveAppPath('@prisma/client')).toBeNull();
+      expect(resolveAppPath('pg')).not.toBeNull(); // a real devDependency of the SDK still resolves
+    } finally {
+      if (before === undefined) delete process.env.NODE_PATH; else process.env.NODE_PATH = before;
+      Module._initPaths();
+    }
+    expect(resolveAppPath('@prisma/client')).toBeNull(); // nor through the NODE_PATH the test runner may set
   });
 
   it('Review Focus: a statement through either copy is recorded exactly once', async () => {
