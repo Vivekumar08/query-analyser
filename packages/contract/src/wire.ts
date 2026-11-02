@@ -39,6 +39,14 @@ export interface RankedQueryRow {
   totalMs: NumericString;
   maxMs: number;
   hist: number[];
+  source: string;
+  orm: string | null;
+  database: string | null;
+  errors: number;
+  /** Lowest sample rate over the window; null when nothing was sampled. */
+  minSampleRate: number | null;
+  /** Summed fine histogram; null when no rollup in the window has one. */
+  histFine: number[] | null;
 }
 
 /**
