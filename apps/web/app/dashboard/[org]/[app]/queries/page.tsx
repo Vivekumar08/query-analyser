@@ -3,7 +3,7 @@ import { redirect } from 'next/navigation';
 import { getSummary, listQueries } from '@/src/dashboard-api';
 import { getShellContext } from '@/src/shell-context';
 import { filtersToApiQuery, filtersToSearch, optionsApiQuery, parseFilters, summaryApiQuery } from '@/src/filters';
-import { clearFiltersHref, emptyKind, listOutcome, toRowsView } from '@/src/queries-view';
+import { clearFiltersHref, emptyKind, listOutcome, loadSummary, toRowsView } from '@/src/queries-view';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { PageHeader } from '@/components/dashboard/PageHeader';
@@ -36,11 +36,12 @@ export default async function QueriesPage({
 
   const token = ctx.session.accessToken;
   // The summary is fetched in parallel; a failed one hides the strip and never fails the page.
-  const [res, summaryRes] = await Promise.all([
-    listQueries(token, ctx.app.id, filtersToApiQuery(filters, undefined, retentionDays)),
-    getSummary(token, ctx.app.id, summaryApiQuery(filters, undefined, retentionDays)).catch(() => null),
+  const now = new Date(); // one instant, so the strip and the list share a window
+  const [res, loaded] = await Promise.all([
+    listQueries(token, ctx.app.id, filtersToApiQuery(filters, now, retentionDays)),
+    loadSummary(() => getSummary(token, ctx.app.id, summaryApiQuery(filters, now, retentionDays))),
   ]);
-  const summary = summaryRes && summaryRes.ok && summaryRes.data.sources.length + summaryRes.data.droppedNew > 0 ? summaryRes.data : null;
+  const summary = loaded && loaded.sources.length + loaded.droppedNew > 0 ? loaded : null;
   if (!res.ok && res.status === 401) redirect(`/api/auth/refresh?next=${encodeURIComponent(`${base}/queries${search ? `?${search}` : ''}`)}`);
   const outcome = listOutcome(res);
   if (outcome === 'error') throw new Error('Could not load queries');

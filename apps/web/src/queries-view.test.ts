@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { clearFiltersHref, emptyKind, listOutcome, toRowsView } from './queries-view';
+import { clearFiltersHref, emptyKind, listOutcome, loadSummary, toRowsView, toSummary } from './queries-view';
 import { parseFilters } from './filters';
 
 const row = (hash: string, totalMs: string, count: number) => ({
@@ -60,4 +60,21 @@ describe('listOutcome', () => {
   it('400 → invalid-filters', () => expect(listOutcome({ ok: false, status: 400, error: 'x' })).toBe('invalid-filters'));
   it.each([401, 403, 404, 500, 503])('%i → error', (status) =>
     expect(listOutcome({ ok: false, status, error: 'x' })).toBe('error'));
+});
+
+describe('toSummary / loadSummary', () => {
+  const good = { grain: 'hourly', from: 'a', to: 'b', thresholdMs: 100, droppedNew: 0, sources: [] };
+  const ok = (data: unknown) => ({ ok: true, data }) as never;
+  it('passes a well-formed summary through', () => expect(toSummary(ok(good))).toEqual(good));
+  it.each([
+    ['null body', null], ['empty object', {}], ['string body', 'oops'],
+    ['sources not an array', { ...good, sources: {} }], ['droppedNew missing', { ...good, droppedNew: undefined }],
+    ['droppedNew NaN', { ...good, droppedNew: NaN }], ['droppedNew a string', { ...good, droppedNew: '3' }],
+  ])('returns null for a malformed 200: %s', (_n, body) => expect(toSummary(ok(body))).toBeNull());
+  it('returns null for a failed result', () => expect(toSummary({ ok: false, status: 404, error: 'x' })).toBeNull());
+  it('loadSummary hides the strip on a 404 and on a thrown fetch', async () => {
+    expect(await loadSummary(async () => ({ ok: false, status: 404, error: 'x' }))).toBeNull();
+    expect(await loadSummary(async () => { throw new Error('network'); })).toBeNull();
+    expect(await loadSummary(async () => ok(good))).toEqual(good);
+  });
 });

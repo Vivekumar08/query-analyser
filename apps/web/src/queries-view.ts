@@ -1,5 +1,5 @@
 import type { PercentileResult } from '@query-analyser/contract';
-import type { QueryRow } from './dashboard-types';
+import type { QueryRow, SummaryResponse } from './dashboard-types';
 import { filtersToSearch, type QueryFilters } from './filters';
 import type { ApiResult } from './api';
 import { ormLabel, sampledLabel, sourceLabel } from './sources';
@@ -52,4 +52,21 @@ export function clearFiltersHref(base: string, f: QueryFilters): string {
 export function listOutcome(res: ApiResult<unknown>): 'ok' | 'invalid-filters' | 'error' {
   if (res.ok) return 'ok';
   return res.status === 400 ? 'invalid-filters' : 'error';
+}
+
+/** The summary only when the body has the shape the strip reads; anything else (a malformed 200 included) is null. */
+export function toSummary(res: ApiResult<SummaryResponse>): SummaryResponse | null {
+  if (!res.ok) return null;
+  const d = res.data as Partial<SummaryResponse> | null | undefined;
+  if (!d || !Array.isArray(d.sources) || typeof d.droppedNew !== 'number' || !Number.isFinite(d.droppedNew)) return null;
+  return res.data;
+}
+
+/** Runs the summary fetch; a failure or a throw hides the strip and never fails the page. */
+export async function loadSummary(fetcher: () => Promise<ApiResult<SummaryResponse>>): Promise<SummaryResponse | null> {
+  try {
+    return toSummary(await fetcher());
+  } catch {
+    return null;
+  }
 }

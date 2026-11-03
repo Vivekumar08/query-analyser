@@ -32,6 +32,7 @@ describe('SummaryStrip', () => {
     render(<SummaryStrip summary={mk({ sources: [pg()] })} />);
     for (const l of ['Statements', 'Avg', 'P50', 'P95', 'P99', 'Errors']) expect(screen.getByText(l)).toBeTruthy();
     expect(screen.getByTitle(/not available/i)).toBeTruthy();
+    expect(screen.getByLabelText('Not available').textContent).toBe('—');
   });
   it('shows only Slow queries, Avg and P95 for MongoDB', () => {
     render(<SummaryStrip summary={mk({ sources: [mongo()] })} />);
@@ -55,5 +56,13 @@ describe('SummaryStrip', () => {
     render(<SummaryStrip summary={mk({ thresholdMs: null })} />);
     expect(screen.getByText('Slow (≥ threshold)')).toBeTruthy();
     expect(screen.getByText('Slow queries (≥ threshold)')).toBeTruthy();
+  });
+  it('hides Errors in the MongoDB group even when errors is non-zero', () => {
+    render(<SummaryStrip summary={mk({ sources: [mongo({ errors: 5 })] })} />);
+    expect(screen.queryByText('Errors')).toBeNull();
+  });
+  it('labels a sampled source with no rate as plain (no estimate wording)', () => {
+    render(<SummaryStrip summary={mk({ sources: [pg({ sampled: true, sampleRate: null })] })} />);
+    expect(screen.getByRole('region', { name: 'PostgreSQL' })).toBeTruthy();
   });
 });
