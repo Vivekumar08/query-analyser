@@ -1,7 +1,7 @@
 {
   "name": "@vivekumar08/query-analyser",
-  "version": "0.3.0",
-  "description": "Find your slow MongoDB queries. One line of setup.",
+  "version": "0.4.0",
+  "description": "Find your slow MongoDB and PostgreSQL queries. One line of setup.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -16,7 +16,7 @@
   },
   "files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"],
   "engines": { "node": ">=20" },
-  "keywords": ["mongodb", "mongoose", "slow-query", "performance", "apm", "profiler"],
+  "keywords": ["mongodb", "mongoose", "postgresql", "postgres", "pg", "prisma", "sql", "slow-query", "performance", "apm", "profiler"],
   "publishConfig": { "access": "public" },
   "scripts": {
     "build": "tsup",
