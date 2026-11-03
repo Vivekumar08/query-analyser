@@ -72,7 +72,7 @@ need `previewFeatures = ["driverAdapters"]` in the `generator` block (and a
 ```prisma
 generator client {
   provider        = "prisma-client-js"
-  previewFeatures = ["driverAdapters"] // 5.22 and early 6.x only
+  previewFeatures = ["driverAdapters"] // needed on 5.22.0 and 6.0.1; not on 6.19.3
 }
 ```
 
@@ -87,7 +87,9 @@ const prisma = new PrismaClient({ adapter: new PrismaPg(new Pool({ connectionStr
 **Without the adapter (Prisma 5/6 engine path),** queries run inside Prisma's
 query engine, not in JavaScript. The SDK captures them only when your app
 already enables Prisma tracing itself, for example with its own
-`@prisma/instrumentation`. The SDK never turns tracing on and never adds `traceparent` comments, so the SQL your database receives is exactly what your app sends.
+`@prisma/instrumentation`. The SDK never turns tracing on and never adds
+`traceparent` comments, so the SQL your database receives is exactly what
+your app sends.
 
 When `@prisma/client` 5.x or 6.x resolves, `@prisma/adapter-pg` does not, and
 your app has no Prisma tracing, the SDK warns once at `init()`:
@@ -235,9 +237,13 @@ A statement like `SELECT * FROM "User" WHERE email = $1 AND total >= 500` is
 reported as `SELECT * FROM "User" WHERE email = ? AND total >= ?`. Every
 literal, `$n` parameter, comment and dollar-quoted body becomes `?` or is
 dropped before anything is buffered. SQL items carry `sample: null` and never an
-encrypted sample, even with `sampleKey` set. Besides the shared keys
-(`signature`, `hash`, `model`, `operation`, `collection` as the table, counts,
-durations, `hist`, and `source: "postgresql"`), a SQL item may carry:
+encrypted sample: with `sampleKey` set they carry `encryptedSample: null`.
+
+Every SQL item has the same keys as a MongoDB item: `signature` (the
+normalized SQL, truncated to 400 characters), `hash`, `model`, `operation`,
+`filterShape`, `sortKeys` and `stages` (always `[]` for SQL), `count`,
+`totalMs`, `maxMs`, `lastMs`, `lastTs` (a timestamp), `hist`, `sample`,
+`source` (`"postgresql"`) and `collection` (the table). It may also carry:
 
 | Key | Meaning |
 |---|---|
@@ -307,8 +313,9 @@ require('@vivekumar08/query-analyser').init({
   encryption happens later, at flush). No I/O on the query path. Turning on the
   driver's command monitoring has a cost for very large reads; see the
   [changelog](./CHANGELOG.md).
-- For `pg` and Prisma the SDK wraps `pg`'s `query()` and times it. The cost we
-  measured was within measurement noise; see the [changelog](./CHANGELOG.md).
+- For `pg` and Prisma the SDK wraps `pg`'s `query()` and times it. On an Apple
+  M4 with a local Postgres we measured about 4 µs per `pg` query and about
+  2–3 µs per Prisma call; see the [changelog](./CHANGELOG.md).
 - Known limitation: an app that loads both the CommonJS and ESM copies of the SDK
   and calls `init()` in both can lose zero-setup capture for clients that connect
   later. Call `init()` from one module system.
