@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +21,7 @@ import {
   prismaClientVersion,
   resolveAppPath,
   resolveAppPaths,
+  appLookupChains,
   resolvePgClients,
   mongooseClients,
   requireFrom,
@@ -684,6 +685,51 @@ describe('resolveAppPath: real install layouts (Task 8 fix round 1)', () => {
       expect(r.adapterResolved).toBe(true);
       expect(r.adapterPg).toBe(createRequire(join(app, 'node_modules/@prisma/adapter-pg/index.js'))('pg'));
     }
+  });
+
+  it('an entry script inside node_modules (a hoisted tool such as next or vitest) is not the app: cwd decides', () => {
+    const root = join(ROOT, 'hoisted-tool');
+    const app = join(root, 'apps/x');
+    const moduleFile = sdkAt(join(root, SDK));
+    const prisma = (dir: string, version: string): void => {
+      mkdirSync(join(dir, '@prisma/client'), { recursive: true });
+      writeFileSync(join(dir, '@prisma/client/package.json'), JSON.stringify({ name: '@prisma/client', version, main: 'index.js' }));
+      writeFileSync(join(dir, '@prisma/client/index.js'), '');
+      pkg(join(dir, '@prisma/adapter-pg'), '@prisma/adapter-pg');
+      pkg(join(dir, '@prisma/adapter-pg/node_modules/pg'), 'pg');
+    };
+    prisma(join(root, 'node_modules'), '6.19.0');
+    prisma(join(app, 'node_modules'), '7.10.0');
+    mkdirSync(join(root, 'node_modules/fakecli/bin'), { recursive: true });
+    const cli = join(root, 'node_modules/fakecli/bin/cli.js');
+    writeFileSync(cli, '');
+    mkdirSync(join(root, 'node_modules/.bin'), { recursive: true });
+    const bin = join(root, 'node_modules/.bin/fakecli');
+    symlinkSync('../fakecli/bin/cli.js', bin);
+    const appAdapterPg = createRequire(join(app, 'node_modules/@prisma/adapter-pg/index.js'))('pg') as { Client: Function };
+    for (const entry of [cli, bin]) {
+      const from = { moduleFile, cwd: app, entry };
+      expect(prismaClientVersion({ resolve: (n) => resolveAppPath(n, from) })).toBe('7.10.0');
+      const r = resolvePgClients(undefined, { appEntries: (n) => resolveAppPaths(n, from) });
+      expect(r.adapterResolved).toBe(true);
+      expect(r.adapterPg).toBe(appAdapterPg);
+      expect(r.clients).toContain(appAdapterPg.Client);
+      try {
+        for (const C of r.clients) installPgWrap(C);
+        expect(PG_QUERY_WRAP in appAdapterPg.Client.prototype).toBe(true);
+      } finally {
+        undoPgWraps();
+      }
+    }
+    // The chain from such an entry is dropped entirely.
+    expect(appLookupChains('pg', { entry: cli, cwd: null, moduleFile: null })).toEqual([[], [], []]);
+    expect(appLookupChains('pg', { entry: bin, cwd: null, moduleFile: null })).toEqual([[], [], []]);
+  });
+
+  it('an entry script in the app (outside node_modules) still leads', () => {
+    const { app, root, moduleFile } = conflicting('entry-still-leads');
+    expect(appLookupChains('pg', { entry: join(app, 'server.js'), cwd: null, moduleFile: null })[0]![0]).toBe(join(app, 'node_modules'));
+    expect(resolveAppPath('pg', { moduleFile, cwd: root, entry: join(app, 'server.js') })).toBe(real(join(app, 'node_modules/pg/index.js')));
   });
 
   it('a throwing process.cwd() loses only the cwd chain', () => {
