@@ -30,8 +30,8 @@ export function trendData(points: SeriesPoint[], grain: 'hourly' | 'daily') {
     const has = p.count > 0;
     return {
       label, at: p.at, calls: p.count,
-      p95: has ? p.p95.value : null,
-      p95Basis: has ? p.p95.basis : null,
+      p95: has && p.p95 ? p.p95.value : null,
+      p95Basis: has && p.p95 ? p.p95.basis : null,
     };
   });
 }

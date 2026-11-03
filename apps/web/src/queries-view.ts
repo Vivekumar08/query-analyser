@@ -2,12 +2,14 @@ import type { PercentileResult } from '@query-analyser/contract';
 import type { QueryRow } from './dashboard-types';
 import { filtersToSearch, type QueryFilters } from './filters';
 import type { ApiResult } from './api';
+import { ormLabel, sampledLabel, sourceLabel } from './sources';
 import { formatAvg, formatMs, toMs } from './format';
 
 export interface RowView {
   hash: string; title: string; signature: string; count: number;
   wasted: string; wastedShare: number; avg: string;
   p95: PercentileResult | null; max: string;
+  source: string; sourceLabel: string; ormLabel: string; errors: number; sampledLabel: string | null;
 }
 
 export function toRowsView(rows: QueryRow[]): RowView[] {
@@ -23,6 +25,11 @@ export function toRowsView(rows: QueryRow[]): RowView[] {
     avg: formatAvg(r.totalMs, r.count),
     p95: r.p95 ?? null,
     max: formatMs(r.maxMs),
+    source: r.source ?? 'mongodb',
+    sourceLabel: sourceLabel(r.source),
+    ormLabel: ormLabel(r.source, r.orm),
+    errors: r.errors ?? 0,
+    sampledLabel: sampledLabel(r.sampleRate),
   }));
 }
 
@@ -31,7 +38,7 @@ export function emptyKind(input: { rows: number; filtered: boolean }): 'none' | 
   return input.filtered ? 'no-match' : 'no-data';
 }
 
-/** Keeps the time range, drops model/op/sort/page. */
+/** Keeps the time range, drops model/op/source/orm/sort/page. */
 export function clearFiltersHref(base: string, f: QueryFilters): string {
   const qs = filtersToSearch({ range: f.range, sort: 'wasted', page: 1 });
   return `${base}/queries${qs ? `?${qs}` : ''}`;

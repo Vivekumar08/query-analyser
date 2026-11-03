@@ -1,7 +1,7 @@
 import { getParam, getParams, parseRange, rangeToParams, rangeToWindow, type RangeState } from './range';
 
-export type SortKey = 'wasted' | 'count' | 'p95' | 'maxMs';
-const SORTS: SortKey[] = ['wasted', 'count', 'p95', 'maxMs'];
+export type SortKey = 'wasted' | 'count' | 'p95' | 'maxMs' | 'errors';
+const SORTS: SortKey[] = ['wasted', 'count', 'p95', 'maxMs', 'errors'];
 export const PAGE_SIZE = 25;
 export const MAX_LIMIT = 200;
 const MAX_VALUE_LEN = 200;
@@ -17,6 +17,9 @@ export interface QueryFilters {
   /** The API takes ONE model and ONE op (each 1..200 chars); repeats are a 400. */
   model?: string;
   op?: string;
+  /** Database (`postgresql` | `mongodb`) and ORM (`prisma`); one value each. */
+  source?: string;
+  orm?: string;
   sort: SortKey;
   /** 1-based page of PAGE_SIZE rows. */
   page: number;
@@ -32,10 +35,14 @@ export function parseFilters(p: Params, retentionDays?: number): QueryFilters {
   const page = Number.isSafeInteger(n) && n >= 1 ? n : 1;
   const model = firstValue(getParams(p, 'model'));
   const op = firstValue(getParams(p, 'op'));
+  const source = firstValue(getParams(p, 'source'));
+  const orm = firstValue(getParams(p, 'orm'));
   return {
     range: parseRange(p, retentionDays),
     ...(model !== undefined && { model }),
     ...(op !== undefined && { op }),
+    ...(source !== undefined && { source }),
+    ...(orm !== undefined && { orm }),
     sort: SORTS.includes(sort as SortKey) ? (sort as SortKey) : 'wasted',
     page,
   };
@@ -45,6 +52,8 @@ export function filtersToSearch(f: QueryFilters): string {
   const s = new URLSearchParams(rangeToParams(f.range));
   if (f.model) s.set('model', f.model);
   if (f.op) s.set('op', f.op);
+  if (f.source) s.set('source', f.source);
+  if (f.orm) s.set('orm', f.orm);
   if (f.sort !== 'wasted') s.set('sort', f.sort);
   if (f.page > 1) s.set('page', String(f.page));
   return s.toString();
@@ -55,6 +64,8 @@ export function filtersToApiQuery(f: QueryFilters, now: Date = new Date(), reten
   const s = new URLSearchParams({ from, to, sort: f.sort, limit: String(PAGE_SIZE), offset: String((f.page - 1) * PAGE_SIZE) });
   if (f.model) s.set('model', f.model);
   if (f.op) s.set('op', f.op);
+  if (f.source) s.set('source', f.source);
+  if (f.orm) s.set('orm', f.orm);
   return s.toString();
 }
 

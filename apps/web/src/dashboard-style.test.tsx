@@ -12,6 +12,7 @@ afterEach(cleanup);
 const row = {
   hash: 'h1', title: 'Order.find', signature: '{ a: eq }', count: 3, wasted: '4s', wastedShare: 1,
   avg: '1s', p95: { value: 900, basis: 'interpolated' as const }, max: '2s',
+  source: 'mongodb', sourceLabel: 'MongoDB', ormLabel: 'Mongoose / driver', errors: 0, sampledLabel: null,
 };
 
 describe('dashboard wears Mist', () => {

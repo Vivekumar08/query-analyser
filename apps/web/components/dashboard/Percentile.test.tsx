@@ -20,6 +20,10 @@ describe('Percentile', () => {
     const { container } = render(<Percentile label="p99" value={null} />);
     expect(container.textContent).toBe('p99 —');
   });
+  it('null explains itself in a title', () => {
+    const { getByTitle } = render(<Percentile label="p99" value={null} />);
+    expect(getByTitle(/not available/i)).toBeTruthy();
+  });
   it('can hide the label', () => {
     const { container } = render(<Percentile label="p95" showLabel={false} value={{ value: 300, basis: 'interpolated' }} />);
     expect(container.textContent).toBe('≈ 300ms');

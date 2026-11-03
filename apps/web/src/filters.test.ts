@@ -3,6 +3,16 @@ import { parseFilters, filtersToSearch, filtersToApiQuery, optionsApiQuery, MAX_
 
 const NOW = new Date('2026-10-18T12:00:00.000Z');
 
+describe('source and orm filters', () => {
+  it('parses, round-trips and sends source and orm', () => {
+    const f = parseFilters({ source: 'postgresql', orm: 'prisma' });
+    expect(filtersToSearch(f)).toBe('source=postgresql&orm=prisma');
+    expect(new URLSearchParams(filtersToApiQuery(f, NOW)).get('orm')).toBe('prisma');
+    expect(new URLSearchParams(filtersToApiQuery(f, NOW)).get('source')).toBe('postgresql');
+  });
+  it('accepts sort=errors', () => expect(parseFilters({ sort: 'errors' }).sort).toBe('errors'));
+});
+
 describe('parseFilters', () => {
   it('passes the retention through to the range', () =>
     expect(parseFilters({ range: '30d' }, 7).range).toEqual({ kind: 'preset', preset: '24h' }));

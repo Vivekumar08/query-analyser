@@ -39,7 +39,7 @@ export default async function QueriesPage({
   const outcome = listOutcome(res);
   if (outcome === 'error') throw new Error('Could not load queries');
 
-  const filtered = filters.model !== undefined || filters.op !== undefined;
+  const filtered = filters.model !== undefined || filters.op !== undefined || filters.source !== undefined || filters.orm !== undefined;
   const { items, sortExact, sortNote, hasMore } = res.ok ? res.data : { items: [], sortExact: true, sortNote: undefined, hasMore: false };
   const rows = toRowsView(items);
   const kind = emptyKind({ rows: rows.length, filtered });
@@ -53,6 +53,8 @@ export default async function QueriesPage({
   }
   const models = [...new Set([...optionRows.map((r) => r.model), ...(filters.model ? [filters.model] : [])])].sort();
   const ops = [...new Set([...optionRows.map((r) => r.operation), ...(filters.op ? [filters.op] : [])])].sort();
+  const sources = [...new Set([...optionRows.map((r) => r.source ?? 'mongodb'), ...(filters.source ? [filters.source] : [])])].sort();
+  const orms = [...new Set([...optionRows.flatMap((r) => (r.orm ? [r.orm] : [])), ...(filters.orm ? [filters.orm] : [])])].sort();
   const pageHref = (p: number) => {
     const q = new URLSearchParams(search);
     if (p > 1) q.set('page', String(p));
@@ -67,7 +69,7 @@ export default async function QueriesPage({
       <PageHeader title="Queries" crumbs={[{ label: org }, { label: 'Queries' }]} actions={<RangeControl value={filters.range} retentionDays={retentionDays} />} />
       <FadeIn>
       <div className="flex flex-col gap-4 p-6">
-        <QueryFiltersBar models={models} ops={ops} value={filters} />
+        <QueryFiltersBar models={models} ops={ops} sources={sources} orms={orms} value={filters} />
         {(!sortExact || sortNote) && (
           <p className="text-xs text-muted-foreground">{sortNote ?? 'Ordering by this column is approximate.'}</p>
         )}

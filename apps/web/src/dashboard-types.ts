@@ -93,29 +93,39 @@ export interface Advice {
 /**
  * GET /v1/apps/:id/queries/:sig. Always ALL-TIME: the route reads every rollup
  * of the signature and ignores `from`/`to`.
- * `avgMs` is 0 (not null) when count is 0; `p95`/`p99` are always present
- * (`floor` basis with value 0 when there is no data).
+ * `avgMs` is 0 (not null) when count is 0. `p95`/`p99` are
+ * `floor` basis with value 0 when a MongoDB signature has no data, and null
+ * for SQL without a complete fine histogram.
  * `encryptedSample` is opaque ciphertext, decryptable only in the browser
  * with the team passphrase; null when the app has no key or none arrived yet.
  */
 export interface QueryDetail {
   hash: string; signature: string; model: string; operation: string;
   firstSeen: string; lastSeen: string; count: number; totalMs: string; maxMs: number;
-  avgMs: number; p95: PercentileResult; p99: PercentileResult;
+  avgMs: number; p95: PercentileResult | null; p99: PercentileResult | null;
   hist: number[]; redactedSample: unknown | null; encryptedSample: EncryptedSample | null; advice: Advice | null;
   /** Optional so an API that has not been redeployed still type-matches. */
   source?: string; collection?: string | null;
 }
 
-/** Same `avgMs`/`p95` guarantees as QueryDetail. */
-export interface SeriesPoint { at: string; count: number; totalMs: string; maxMs: number; avgMs: number; p95: PercentileResult }
+/** Same `avgMs`/`p95` guarantees as QueryDetail (`p95` is null for SQL without a complete fine histogram). */
+export interface SeriesPoint { at: string; count: number; totalMs: string; maxMs: number; avgMs: number; p95: PercentileResult | null }
 
 /** GET /v1/apps/:id/queries/:sig/series */
 export interface SeriesResponse { grain: 'hourly' | 'daily'; from: string; to: string; points: SeriesPoint[] }
 
-/** One row of the ranked list. The list route returns `avgMs` and `p95` per row, but NOT `hist` (toItem drops it). */
-/** Task 15: p50/p95/p99 are nullable for SQL (no complete fine histogram); `sampled`/`sampleRate` drive "estimated". */
-export type QueryRow = Serialized<RankedQueryRow>;
+/**
+ * One row of the ranked list. The route sends the RankedQueryRow fields and no
+ * histograms. The SQL fields are optional so a web build still type-checks
+ * against an API that has not been redeployed (those rows are MongoDB).
+ * SQL percentiles are null unless the window has a complete fine histogram;
+ * `sampled`/`sampleRate` drive the "estimated" label.
+ */
+export type QueryRow = Omit<Serialized<RankedQueryRow>, 'hist' | 'histFine' | 'minSampleRate' | 'source' | 'orm' | 'database' | 'errors' | 'avgMs' | 'p50' | 'p95' | 'p99' | 'sampled' | 'sampleRate'> & {
+  avgMs: number; p95: PercentileResult | null;
+  source?: string; orm?: string | null; errors?: number; sampled?: boolean; sampleRate?: number | null;
+  p50?: PercentileResult | null; p99?: PercentileResult | null;
+};
 
 /**
  * GET /v1/apps/:id/queries — an envelope, NOT a bare array. `sortExact` is
@@ -126,7 +136,7 @@ export interface QueryListResponse {
   limit: number;
   offset: number;
   hasMore: boolean;
-  sort: 'wasted' | 'count' | 'p95' | 'maxMs';
+  sort: 'wasted' | 'count' | 'p95' | 'maxMs' | 'errors';
   sortExact: boolean;
   sortNote?: string;
   from: string;

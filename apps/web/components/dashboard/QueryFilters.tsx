@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { sourceLabel } from '@/src/sources';
 import type { QueryFilters, SortKey } from '@/src/filters';
 
 const SORTS: { key: SortKey; label: string }[] = [
@@ -13,11 +14,14 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: 'count', label: 'Calls' },
   { key: 'p95', label: 'p95' },
   { key: 'maxMs', label: 'Max' },
+  { key: 'errors', label: 'Errors' },
 ];
 
 /** Single select with an "All" option; the API accepts one value per filter. */
-function SingleSelect({ label, options, selected, onChange }: {
+function SingleSelect({ label, options, selected, onChange, display = (v) => v }: {
   label: string; options: string[]; selected: string | undefined; onChange: (next: string | null) => void;
+  /** Text shown for a value (the value itself is what goes in the URL). */
+  display?: (value: string) => string;
 }) {
   const [open, setOpen] = useState(false);
   const pick = (v: string | null) => {
@@ -29,7 +33,7 @@ function SingleSelect({ label, options, selected, onChange }: {
       <PopoverTrigger asChild>
         <Button variant="outline" size="sm">
           <ListFilter className="size-4" aria-hidden />
-          <span className="max-w-40 truncate">{label}: {selected ?? 'All'}</span>
+          <span className="max-w-40 truncate">{label}: {selected !== undefined ? display(selected) : 'All'}</span>
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-56 p-0" align="start">
@@ -43,9 +47,9 @@ function SingleSelect({ label, options, selected, onChange }: {
                 All
               </CommandItem>
               {options.map((o) => (
-                <CommandItem key={o} value={o} onSelect={() => pick(o)}>
+                <CommandItem key={o} value={o} keywords={[display(o)]} onSelect={() => pick(o)}>
                   <Check className={`size-4 ${selected === o ? 'opacity-100' : 'opacity-0'}`} aria-hidden />
-                  <span className="truncate">{o}</span>
+                  <span className="truncate">{display(o)}</span>
                 </CommandItem>
               ))}
             </CommandGroup>
@@ -56,17 +60,19 @@ function SingleSelect({ label, options, selected, onChange }: {
   );
 }
 
-export function QueryFiltersBar({ models, ops, value }: { models: string[]; ops: string[]; value: QueryFilters }) {
+export function QueryFiltersBar({ models, ops, sources, orms, value }: { models: string[]; ops: string[]; sources: string[]; orms: string[]; value: QueryFilters }) {
   const router = useRouter();
   const pathname = usePathname();
   const params = useSearchParams();
 
   // Replaces model/op/sort (null clears), keeps range/from/to, resets paging.
-  const apply = (next: { model?: string | null; op?: string | null; sort?: SortKey | null }) => {
+  const apply = (next: { model?: string | null; op?: string | null; source?: string | null; orm?: string | null; sort?: SortKey | null }) => {
     const s = new URLSearchParams(params.toString());
     s.delete('page');
     if (next.model !== undefined) { s.delete('model'); if (next.model) s.set('model', next.model); }
     if (next.op !== undefined) { s.delete('op'); if (next.op) s.set('op', next.op); }
+    if (next.source !== undefined) { s.delete('source'); if (next.source) s.set('source', next.source); }
+    if (next.orm !== undefined) { s.delete('orm'); if (next.orm) s.set('orm', next.orm); }
     if (next.sort !== undefined) {
       if (next.sort === null || next.sort === 'wasted') s.delete('sort');
       else s.set('sort', next.sort);
@@ -75,11 +81,13 @@ export function QueryFiltersBar({ models, ops, value }: { models: string[]; ops:
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   };
 
-  const dirty = value.model !== undefined || value.op !== undefined || value.sort !== 'wasted';
+  const dirty = value.model !== undefined || value.op !== undefined || value.source !== undefined || value.orm !== undefined || value.sort !== 'wasted';
   const sortLabel = SORTS.find((s) => s.key === value.sort)!.label;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
+      <SingleSelect label="Database" options={sources} selected={value.source} display={sourceLabel} onChange={(s) => apply({ source: s })} />
+      <SingleSelect label="ORM" options={orms} selected={value.orm} onChange={(o) => apply({ orm: o })} />
       <SingleSelect label="Model" options={models} selected={value.model} onChange={(m) => apply({ model: m })} />
       <SingleSelect label="Operation" options={ops} selected={value.op} onChange={(o) => apply({ op: o })} />
       <DropdownMenu>
@@ -96,7 +104,7 @@ export function QueryFiltersBar({ models, ops, value }: { models: string[]; ops:
         </DropdownMenuContent>
       </DropdownMenu>
       {dirty && (
-        <Button variant="ghost" size="sm" onClick={() => apply({ model: null, op: null, sort: null })}>Clear</Button>
+        <Button variant="ghost" size="sm" onClick={() => apply({ model: null, op: null, source: null, orm: null, sort: null })}>Clear</Button>
       )}
     </div>
   );
