@@ -22,7 +22,7 @@ describe('homepage', () => {
     const h1 = screen.getByRole('heading', { level: 1 });
     expect(h1.textContent).toContain('Your slowest queries,');
     expect(within(h1).getByText('quietly').tagName).toBe('EM');
-    expect(screen.getByText('For MongoDB · Mongoose 6–9 · Node.js driver 4–7')).toBeTruthy();
+    expect(screen.getByText('For MongoDB and PostgreSQL · Mongoose 6–9 · Prisma 5.22–7 · pg 8')).toBeTruthy();
     expect(
       screen.getByText('One line in your app. We group every slow call by shape and tell you which index to add first.'),
     ).toBeTruthy();

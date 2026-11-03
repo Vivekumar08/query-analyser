@@ -193,7 +193,8 @@ export function InstallStep({
           <CardContent>
             <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
               <li>The key is set in the running process (<code className="font-mono">QA_KEY</code> or inline).</li>
-              <li>Your app uses Mongoose 6–9 or the MongoDB Node.js driver 4–7 (Mongoose 5 needs monitorCommands: true).</li>
+              <li>Your app uses Mongoose 6–9, the MongoDB Node.js driver 4–7, pg 8, or Prisma 5.22–7 on PostgreSQL.</li>
+              <li>Prisma 5 or 6 needs @prisma/adapter-pg (Prisma 7 always uses an adapter).</li>
               <li>init() runs before your app connects to MongoDB, or the connection sets monitorCommands: true.</li>
               <li>Only queries taking 100&nbsp;ms or more are reported — trigger a slow one.</li>
               <li>Batches ship every 10 seconds.</li>
