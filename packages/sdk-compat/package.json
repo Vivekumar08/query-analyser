@@ -6,7 +6,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "bench": "QA_BENCH=1 vitest run src/overhead.test.ts"
+    "bench": "QA_BENCH=1 vitest run src/overhead.test.ts",
+    "prisma:setup": "node scripts/prisma-setup.mjs"
   },
   "devDependencies": {
     "@query-analyser/contract": "workspace:*",
