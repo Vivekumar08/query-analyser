@@ -12,6 +12,9 @@ import { FIXTURES, load, pushSchema, resolverAt } from './prisma-harness.js';
  * SQL overhead benchmark: what pg and Prisma capture cost per operation. Skipped unless QA_BENCH=1
  * (the `bench` script). It asserts nothing about speed; the table is copied into the release notes.
  *
+ * Measured: one timed pass of N calls per phase (fresh client, 300 warm-up calls, periodic flushes included), phases
+ * interleaved across 5 rounds, median per mode.
+ *
  * Each stack gets its own throwaway database. Prisma stacks run on the adapter path, wired as init()
  * wires a resolved copy (see prisma-suite.ts), so the numbers are what users get.
  */
@@ -22,8 +25,8 @@ const PG_OPS = 5000;
 const PRISMA_OPS = 3000;
 
 type Mode = 'off' | 'rate1' | 'rate01';
-const MODES: { mode: Mode; rate: number }[] = [
-  { mode: 'off', rate: 0 },
+const MODES: { mode: Mode; rate: number | null }[] = [
+  { mode: 'off', rate: null },
   { mode: 'rate1', rate: 1 },
   { mode: 'rate01', rate: 0.1 },
 ];
@@ -58,46 +61,53 @@ function snapshot(pg: any): unknown[] {
   return [pg.Client, pg.Pool].map((C: any) => Object.getOwnPropertyDescriptor(C.prototype, 'query'));
 }
 
-async function measure(s: Stack, rate: number | null): Promise<number> {
-  const before = snapshot(s.pg);
+/**
+ * One phase: a fresh client, WARMUP calls, then `s.ops` timed calls, in the given mode. `rate` is null for "off".
+ * Periodic flushes (flushIntervalMs) land inside the timed loop, so the number covers wrapper, aggregation and flush cost.
+ */
+async function phase(s: Stack, pristine: unknown[], rate: number | null): Promise<number> {
   const cap = capture();
   if (rate !== null) {
-    const a = init({
+    init({
       apiKey: 'k', app: `bench-${s.stack}`, thresholdMs: 100, sql: { sampleRate: rate },
-      fetchImpl: cap.fetchImpl, pg: s.pg,
+      flushIntervalMs: 500, fetchImpl: cap.fetchImpl, pg: s.pg,
     });
-    void a;
     const r = resolvePgClients(s.pg, s.appDir ? { appEntry: resolverAt(s.appDir) } : undefined);
     for (const C of r.clients) installPgWrap(C);
     for (const P of r.pools) installPgPoolWrap(P);
     const rt = sqlRuntime();
     rt.prismaAdapterResolved = r.adapterResolved;
     rt.pgCoversPrismaAdapter = pgCoversAdapter(r.adapterResolved, r.adapterPg);
+  } else if (!samePrototypes(snapshot(s.pg), pristine)) {
+    throw new Error(`sql-overhead: ${s.stack} pg prototypes are not pristine for the "off" phase`);
   }
+  let us = 0;
+  let failure: { e: unknown } | null = null;
   const h = await s.open();
   try {
     for (let i = 0; i < WARMUP; i++) await h.call(i);
-    const samples: number[] = [];
-    for (let r = 0; r < RUNS; r++) {
-      const t0 = performance.now();
-      for (let i = 0; i < s.ops; i++) await h.call(i);
-      samples.push(((performance.now() - t0) * 1000) / s.ops);
-    }
-    return median(samples);
-  } finally {
-    await h.close().catch(() => {});
-    if (rate !== null) {
-      await shutdown();
-      // Guard: at rate 1 the SDK must have counted at least every measured call, or the numbers mean nothing.
-      const counted = sum(itemsOf(cap.bodies).map((i) => i.count));
-      if (rate === 1 && counted < s.ops * RUNS) throw new Error(`sql-overhead: ${s.stack} counted ${counted} of ${s.ops * RUNS}+ statements`);
-      const after = snapshot(s.pg);
-      if (after.some((d, i) => (d as any)?.value !== (before[i] as any)?.value)) {
-        throw new Error(`sql-overhead: shutdown() did not restore pg prototypes for ${s.stack}`);
-      }
+    const t0 = performance.now();
+    for (let i = 0; i < s.ops; i++) await h.call(i);
+    us = ((performance.now() - t0) * 1000) / s.ops;
+  } catch (e) {
+    failure = { e };
+  }
+  await h.close().catch(() => {});
+  if (rate !== null) await shutdown().catch(() => {});
+  if (failure) throw failure.e;
+  if (rate !== null) {
+    if (!samePrototypes(snapshot(s.pg), pristine)) throw new Error(`sql-overhead: shutdown() did not restore the pg prototypes for ${s.stack}`);
+    const calls = WARMUP + s.ops;
+    const counted = sum(itemsOf(cap.bodies).map((i) => i.count));
+    if (rate === 1 && counted < calls) throw new Error(`sql-overhead: ${s.stack} at rate 1 counted ${counted}, expected at least ${calls} statements`);
+    if (rate < 1 && (cap.bodies.length === 0 || counted < calls * 0.5)) {
+      throw new Error(`sql-overhead: ${s.stack} at rate ${rate} counted ${counted} in ${cap.bodies.length} bodies, expected at least ${calls * 0.5} statements`);
     }
   }
+  return us;
 }
+
+const samePrototypes = (a: unknown[], b: unknown[]): boolean => a.every((d, i) => (d as any)?.value === (b[i] as any)?.value);
 
 describe.runIf(process.env.QA_BENCH === '1')('sql overhead', () => {
   it('reports off / sdk at rate 1 / sdk at rate 0.1 per operation', async () => {
@@ -157,8 +167,19 @@ describe.runIf(process.env.QA_BENCH === '1')('sql overhead', () => {
       }
 
       for (const s of stacks) {
-        const r: Record<Mode, number> = { off: 0, rate1: 0, rate01: 0 };
-        for (const { mode, rate } of MODES) r[mode] = await measure(s, mode === 'off' ? null : rate);
+        // Pristine prototypes, before any SDK phase for this stack.
+        const pristine = snapshot(s.pg);
+        // Interleaved: each round runs every mode once, starting one mode later than the last, so drift
+        // and order effects spread evenly. Round 0 is discarded (cold JIT, connections, plan cache).
+        const samples: Record<Mode, number[]> = { off: [], rate1: [], rate01: [] };
+        for (let rd = 0; rd <= RUNS; rd++) {
+          for (let k = 0; k < MODES.length; k++) {
+            const { mode, rate } = MODES[(rd + k) % MODES.length]!;
+            const us = await phase(s, pristine, rate);
+            if (rd > 0) samples[mode].push(us);
+          }
+        }
+        const r: Record<Mode, number> = { off: median(samples.off), rate1: median(samples.rate1), rate01: median(samples.rate01) };
         rows.push({
           stack: s.stack,
           workload: s.workload,
