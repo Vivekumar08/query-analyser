@@ -127,6 +127,24 @@ function entryFileOf(): string | null {
   }
 }
 
+/**
+ * The entry script as a chain base, or null when it is not the app's own code: a realpath with a
+ * `node_modules` segment is an installed tool (`next/dist/bin/next`, a vitest or jest worker, any hoisted or
+ * pnpm-store bin), whose chain would reach a monorepo root's copies before the app's. Never throws.
+ */
+function appEntryBase(file: string | null): string | null {
+  try {
+    if (file === null) return null;
+    let real = file;
+    try {
+      real = realpathSync(file);
+    } catch { /* keep the given path */ }
+    return real.split(/[\\/]/).includes('node_modules') ? null : real;
+  } catch {
+    return null;
+  }
+}
+
 /** Where each chain starts. `null` switches a chain off; `undefined` means the process's own value (tests inject). */
 export interface ChainBases {
   /** The entry script (default: `require.main.filename`, else `process.argv[1]`). */
@@ -151,7 +169,8 @@ function chainFrom(base: () => string | null, name: string, globals: Set<string>
 }
 
 /**
- * The app's node_modules lookup chains, most app-specific first: from the entry script, from the cwd, then
+ * The app's node_modules lookup chains, most app-specific first: from the entry script (unless it lives inside
+ * node_modules: see appEntryBase), from the cwd, then
  * from the SDK's own module (an SDK hoisted to a monorepo root still reaches the app's nested copies).
  * Each chain drops the global folders (NODE_PATH, ~/.node_modules…) and pnpm's hidden hoist directory, and
  * each base is evaluated in its own guard, so one failing chain (a deleted cwd) never loses the others.
@@ -162,7 +181,7 @@ export function appLookupChains(name: string, from?: ChainBases): string[][] {
     () => (v === undefined ? dflt() : v);
   const cwd = from?.cwd;
   return [
-    chainFrom(pick(from?.entry, entryFileOf), name, globals),
+    chainFrom(() => appEntryBase(pick(from?.entry, entryFileOf)()), name, globals),
     chainFrom(() => {
       const dir = cwd === undefined ? process.cwd() : cwd;
       return dir === null ? null : join(dir, '__query_analyser__.js');
