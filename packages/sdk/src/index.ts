@@ -62,6 +62,8 @@ const engineWarning = (version: string): string =>
 const SAMPLE_RATE_WARNING = 'query-analyser: sql.sampleRate must be a number greater than 0 and at most 1; using 1';
 const DEFAULT_THRESHOLD_MS = 100;
 const THRESHOLD_WARNING = `query-analyser: thresholdMs must be a finite number of milliseconds, 0 or more (fractions are rounded); using ${DEFAULT_THRESHOLD_MS}`;
+const MAX_THRESHOLD_MS = 3_600_000;
+const THRESHOLD_MAX_WARNING = `query-analyser: thresholdMs must be at most ${MAX_THRESHOLD_MS} (one hour); using ${MAX_THRESHOLD_MS}`;
 
 /** `sql.sampleRate`, validated once here so the sink never reports per statement. Invalid -> reported, 1. */
 function resolveSampleRate(requested: unknown, report: (e: Error) => void): number {
@@ -72,12 +74,18 @@ function resolveSampleRate(requested: unknown, report: (e: Error) => void): numb
 }
 
 /**
- * `thresholdMs`, as the ingest API accepts it (a non-negative integer). null/undefined -> 100; a finite
- * fraction >= 0 is rounded (no warning); anything else (negative, NaN, Infinity, not a number) -> reported, 100.
+ * `thresholdMs`, as the ingest API accepts it (an integer from 0 to 3_600_000). null/undefined -> 100; a finite
+ * fraction >= 0 is rounded (no warning); over one hour -> reported, 3_600_000; anything else (negative, NaN,
+ * Infinity, not a number) -> reported, 100.
  */
 function resolveThresholdMs(requested: unknown, report: (e: Error) => void): number {
   if (requested === undefined || requested === null) return DEFAULT_THRESHOLD_MS;
-  if (typeof requested === 'number' && Number.isFinite(requested) && requested >= 0) return Math.round(requested);
+  if (typeof requested === 'number' && Number.isFinite(requested) && requested >= 0) {
+    const rounded = Math.round(requested);
+    if (rounded <= MAX_THRESHOLD_MS) return rounded;
+    report(new Error(THRESHOLD_MAX_WARNING));
+    return MAX_THRESHOLD_MS;
+  }
   report(new Error(THRESHOLD_WARNING));
   return DEFAULT_THRESHOLD_MS;
 }

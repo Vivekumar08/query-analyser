@@ -939,6 +939,29 @@ describe('sql layers', () => {
     }
   });
 
+  it('a thresholdMs over one hour is reported once and clamped to 3600000', async () => {
+    for (const thresholdMs of [3_600_001, 1e10, Number.MAX_SAFE_INTEGER]) {
+      const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
+      const a = init({ apiKey: 'k', app: 'x', fetchImpl, onError, thresholdMs });
+      expect(messages(onError)).toEqual(['query-analyser: thresholdMs must be at most 3600000 (one hour); using 3600000']);
+      sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
+      await a.flush();
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(bodyText(fetchImpl))).toMatchObject({ thresholdMs: 3_600_000 });
+      await shutdown();
+    }
+  });
+
+  it('a thresholdMs of exactly one hour is kept without a warning', async () => {
+    const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
+    const a = init({ apiKey: 'k', app: 'x', fetchImpl, onError, thresholdMs: 3_600_000 });
+    sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
+    await a.flush();
+    expect(onError).not.toHaveBeenCalled();
+    expect(JSON.parse(bodyText(fetchImpl))).toMatchObject({ thresholdMs: 3_600_000 });
+    await shutdown();
+  });
+
   it('a fractional thresholdMs is rounded without a warning; null and undefined mean the default', async () => {
     const cases: Array<[number | null | undefined, number]> = [[1.5, 2], [0.4, 0], [99.5, 100], [250.2, 250], [null, 100], [undefined, 100], [0, 0]];
     for (const [thresholdMs, sent] of cases) {

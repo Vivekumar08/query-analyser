@@ -54,6 +54,12 @@ describe('ingestPayloadSchema', () => {
     expect(() => ingestPayloadSchema.parse(bad)).toThrow();
   });
 
+  it('caps thresholdMs at one hour (3_600_000 ms)', () => {
+    expect(ingestPayloadSchema.safeParse({ ...payload, thresholdMs: 3_600_000 }).success).toBe(true);
+    expect(ingestPayloadSchema.safeParse({ ...payload, thresholdMs: 3_600_001 }).success).toBe(false);
+    expect(ingestPayloadSchema.safeParse({ ...payload, thresholdMs: 1e10 }).success).toBe(false);
+  });
+
   it('rejects an app name that is empty', () => {
     expect(() => ingestPayloadSchema.parse({ ...payload, app: '' })).toThrow();
   });

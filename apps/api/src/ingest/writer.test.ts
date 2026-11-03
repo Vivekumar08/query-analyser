@@ -292,6 +292,14 @@ describe('sql items', () => {
     expect(q[0]!.histFine).toEqual(FINE);
   });
 
+  it('a failing thresholdMs step writes no signatures and no rollup counts (so a retry cannot re-count)', async () => {
+    const app = await seedApp();
+    // Out of int range: the App UPDATE fails with 22003. The schema rejects this; the writer must still be safe.
+    await expect(writeBatch(prisma, app.id, { ...payload([sqlItem()]), thresholdMs: 1e10 })).rejects.toThrow();
+    expect(await prisma.queryRollup.count()).toBe(0);
+    expect(await prisma.querySignature.count()).toBe(0);
+  });
+
   it('records the payload thresholdMs on the app', async () => {
     const app = await seedApp();
     await writeBatch(prisma, app.id, { ...payload([sqlItem()]), thresholdMs: 250 });

@@ -11,10 +11,10 @@ export function bucketToDate(bucket: string): Date {
 
 /**
  * Three statements per batch:
- *  1. upsert signatures by (appId, hash), returning ids
- *  2. upsert rollups by (signatureId, bucketHour) with accumulate semantics
- *  3. record the SDK's thresholdMs on the app when it changed
- * Both use jsonb_to_recordset so a batch of any size is one round-trip each.
+ *  1. record the SDK's thresholdMs on the app when it changed
+ *  2. upsert signatures by (appId, hash), returning ids
+ *  3. upsert rollups by (signatureId, bucketHour) with accumulate semantics
+ * The two upserts use jsonb_to_recordset so a batch of any size is one round-trip each.
  *
  * Accumulate semantics mirror the SDK's own in-process merge(): count and
  * totalMs add, maxMs takes the greater value, hist adds element-wise. This
@@ -31,6 +31,15 @@ export async function writeBatch(
 
   const now = new Date();
   const bucketHour = bucketToDate(payload.bucket);
+
+  // Last payload wins; skipped when unchanged so a steady app writes nothing.
+  // Runs first: it is the one statement a payload value can make fail, and
+  // nothing may be counted before it. A batch that fails after its rollups
+  // committed would be re-counted when the SDK retries it.
+  await prisma.$executeRaw`
+    UPDATE "App" SET "thresholdMs" = ${payload.thresholdMs}::int
+    WHERE id = ${appId} AND "thresholdMs" IS DISTINCT FROM ${payload.thresholdMs}::int
+  `;
 
   // Dedupe by hash within the batch (the SDK already does, but be safe).
   const byHash = new Map(payload.items.map((i) => [i.hash, i]));
@@ -113,12 +122,6 @@ export async function writeBatch(
         ELSE ARRAY(SELECT a + b FROM unnest("QueryRollup"."histFine", EXCLUDED."histFine") AS u(a, b))
       END,
       "minSampleRate" = LEAST("QueryRollup"."minSampleRate", EXCLUDED."minSampleRate")
-  `;
-
-  // Last payload wins; skipped when unchanged so a steady app writes nothing.
-  await prisma.$executeRaw`
-    UPDATE "App" SET "thresholdMs" = ${payload.thresholdMs}::int
-    WHERE id = ${appId} AND "thresholdMs" IS DISTINCT FROM ${payload.thresholdMs}::int
   `;
 
   return { signatures: ids.length, rollups };

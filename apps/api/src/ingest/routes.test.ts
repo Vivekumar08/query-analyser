@@ -104,6 +104,13 @@ describe('POST /v1/ingest', () => {
     expect(res.json()).toMatchObject({ error: 'invalid payload', issues: expect.any(Array) });
   });
 
+  it('400s a thresholdMs over one hour and writes nothing', async () => {
+    const { app: a, key } = await seedKey();
+    const res = await post(key, { ...payload(1), thresholdMs: 1e10 });
+    expect(res.statusCode).toBe(400);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(0);
+  });
+
   it('400s a histogram of the wrong length', async () => {
     const { key } = await seedKey();
     const p = payload();
