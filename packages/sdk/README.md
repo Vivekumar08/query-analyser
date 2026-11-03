@@ -123,7 +123,7 @@ for a free connection). Durations are fractional milliseconds.
 - **Every SQL statement** is counted: its count, total time, errors and a fine
   latency histogram. `thresholdMs` (default 100) defines "slow": only
   statements at or over it count as slow queries.
-- **`sql.sampleRate`** (default `1`, must be `> 0` and `<= 1`) times only that
+- **`sql.sampleRate`** (default `1`, from `0.001` to `1`) times only that
   fraction of fast, successful statements and weights each kept one by
   `1 / rate`. Slow statements and failures are never sampled, so slow counts
   and error counts stay exact. The dashboard marks figures that include sampled
@@ -306,7 +306,7 @@ require('@vivekumar08/query-analyser').init({
 | `onError` | logs to stderr | called with internal errors |
 | `sampleKey` | — | opt-in: app's sample public key; sends end-to-end encrypted real-value samples (MongoDB only) |
 | `pg` | auto-resolved | the `pg` module, for a bundled copy the SDK cannot resolve; the app's own `pg` and `@prisma/adapter-pg`'s copy are found without it |
-| `sql.sampleRate` | `1` | fraction (`> 0`, `<= 1`) of fast, successful SQL statements to time; slow and failed ones are always counted. An invalid value is reported once and treated as `1` |
+| `sql.sampleRate` | `1` | fraction (`> 0`, `<= 1`) of fast, successful SQL statements to time; slow and failed ones are always counted. An invalid value is reported once and treated as `1`; a value below `0.001` is reported once and treated as `0.001` |
 | `sql.maskIdentifiers` | `false` | replace table, column, schema and database names with keyed hashes before they leave the process |
 
 ## Notes

@@ -916,6 +916,28 @@ describe('sql layers', () => {
     }
   });
 
+  it('a sql.sampleRate below 0.001 is reported once and clamped to 0.001', async () => {
+    for (const sampleRate of [0.0009, 1e-6, Number.MIN_VALUE]) {
+      const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
+      vi.spyOn(Math, 'random').mockReturnValue(0);
+      const a = init({ apiKey: 'k', app: 'x', fetchImpl, onError, sql: { sampleRate } });
+      expect(messages(onError)).toEqual(['query-analyser: sql.sampleRate must be at least 0.001; using 0.001']);
+      sqlRuntime().sink!.record(stmt('SELECT 1 FROM t'));
+      await a.flush();
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(sentItems(fetchImpl)[0]).toMatchObject({ source: 'postgresql', count: 1000, sampleRate: 0.001 });
+      await shutdown();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('a sql.sampleRate of exactly 0.001 is kept without a warning', async () => {
+    const onError = vi.fn();
+    const a = init({ apiKey: 'k', app: 'x', fetchImpl: okFetch, onError, sql: { sampleRate: 0.001 } });
+    expect(onError).not.toHaveBeenCalled();
+    await a.shutdown();
+  });
+
   it('a valid sql.sampleRate reaches the sink without a warning', async () => {
     const onError = vi.fn(); const fetchImpl = vi.fn(okFetch);
     vi.spyOn(Math, 'random').mockReturnValue(0);
