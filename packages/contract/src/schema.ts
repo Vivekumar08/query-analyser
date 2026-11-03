@@ -63,7 +63,9 @@ export const ingestPayloadSchema = z.object({
   // Fix round 4, Critical 2: `thresholdMs: 0` ("capture every query") is a
   // legitimate, SDK-accepted debugging setting — the schema, not the SDK,
   // was wrong to reject it with `.positive()`.
-  thresholdMs: z.number().int().nonnegative(),
+  // Capped at one hour: the API stores it in an int column, and an
+  // out-of-range value must never get as far as the database.
+  thresholdMs: z.number().int().nonnegative().max(3_600_000),
   dropped: z.number().int().nonnegative(),
   items: z.array(ingestItemSchema).max(5000),
 });
