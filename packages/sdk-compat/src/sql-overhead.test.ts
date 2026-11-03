@@ -13,13 +13,13 @@ import { FIXTURES, load, pushSchema, resolverAt } from './prisma-harness.js';
  * (the `bench` script). It asserts nothing about speed; the table is copied into the release notes.
  *
  * Measured: one timed pass of N calls per phase (fresh client, 300 warm-up calls, periodic flushes included), phases
- * interleaved across 5 rounds, median per mode.
+ * interleaved across 6 kept rounds (each mode twice in each position: a balanced rotation), median per mode.
  *
  * Each stack gets its own throwaway database. Prisma stacks run on the adapter path, wired as init()
  * wires a resolved copy (see prisma-suite.ts), so the numbers are what users get.
  */
 const ROWS = 1000;
-const RUNS = 5;
+const RUNS = 6; // kept rounds; a multiple of MODES.length so the rotation is balanced
 const WARMUP = 300;
 const PG_OPS = 5000;
 const PRISMA_OPS = 3000;
@@ -41,7 +41,12 @@ type Row = {
 };
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-const median = (xs: number[]): number => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)]!;
+/** The middle value; with an even count (6 kept rounds), the mean of the two middle values. */
+const median = (xs: number[]): number => {
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 === 1 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+};
 const round = (n: number, d = 1): number => Math.round(n * 10 ** d) / 10 ** d;
 
 /** What a stack runs: `open` builds a fresh client, `call` does one operation. */
@@ -70,7 +75,7 @@ async function phase(s: Stack, pristine: unknown[], rate: number | null): Promis
   if (rate !== null) {
     init({
       apiKey: 'k', app: `bench-${s.stack}`, thresholdMs: 100, sql: { sampleRate: rate },
-      flushIntervalMs: 500, fetchImpl: cap.fetchImpl, pg: s.pg,
+      flushIntervalMs: 50, fetchImpl: cap.fetchImpl, pg: s.pg,
     });
     const r = resolvePgClients(s.pg, s.appDir ? { appEntry: resolverAt(s.appDir) } : undefined);
     for (const C of r.clients) installPgWrap(C);
