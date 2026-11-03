@@ -881,7 +881,8 @@ describe('sql layers', () => {
 
   it('installs the own Prisma helper on V7 only, and shutdown() removes it', async () => {
     init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
-    expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(true);
+    expect(typeof g.V7_PRISMA_INSTRUMENTATION.helper.runInChildSpan).toBe('function');
+    expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(false);
     expect(g.V6_PRISMA_INSTRUMENTATION).toBeUndefined();
     expect(g.PRISMA_INSTRUMENTATION).toBeUndefined();
     await shutdown();
@@ -893,7 +894,8 @@ describe('sql layers', () => {
     const a = init({ apiKey: 'k', app: 'x', fetchImpl: okFetch });
     delete g.V7_PRISMA_INSTRUMENTATION;
     await a.flush();
-    expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(true);
+    expect(typeof g.V7_PRISMA_INSTRUMENTATION.helper.runInChildSpan).toBe('function');
+    expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(false);
     await a.shutdown();
     await a.flush();
     expect('V7_PRISMA_INSTRUMENTATION' in globalThis).toBe(false);

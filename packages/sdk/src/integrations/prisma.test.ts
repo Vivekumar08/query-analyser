@@ -51,7 +51,8 @@ afterEach(() => {
 describe('accessors', () => {
   it('installs its own helper on the V7 key only', () => {
     expect(installPrismaHook()).toBe(true); rt.sink = rec;
-    expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(true);
+    expect(typeof g.V7_PRISMA_INSTRUMENTATION.helper.runInChildSpan).toBe('function');
+    expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(false);
     expect(g.V6_PRISMA_INSTRUMENTATION).toBeUndefined(); expect(g.PRISMA_INSTRUMENTATION).toBeUndefined();
     expect(OWN_HELPER_KEY).toBe('V7_PRISMA_INSTRUMENTATION');
     expect(WATCHED_KEYS).toEqual(['V7_PRISMA_INSTRUMENTATION', 'V6_PRISMA_INSTRUMENTATION', 'PRISMA_INSTRUMENTATION']);
@@ -192,7 +193,9 @@ describe('own helper', () => {
     const h = createOwnHelper() as any;
     expect(h.getTraceParent()).toBe('00-10-10-00');
     expect(DISABLED_TRACEPARENT).toBe('00-10-10-00');
-    expect(h.isEnabled()).toBe(true);
+    // Fix round 1: never enabled. Prisma 7 reads isEnabled() only for the db_query span (client-engine-runtime
+    // tracing.ts) and for the Accelerate headers (HeaderBuilder.ts); `operation` spans run regardless.
+    expect(h.isEnabled()).toBe(false);
     expect(h.dispatchEngineSpans([{ name: 'x' }])).toBeUndefined();
     expect(h.getActiveContext()).toBeUndefined();
   });
