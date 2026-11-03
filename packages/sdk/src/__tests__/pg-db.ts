@@ -85,3 +85,86 @@ export async function createThrowawayDb(prefix: string): Promise<{ url: string; 
     },
   };
 }
+
+/**
+ * Orphan sweep (sdk-compat globalSetup). A run killed before its afterAll leaves `qa_sdk_…` databases behind.
+ * One is swept only when its name matches exactly, the pid in it is not this process and is gone (ESRCH; EPERM
+ * means alive), and the base URL is a local host. Plain `DROP DATABASE IF EXISTS`, never FORCE: a database
+ * still in use stays. `qa` never matches.
+ */
+export const ORPHAN_NAME = /^qa_sdk_[a-z0-9_]+_(\d+)_[0-9a-f]{6}$/;
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+
+/** Whether a Postgres URL points at this machine (localhost, 127.0.0.1, ::1 or a Unix socket). */
+export function isLocalPgUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    const host = decodeURIComponent(u.searchParams.get('host') ?? u.hostname).toLowerCase();
+    return host === '' || host.startsWith('/') || LOCAL_HOSTS.has(host);
+  } catch {
+    return false;
+  }
+}
+
+type Kill = (pid: number, signal: 0) => unknown;
+
+/** Signal 0: ESRCH means the process is gone; success, EPERM or anything else counts as alive. */
+export function pidAlive(pid: number, kill: Kill = process.kill.bind(process) as Kill): boolean {
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as { code?: unknown } | null)?.code !== 'ESRCH';
+  }
+}
+
+export interface SweepContext { selfPid: number; baseUrl: string; kill?: Kill }
+
+/** The sweep decision for one database name. */
+export function shouldSweep(name: string, ctx: SweepContext): boolean {
+  if (name === 'qa') return false;
+  const m = ORPHAN_NAME.exec(name);
+  if (!m) return false;
+  const pid = Number(m[1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === ctx.selfPid) return false;
+  if (!isLocalPgUrl(ctx.baseUrl)) return false;
+  return !pidAlive(pid, ctx.kill);
+}
+
+export interface SweepIo extends SweepContext {
+  list(): Promise<string[]>;
+  exec(sql: string): Promise<unknown>;
+}
+
+/** Drops every orphan `list()` returns; returns the names dropped. Never throws. */
+export async function sweepOrphans(io: SweepIo): Promise<string[]> {
+  const dropped: string[] = [];
+  try {
+    if (!isLocalPgUrl(io.baseUrl)) return dropped;
+    for (const name of await io.list()) {
+      if (!shouldSweep(name, io)) continue;
+      try {
+        await io.exec(`DROP DATABASE IF EXISTS "${name}"`);
+        dropped.push(name);
+      } catch { /* still in use, or no permission: leave it */ }
+    }
+  } catch { /* Postgres down: nothing to sweep */ }
+  return dropped;
+}
+
+/** The real sweep over the base URL. Prints names only, never a URL. */
+export async function sweepOrphanDbs(): Promise<string[]> {
+  let baseUrl: string;
+  try { baseUrl = basePgUrl(); } catch { return []; }
+  if (!isLocalPgUrl(baseUrl)) return [];
+  try {
+    return await withAdmin((c) => sweepOrphans({
+      baseUrl, selfPid: process.pid,
+      list: async () => (await c.query<{ datname: string }>("SELECT datname FROM pg_database WHERE datname LIKE 'qa\\_sdk\\_%'")).rows.map((r) => r.datname),
+      exec: (sql) => c.query(sql),
+    }));
+  } catch {
+    return [];
+  }
+}
