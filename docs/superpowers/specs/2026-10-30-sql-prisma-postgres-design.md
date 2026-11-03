@@ -145,6 +145,7 @@ The core fingerprints the SQL with a hand-written Postgres lexer and folds the s
 
 - **The helper (controller's call S4):** the SDK installs it on `globalThis[`V${major}_PRISMA_INSTRUMENTATION`]` and `globalThis.PRISMA_INSTRUMENTATION`, which are the public hook `@prisma/instrumentation` uses.
   - It reports `isEnabled() === true`.
+    - *Changed during implementation (Task 19, 2026-11-03):* `isEnabled()` is always false, so Accelerate (`prisma://`) requests get no SDK headers (no `traceparent`, no `X-Capture-Telemetry`). Prisma 7 still runs `operation` spans through the helper, so `pg` statements keep their model and operation.
   - It wraps the `operation` span's callback in an `AsyncLocalStorage.run({ model, operation: method })`. Raw calls (`$queryRaw`, `$executeRaw`) have no model, so their operation is the method and their model comes from the SQL.
   - It wraps each `db_query` span in a statement frame (next section).
 - **When the app has its own OpenTelemetry `@prisma/instrumentation`:** the SDK keeps that helper and delegates every call to it, including span creation. It never replaces another tracer. If the app's instrumentation registers after `init()`, the SDK detects the swap on its next statement and re-wraps (builder's call: a property setter or a check per call). The spike checks both orders.

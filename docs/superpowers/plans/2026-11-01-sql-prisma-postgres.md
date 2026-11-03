@@ -853,6 +853,7 @@ export function createLegacySpanTracker(maxIds?: number): { observe(event: unkno
   - Nothing is done while `sqlRuntime().sink` is null: the getter returns the app's stored object unchanged, or `undefined`.
 - **Own helper:**
   - `isEnabled() → true`, `getTraceParent() → DISABLED_TRACEPARENT`, `dispatchEngineSpans() → undefined`, `getActiveContext() → undefined`.
+    - *Changed during implementation (Task 19, 2026-11-03, commit 48b577e):* `isEnabled()` is always false, so Accelerate requests get no SDK headers (no `traceparent`, no `X-Capture-Telemetry`). `operation` spans still run through the helper.
   - `runInChildSpan(nameOrOptions, cb)` dispatches on the span name (a string, or `options.name`):
     - **`operation`:** `attributes.model` (a string, or null) and `attributes.method`. Run `cb` in `als.run({ kind: 'operation', model, operation: method })`.
     - **`db_query`:** `frame = { kind: 'statement', op: <the current operation frame or null>, claimed: false }`, `start = performance.now()`, and run `cb` in `als.run(frame)`. When the result is thenable, return `r.then(v => { settle(null); return v }, e => { settle(e); throw e })`, otherwise settle at once. `settle(err)`: if `!frame.claimed`, record `{ text: attributes['db.query.text'], database: null, durationMs, failed: err != null, errorCode: sqlStateOf(err), labels: labelsOf(frame) }`.
@@ -878,7 +879,7 @@ afterEach(() => { undoPrismaHook(); for (const k of WATCHED_KEYS) delete (global
 it('installs its own helper on the V7 key only', () => {
   installPrismaHook(); sqlRuntime().sink = rec;
   const g = globalThis as Record<string, any>;
-  expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(true);
+  expect(g.V7_PRISMA_INSTRUMENTATION.helper.isEnabled()).toBe(true); // changed in Task 19 (2026-11-03): always false, so Accelerate requests get no SDK headers
   expect(g.V6_PRISMA_INSTRUMENTATION).toBeUndefined(); expect(g.PRISMA_INSTRUMENTATION).toBeUndefined();
 });
 it('the own helper never hands out a sampled traceparent', () => expect(createOwnHelper().getTraceParent()).toBe('00-10-10-00'));
@@ -970,7 +971,7 @@ it('init() wraps the resolved pg Client.prototype.query, and shutdown() restores
   await shutdown();
   expect(PG_QUERY_WRAP in pg.Client.prototype).toBe(false);
 });
-it('installs the own Prisma helper on V7 only, and shutdown() removes it', async () => { /* globalThis.V7_PRISMA_INSTRUMENTATION.helper.isEnabled() === true; after shutdown, the key is absent */ });
+it('installs the own Prisma helper on V7 only, and shutdown() removes it', async () => { /* globalThis.V7_PRISMA_INSTRUMENTATION.helper.isEnabled() === true (changed in Task 19, 2026-11-03: always false, so Accelerate requests get no SDK headers); after shutdown, the key is absent */ });
 it('a bad sql.sampleRate is reported once and treated as 1', () => {
   for (const sampleRate of [0, -1, 2, Number.NaN]) { /* onError message as specified, once per init; shutdown between */ }
 });
