@@ -271,7 +271,16 @@ export function createOwnHelper(): object {
   return {
     isEnabled: (): boolean => true,
     getTraceParent: (): string => DISABLED_TRACEPARENT,
-    dispatchEngineSpans: (): undefined => undefined,
+    // As Prisma 7's own disabledTracingHelper (TracingHelper.ts): no spans to keep, but the log events
+    // still go to Prisma's emitter, or the app's $on('query') / log events from Accelerate would vanish
+    // (RemoteExecutor.ts #processExtensions hands logs to the helper whenever the response has spans).
+    // A throw from Prisma's own emitter propagates, exactly as it does without the SDK.
+    dispatchEngineSpans(_spans: unknown, events?: unknown, emitLogEvent?: unknown): undefined {
+      if (Array.isArray(events) && typeof emitLogEvent === 'function') {
+        for (const event of events as unknown[]) (emitLogEvent as (e: unknown) => void)(event);
+      }
+      return undefined;
+    },
     getActiveContext: (): undefined => undefined,
     runInChildSpan(nameOrOptions: unknown, cb: () => unknown): unknown {
       const plan = planFor(nameOrOptions);

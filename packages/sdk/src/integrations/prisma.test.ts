@@ -197,6 +197,20 @@ describe('own helper', () => {
     expect(h.getActiveContext()).toBeUndefined();
   });
 
+  it("dispatchEngineSpans hands Prisma 7's log events to emitLogEvent, as Prisma's own disabled helper does", () => {
+    // Prisma 7 + Accelerate: RemoteExecutor passes the response's logs through the helper whenever it
+    // returned spans (RemoteExecutor.ts #processExtensions); dropping them would hide the app's $on('query').
+    const h = createOwnHelper() as any;
+    const events = [{ level: 'query', attributes: { query: 'SELECT 1' } }, { level: 'info', attributes: { message: 'm' } }];
+    const emitted: unknown[] = [];
+    expect(h.dispatchEngineSpans([{ name: 'prisma:engine:db_query' }], events, (e: unknown) => { emitted.push(e); })).toBeUndefined();
+    expect(emitted).toEqual(events);
+    expect(emitted[0]).toBe(events[0]);
+    // Malformed arguments never throw.
+    expect(() => h.dispatchEngineSpans([], 'x', () => {})).not.toThrow();
+    expect(() => h.dispatchEngineSpans([], events, undefined)).not.toThrow();
+  });
+
   it('operation then db_query: an unclaimed statement is recorded with the operation labels and its own timing', async () => {
     const h = createOwnHelper() as any;
     await h.runInChildSpan(opSpan('findMany', 'User'), () =>
