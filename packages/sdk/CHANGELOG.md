@@ -50,11 +50,11 @@
 ### Cost of PostgreSQL capture
 
 The SDK times every `pg` query, so it adds a small fixed cost to each one. We
-measured about 4 µs per `pg` query and about 2–3 µs per Prisma call. That is
+measured about 4 µs per `pg` query and about 1–2 µs per Prisma call. That is
 against a local database round trip of about 36 µs; against a networked
 database (typically 0.5 ms or more per round trip) it is a small fraction.
-`sql.sampleRate` below 1 saves only about 1 µs, because every call is still
-timed.
+For `pg`, `sql.sampleRate` below 1 saves only about 1 µs, because every call
+is still timed.
 
 Measured on an Apple M4 with Node 26.7.0 and a local Postgres, modes
 interleaved, median of 5 rounds, µs per operation:
