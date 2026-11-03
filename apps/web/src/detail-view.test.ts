@@ -49,3 +49,14 @@ describe('trend floor basis', () => {
   it('interpolated tooltip uses ≈', () => expect(trendValueText('p95', 300, 'interpolated')).toBe('≈ 300ms'));
   it('calls use formatCount', () => expect(trendValueText('calls', 1234, null)).toBe('1,234'));
 });
+
+describe('trendData errors', () => {
+  it('carries errors, and null where there were no calls', () => {
+    const d = trendData([
+      { at: '2026-10-18T09:00:00.000Z', count: 4, totalMs: '400', maxMs: 200, avgMs: 100, p95: null, errors: 2 },
+      { at: '2026-10-18T10:00:00.000Z', count: 0, totalMs: '0', maxMs: 0, avgMs: 0, p95: null, errors: 0 },
+      { at: '2026-10-18T11:00:00.000Z', count: 3, totalMs: '3', maxMs: 1, avgMs: 1, p95: null },
+    ], 'hourly');
+    expect(d.map((p) => p.errors)).toEqual([2, null, 0]);
+  });
+});

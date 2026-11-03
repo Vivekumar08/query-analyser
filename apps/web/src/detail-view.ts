@@ -10,8 +10,8 @@ export function createIndexCall(model: string, s: SuggestionField[]): string {
   return `${model}.collection.createIndex({ ${fields} })`;
 }
 
-export function histogramData(hist: number[]): { bucket: string; count: number }[] {
-  const labels = histLabels();
+export function histogramData(hist: number[], bounds?: readonly number[]): { bucket: string; count: number }[] {
+  const labels = histLabels(bounds);
   return hist.map((count, i) => ({ bucket: labels[i] ?? `#${i}`, count }));
 }
 
@@ -32,6 +32,7 @@ export function trendData(points: SeriesPoint[], grain: 'hourly' | 'daily') {
       label, at: p.at, calls: p.count,
       p95: has && p.p95 ? p.p95.value : null,
       p95Basis: has && p.p95 ? p.p95.basis : null,
+      errors: has ? (p.errors ?? 0) : null,
     };
   });
 }

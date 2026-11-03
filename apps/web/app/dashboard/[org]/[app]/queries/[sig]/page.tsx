@@ -14,6 +14,7 @@ import { TrendChart } from '@/components/dashboard/TrendChart';
 import { AdviceCard } from '@/components/dashboard/AdviceCard';
 import { CopyButton } from '@/components/dashboard/CopyButton';
 import { CompassQuery } from '@/components/dashboard/CompassQuery';
+import { SqlQueryDetail } from '@/components/dashboard/SqlQueryDetail';
 import { FadeIn } from '@/components/dashboard/FadeIn';
 
 const COPY_CLASS = 'rounded-md border px-3 py-1 text-xs text-muted-foreground hover:bg-muted';
@@ -59,6 +60,7 @@ export default async function QueryDetailPage({
   // through the BFF at unlock time. A failed lookup just hides Reveal.
   const sampleKeyEnabled = sampleKey.ok && sampleKey.data.enabled;
   const canManage = ctx.currentOrg.role === 'OWNER' || ctx.currentOrg.role === 'ADMIN';
+  const isSql = (d.source ?? 'mongodb') !== 'mongodb';
 
   return (
     <>
@@ -68,6 +70,9 @@ export default async function QueryDetailPage({
         actions={<RangeControl value={range} retentionDays={retentionDays} />}
       />
       <FadeIn>
+      {isSql ? (
+        <SqlQueryDetail detail={d} series={series.ok ? series.data : null} rangeLabel={rangeLabel(range)} />
+      ) : (
       <div className="flex flex-col gap-6 p-6">
         <Link href={listHref} className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
           <ArrowLeft className="size-4" /> All queries
@@ -113,6 +118,7 @@ export default async function QueryDetailPage({
           />
         )}
       </div>
+      )}
       </FadeIn>
     </>
   );

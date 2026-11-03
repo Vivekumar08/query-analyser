@@ -106,10 +106,14 @@ export interface QueryDetail {
   hist: number[]; redactedSample: unknown | null; encryptedSample: EncryptedSample | null; advice: Advice | null;
   /** Optional so an API that has not been redeployed still type-matches. */
   source?: string; collection?: string | null;
+  /** SQL fields (absent from an API that has not been redeployed). `sqlText` is normalized and literal-free. */
+  orm?: string | null; database?: string | null; sqlText?: string | null; lastErrorCode?: string | null;
+  errors?: number; p50?: PercentileResult | null; histFine?: number[] | null;
+  sampled?: boolean; sampleRate?: number | null; thresholdMs?: number | null;
 }
 
 /** Same `avgMs`/`p95` guarantees as QueryDetail (`p95` is null for SQL without a complete fine histogram). */
-export interface SeriesPoint { at: string; count: number; totalMs: string; maxMs: number; avgMs: number; p95: PercentileResult | null }
+export interface SeriesPoint { at: string; count: number; totalMs: string; maxMs: number; avgMs: number; p95: PercentileResult | null; errors?: number; p50?: PercentileResult | null; p99?: PercentileResult | null }
 
 /** GET /v1/apps/:id/queries/:sig/series */
 export interface SeriesResponse { grain: 'hourly' | 'daily'; from: string; to: string; points: SeriesPoint[] }
