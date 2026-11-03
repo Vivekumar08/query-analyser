@@ -82,17 +82,26 @@ function isSdkWrapper(proto: object, fn: unknown, key: symbol): boolean {
   return false;
 }
 
-/** A callback that records first, then calls the app's with the same `this` and arguments; same `length` and `name`. */
+/* eslint-disable prefer-rest-params */
+/**
+ * A callback that records first, then calls the app's with the same `this` and every argument, and the
+ * same `length`. Arities 0-3 (all real pg callbacks) are fixed-arity templates: a defineProperty per
+ * query cost about 0.23 µs (final review). Only another arity pays for one.
+ */
 function wrapCallback(cb: Callback, done: (err: unknown) => void): Callback {
-  const w = function (this: unknown, err?: unknown): unknown {
-    done(err);
-    // eslint-disable-next-line prefer-rest-params
-    return cb.apply(this, arguments as unknown as unknown[]);
-  };
-  Object.defineProperty(w, 'length', { value: cb.length, configurable: true });
-  try { Object.defineProperty(w, 'name', { value: cb.name, configurable: true }); } catch { /* keep 'w' */ }
-  return w;
+  switch (cb.length) {
+    case 0: return function (this: unknown): unknown { done(arguments[0]); return cb.apply(this, arguments as unknown as unknown[]); } as Callback;
+    case 1: return function (this: unknown, err: unknown): unknown { done(err); return cb.apply(this, arguments as unknown as unknown[]); } as Callback;
+    case 2: return function (this: unknown, err: unknown, _res: unknown): unknown { done(err); return cb.apply(this, arguments as unknown as unknown[]); } as Callback;
+    case 3: return function (this: unknown, err: unknown, _res: unknown, _x: unknown): unknown { done(err); return cb.apply(this, arguments as unknown as unknown[]); } as Callback;
+    default: {
+      const w = function (this: unknown, err?: unknown): unknown { done(err); return cb.apply(this, arguments as unknown as unknown[]); };
+      Object.defineProperty(w, 'length', { value: cb.length, configurable: true });
+      return w as Callback;
+    }
+  }
 }
+/* eslint-enable prefer-rest-params */
 
 /** Which callback pg will use (utils.normalizeQueryConfig): the callback argument, else a function in `values`, else `config.callback`. */
 type Form =
@@ -175,7 +184,7 @@ function begin(proto: object, self: unknown, config: unknown, values: unknown, c
   };
 }
 
-/** The arguments pg receives: the app's, with the callback swapped for a recording one. */
+/** The arguments pg receives for a callback form: the app's, with the callback swapped for a recording one. */
 function argsFor(call: Call, args: IArguments): unknown[] {
   const out = Array.prototype.slice.call(args) as unknown[];
   const { form } = call;
@@ -260,15 +269,17 @@ export function installPgWrap(Client: unknown): boolean {
     let args: unknown[] | null = null;
     try {
       call = begin(proto, this, config, values, callback);
-      if (call !== null) args = argsFor(call, arguments);
+      // The promise form changes no argument: no copy (final review).
+      if (call !== null && call.form.kind !== 'promise') args = argsFor(call, arguments);
     } catch {
       call = null;
     }
-    // eslint-disable-next-line prefer-rest-params
-    if (call === null || args === null) return Reflect.apply(orig, this, arguments) as unknown;
     // A synchronous throw from pg propagates unchanged and records nothing.
-    const result = Reflect.apply(orig, this, args) as unknown;
-    return call.form.kind === 'promise' ? observe(result, call) : result;
+    // eslint-disable-next-line prefer-rest-params
+    if (call === null) return Reflect.apply(orig, this, arguments) as unknown;
+    // eslint-disable-next-line prefer-rest-params
+    if (args === null) return observe(Reflect.apply(orig, this, arguments) as unknown, call);
+    return Reflect.apply(orig, this, args) as unknown;
   } as QueryFn);
 }
 
