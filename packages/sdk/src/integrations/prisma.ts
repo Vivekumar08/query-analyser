@@ -8,15 +8,16 @@ import { PG_QUERY_WRAP } from './pg.js';
  *
  * Prisma reads its tracing helper from `globalThis[KEY].helper` on every call. The SDK defines a
  * configurable accessor on each watched key:
- * - `V7_PRISMA_INSTRUMENTATION` (Prisma 7): with no app value, the SDK's own helper, which never
- *   hands out a sampled traceparent, so Prisma never changes the SQL because of the SDK;
+ * - `V7_PRISMA_INSTRUMENTATION` (Prisma 7): with no app value, the SDK's own helper, which reports
+ *   isEnabled() false and never hands out a sampled traceparent, so Prisma never changes the SQL or
+ *   its Accelerate request headers because of the SDK; it only frames `operation` spans;
  * - `V6_PRISMA_INSTRUMENTATION` and `PRISMA_INSTRUMENTATION` (5.22/6.x): only a helper the app
  *   installed (`@prisma/instrumentation`), wrapped and delegated to call for call.
  * The accessor sees every plain assignment the app makes; an app `delete` removes it, and
  * `ensurePrismaHook()` (every flush) re-defines it.
  *
  * Statements:
- * - JS `db_query` spans (Prisma 7): when the pg wrap covers the adapter's pg
+ * - JS `db_query` spans (Prisma 7, only from an app helper that is enabled): when the pg wrap covers the adapter's pg
  *   (`sqlRuntime().pgCoversPrismaAdapter`), pg counts them and this hook records none; it only
  *   sets operation frames so pg records carry the Prisma model and operation. Otherwise it records
  *   the ones no layer underneath claimed.
@@ -266,10 +267,20 @@ function runIn(plan: Plan, run: () => unknown): unknown {
   }
 }
 
-/** The SDK's own helper for `V7_PRISMA_INSTRUMENTATION`: enabled, never sampled, frames only. */
+/**
+ * The SDK's own helper for `V7_PRISMA_INSTRUMENTATION`: never enabled, never sampled, frames only.
+ *
+ * Prisma 7.10 reads `isEnabled()` in exactly two places: whether to wrap a local statement in a
+ * `db_query` span (client-engine-runtime tracing.ts), and whether to add `traceparent` and
+ * `X-Capture-Telemetry: tracing` to every Accelerate request (HeaderBuilder.ts). `isEnabled()` has no
+ * arguments, so it cannot tell the two apart, and the SDK must never change what an app sends
+ * (Task 19 fix round 1). So it is always false. `operation` spans still run through `runInChildSpan`
+ * whatever it says (getPrismaClient.ts), so pg statements keep their model and operation labels.
+ * Cost: with no db_query spans, a Prisma 7 adapter whose driver is not a pg the SDK wraps is not captured.
+ */
 export function createOwnHelper(): object {
   return {
-    isEnabled: (): boolean => true,
+    isEnabled: (): boolean => false,
     getTraceParent: (): string => DISABLED_TRACEPARENT,
     // As Prisma 7's own disabledTracingHelper (TracingHelper.ts): no spans to keep, but the log events
     // still go to Prisma's emitter, or the app's $on('query') / log events from Accelerate would vanish
