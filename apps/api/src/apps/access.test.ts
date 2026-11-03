@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { bucketOf } from '@query-analyser/contract/runtime';
 import { randomBytes, createHash } from 'node:crypto';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
@@ -17,7 +18,7 @@ const NONEXISTENT = '00000000-0000-0000-0000-000000000000';
 const HOUR = 3600_000;
 
 const ingestBody = (n: number) => ({
-  app: 'shop', env: 'production', host: 'h', sdkVersion: '0.1.0', bucket: '2026092014', thresholdMs: 100, dropped: 0,
+  app: 'shop', env: 'production', host: 'h', sdkVersion: '0.1.0', bucket: bucketOf(new Date()), thresholdMs: 100, dropped: 0,
   items: Array.from({ length: n }, (_, i) => ({
     signature: `S${i}`, hash: i.toString(16).padStart(16, '0'), model: 'M', operation: 'find',
     filterShape: [], sortKeys: [], stages: [], count: 1, totalMs: 120, maxMs: 120, lastMs: 120, lastTs: 1,
@@ -277,7 +278,7 @@ describe('DELETE /v1/apps/:id', () => {
   it('its ingest key is refused at once (Review Focus)', async () => {
     const { o, shop } = await org();
     const { key } = (await app.inject({ method: 'POST', url: `/v1/apps/${shop}/keys`, headers: o.h })).json();
-    const body = { app: 'shop', env: 'production', host: 'h', sdkVersion: '0.1.0', bucket: '2026092014', thresholdMs: 100, dropped: 0, items: [] };
+    const body = { app: 'shop', env: 'production', host: 'h', sdkVersion: '0.1.0', bucket: bucketOf(new Date()), thresholdMs: 100, dropped: 0, items: [] };
     // Warms the KeyResolver cache with this key.
     expect((await app.inject({ method: 'POST', url: '/v1/ingest', headers: { authorization: `Bearer ${key}` }, payload: body })).statusCode).toBe(202);
     expect((await deleteApp(shop, o.h)).statusCode).toBe(204);

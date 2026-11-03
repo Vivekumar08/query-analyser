@@ -4,6 +4,8 @@ import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import { generateKey } from './keys.js';
 import * as writer from './writer.js';
+import { bucketToDate } from './writer.js';
+import { bucketOf } from '@query-analyser/contract/runtime';
 import type { FastifyInstance } from 'fastify';
 import { encryptSample, generateSampleKeyPair, type IngestPayload } from '@query-analyser/contract';
 
@@ -26,7 +28,7 @@ async function seedKey(opts: { suspended?: boolean; revoked?: boolean; samplePub
 }
 
 const payload = (n = 1): IngestPayload => ({
-  app: 'web', env: 'prod', host: 'h', sdkVersion: '0.1.0', bucket: '2026092014', thresholdMs: 100, dropped: 0,
+  app: 'web', env: 'prod', host: 'h', sdkVersion: '0.1.0', bucket: bucketOf(new Date()), thresholdMs: 100, dropped: 0,
   items: Array.from({ length: n }, (_, i) => ({
     signature: `S${i}`, hash: i.toString(16).padStart(16, '0'), model: 'M', operation: 'find',
     filterShape: [], sortKeys: [], stages: [], count: 1, totalMs: 120, maxMs: 120, lastMs: 120, lastTs: 1,
@@ -197,11 +199,13 @@ describe('POST /v1/ingest', () => {
     const { app: a, key } = await seedKey();
     await fillQuota(a.id, 5000);
     const body = payload(2);
-    body.bucket = '2099010100';
+    // The furthest-ahead bucket the route accepts (a far-future one is now a 400).
+    body.bucket = bucketOf(new Date(Date.now() + 3_600_000));
     const before = Date.now();
     expect((await post(key, body)).json()).toEqual({ accepted: 0, droppedNew: 2 });
     const rows = await app.prisma.quotaDrop.findMany({ where: { appId: a.id } });
     expect(rows).toHaveLength(1);
+    expect(bucketOf(rows[0]!.bucketHour)).not.toBe(body.bucket);
     expect(Math.abs(rows[0]!.bucketHour.getTime() - before)).toBeLessThan(2 * 3_600_000);
   });
 
@@ -246,6 +250,50 @@ describe('POST /v1/ingest', () => {
     expect(body).toEqual({ error: 'Internal Server Error' });
     expect(JSON.stringify(body)).not.toMatch(/constraint|QueryRollup|relation/i);
     spy.mockRestore();
+  });
+});
+
+describe('POST /v1/ingest — bucket', () => {
+  const HOUR = 3_600_000;
+  const hoursFromNow = (h: number) => bucketOf(new Date(Date.now() + h * HOUR));
+  const withBucket = (bucket: string) => ({ ...payload(1), bucket });
+
+  it('accepts the current hour and writes the rollup under it', async () => {
+    const { app: a, key } = await seedKey();
+    const bucket = hoursFromNow(0);
+    expect((await post(key, withBucket(bucket))).statusCode).toBe(202);
+    const sig = await app.prisma.querySignature.findFirstOrThrow({ where: { appId: a.id } });
+    const roll = await app.prisma.queryRollup.findFirstOrThrow({ where: { signatureId: sig.id } });
+    expect(roll.bucketHour.toISOString()).toBe(bucketToDate(bucket).toISOString());
+  });
+
+  it('accepts the window edges it promises: 47 hours back and 1 hour ahead', async () => {
+    const { key } = await seedKey();
+    expect((await post(key, withBucket(hoursFromNow(-47)))).statusCode).toBe(202);
+    expect((await post(key, withBucket(hoursFromNow(1)))).statusCode).toBe(202);
+  });
+
+  it('400s a bucket that is not a real hour (month 13, hour 24, day 31 of February) and writes nothing', async () => {
+    const { app: a, key } = await seedKey();
+    for (const bucket of ['2026130110', '2026110324', '2026023110']) {
+      const res = await post(key, withBucket(bucket));
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: 'invalid bucket' });
+    }
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(0);
+  });
+
+  it('400s a far-future bucket', async () => {
+    const { key } = await seedKey();
+    expect((await post(key, withBucket('2099010100'))).statusCode).toBe(400);
+    expect((await post(key, withBucket(hoursFromNow(3)))).statusCode).toBe(400);
+  });
+
+  it('400s a bucket 3 days old', async () => {
+    const { app: a, key } = await seedKey();
+    expect((await post(key, withBucket(hoursFromNow(-72)))).statusCode).toBe(400);
+    expect(await app.prisma.queryRollup.count()).toBe(0);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(0);
   });
 });
 

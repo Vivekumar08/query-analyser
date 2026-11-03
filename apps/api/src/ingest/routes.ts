@@ -14,6 +14,25 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 // bounding a single-source flood. The per-app signature quota (below) is
 // the control for authenticated abuse; this is only the pre-auth backstop.
 const DEFAULT_RATE_LIMIT_MAX = 600;
+const HOUR_MS = 3_600_000;
+// The SDK always sends the hour it is flushing in. A bucket is accepted from
+// 48 hours back (a client that retried through an outage) to 1 hour ahead
+// (a client clock running fast), measured in whole server hours.
+const BUCKET_MAX_AGE_HOURS = 48;
+const BUCKET_MAX_LEAD_HOURS = 1;
+
+/**
+ * Whether a client `bucket` (YYYYMMDDHH, UTC) is a real hour inside the
+ * accepted window. The schema checks only its shape; without this, a client
+ * could write rollups into any hour (month 13 rolls over, 2099 is never pruned).
+ */
+function isAcceptableBucket(bucket: string, now: Date): boolean {
+  const at = bucketToDate(bucket);
+  if (Number.isNaN(at.getTime()) || bucketOf(at) !== bucket) return false;
+  const thisHour = bucketToDate(bucketOf(now)).getTime();
+  const t = at.getTime();
+  return t >= thisHour - BUCKET_MAX_AGE_HOURS * HOUR_MS && t <= thisHour + BUCKET_MAX_LEAD_HOURS * HOUR_MS;
+}
 
 export interface IngestRoutesOptions {
   rateLimitMax?: number;
@@ -62,6 +81,10 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
       // (`unknown | null`). The runtime shapes agree — a parsed item always
       // has the key, possibly `null` — so this is a type-level-only cast.
       const payload = parsed.data as IngestPayload;
+      if (!isAcceptableBucket(payload.bucket, new Date())) {
+        app.ingestStats.rejected400 += 1;
+        return reply.code(400).send({ error: 'invalid bucket' });
+      }
 
       // Quota: only new hashes count toward it. At the quota the batch is
       // not refused: items for known signatures are kept, new ones past the

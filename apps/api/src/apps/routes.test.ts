@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { bucketOf } from '@query-analyser/contract/runtime';
 import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import { hashKey } from '../ingest/keys.js';
@@ -187,7 +188,7 @@ describe('keys', () => {
     const o = await owner();
     const a = (await app.inject({ method: 'POST', url: `/v1/orgs/${o.orgId}/apps`, headers: o.h, payload: { name: 'web', env: 'production' } })).json();
     const { key, id } = (await app.inject({ method: 'POST', url: `/v1/apps/${a.id}/keys`, headers: o.h })).json();
-    const body = { app: 'web', env: 'production', host: 'h', sdkVersion: '0.1.0', bucket: '2026092014', thresholdMs: 100, dropped: 0, items: [] };
+    const body = { app: 'web', env: 'production', host: 'h', sdkVersion: '0.1.0', bucket: bucketOf(new Date()), thresholdMs: 100, dropped: 0, items: [] };
     expect((await app.inject({ method: 'POST', url: '/v1/ingest', headers: { authorization: `Bearer ${key}` }, payload: body })).statusCode).toBe(202);
     expect((await app.inject({ method: 'DELETE', url: `/v1/apps/${a.id}/keys/${id}`, headers: o.h })).statusCode).toBe(204);
     expect((await app.inject({ method: 'POST', url: '/v1/ingest', headers: { authorization: `Bearer ${key}` }, payload: body })).statusCode).toBe(401);

@@ -174,6 +174,11 @@ Everything under `/v1/orgs`, `/v1/apps` requires
 `/v1/admin/*` requires `isPlatformAdmin` (set directly in the database for
 now).
 
+`/v1/ingest` answers `400 { error: 'invalid bucket' }` when the payload's
+`bucket` is not a real UTC hour or lies outside the window of 48 hours back to
+1 hour ahead of the server's current hour. The SDK always sends the hour it is
+flushing in, so only a client clock off by more than that is refused.
+
 ## First platform admin
 
 ```sql
