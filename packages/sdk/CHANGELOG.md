@@ -35,23 +35,33 @@
 - **Deploy order:** deploy the API and web before publishing or upgrading to
   0.4.0. Older APIs ignore the new SQL keys (`orm`, `database`, `sql`,
   `errors`, `errorCodes`, `histFine`, `sampleRate`).
+- Prisma 7 statements through an adapter whose driver is not `pg` are not
+  captured (`@prisma/adapter-neon`, `@prisma/adapter-ppg` and others). The
+  supported path is `@prisma/adapter-pg`, including its private `pg` copy.
+- On Prisma 5/6 with the adapter, `count()` is labelled with model `(sql)`,
+  because its table is inside a subquery.
 - Prisma 7: the SDK's own tracing helper always reports itself disabled, so it
   never adds headers to Prisma Accelerate requests (Accelerate statements are
   not visible) and Prisma never adds trace context because of it.
 
 ### Cost of PostgreSQL capture
 
-Within measurement noise on the machine we measured, roughly 0 to 1.5 µs per
-`pg` query. Measured on an Apple M4 with Node 26.7.0, median of 5 runs, µs per
-operation, no statement crossing the threshold. Across runs the added cost
-swung between -5% and +4%, so the table below shows noise, not a speed-up:
+The SDK times every `pg` query, so it adds a small fixed cost to each one. We
+measured about 4 µs per `pg` query and about 2–3 µs per Prisma call. That is
+against a local database round trip of about 36 µs; against a networked
+database (typically 0.5 ms or more per round trip) it is a small fraction.
+`sql.sampleRate` below 1 saves only about 1 µs, because every call is still
+timed.
+
+Measured on an Apple M4 with Node 26.7.0 and a local Postgres, modes
+interleaved, median of 5 rounds, µs per operation:
 
 | stack | SDK off (µs/op) | SDK, sampleRate 1 (µs/op) | SDK, sampleRate 0.1 (µs/op) |
 |---|---|---|---|
-| pg 8.23 `pool.query` by id | 39.2 | 37.1 | 35.9 |
-| Prisma 7.10 `findUnique` | 72.9 | 71.6 | 69.2 |
-| Prisma 6.19 `findUnique` | 123.5 | 123.2 | 120.7 |
-| Prisma 5.22 `findUnique` | 121.2 | 118.6 | 117.7 |
+| pg 8.23 `pool.query` by id | 35.6 | 40.0 | 38.8 |
+| Prisma 7.10 `findUnique` | 66.6 | 68.5 | 68.1 |
+| Prisma 6.19 `findUnique` | 120.5 | 122.0 | 121.3 |
+| Prisma 5.22 `findUnique` | 111.9 | 113.9 | 113.4 |
 
 ## 0.3.0
 
