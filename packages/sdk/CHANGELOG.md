@@ -38,6 +38,9 @@
 - Prisma 7 statements through an adapter whose driver is not `pg` are not
   captured (`@prisma/adapter-neon`, `@prisma/adapter-ppg` and others). The
   supported path is `@prisma/adapter-pg`, including its private `pg` copy.
+- On Node 20/22, Prisma 7 statements are labelled from the SQL (table and
+  verb), not the Prisma model and method. Node 24 and later get the Prisma
+  labels.
 - On Prisma 5/6 with the adapter, `count()` is labelled with model `(sql)`,
   because its table is inside a subquery.
 - Prisma 7: the SDK's own tracing helper always reports itself disabled, so it

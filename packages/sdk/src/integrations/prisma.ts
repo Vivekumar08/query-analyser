@@ -2,6 +2,7 @@ import { sqlRuntime, labelsOf, type Labels, type OperationFrame, type SqlFrame, 
 import { sqlStateOf } from '../sql/core.js';
 import { pgClientClass } from '../drivers.js';
 import { PG_QUERY_WRAP } from './pg.js';
+import { hasAsyncContextFrame } from '../sql/async-context.js';
 
 /**
  * The Prisma tracing hook (spike Q2/Q3; Decisions 1, 2, 5, 12, 16).
@@ -182,6 +183,15 @@ function emitEngine(rt: SqlRuntime, statements: EngineStatement[], labels: Label
   for (const s of statements) emit(rt, s.text, s.durationMs, false, null, labels);
 }
 
+/**
+ * Whether `operation` spans open a frame (Final ruling F2). Only with AsyncContextFrame: on Node 20/22 an
+ * `als.run()` per Prisma call turns on process-wide promise hooks, which slows every await in the app.
+ * Without it, pg statements are labelled from the SQL (table and verb), as on the Prisma 5/6 adapter path.
+ * `db_query` statement frames stay: they exist only under an app-enabled tracer (which already runs its own
+ * AsyncLocalStorage), and they keep a statement counted exactly once.
+ */
+const OPERATION_FRAMES: boolean = hasAsyncContextFrame();
+
 /** The frame to enter for one span, or null to run the callback untouched. Never throws. */
 interface Plan { rt: SqlRuntime; frame: SqlFrame; text: string | null }
 
@@ -198,7 +208,7 @@ function planFor(nameOrOptions: unknown): Plan | null {
       attributes = (nameOrOptions as { attributes?: unknown }).attributes;
     }
     if (name === 'operation') {
-      if (!isObject(attributes)) return null;
+      if (!OPERATION_FRAMES || !isObject(attributes)) return null;
       const { model, method } = attributes as { model?: unknown; method?: unknown };
       if (typeof method !== 'string') return null;
       const frame: OperationFrame = { kind: 'operation', model: typeof model === 'string' ? model : null, operation: method };
@@ -275,7 +285,8 @@ function runIn(plan: Plan, run: () => unknown): unknown {
  * `X-Capture-Telemetry: tracing` to every Accelerate request (HeaderBuilder.ts). `isEnabled()` has no
  * arguments, so it cannot tell the two apart, and the SDK must never change what an app sends
  * (Task 19 fix round 1). So it is always false. `operation` spans still run through `runInChildSpan`
- * whatever it says (getPrismaClient.ts), so pg statements keep their model and operation labels.
+ * whatever it says (getPrismaClient.ts), so pg statements keep their model and operation labels
+ * (with AsyncContextFrame only; see OPERATION_FRAMES).
  * Cost: with no db_query spans, a Prisma 7 adapter whose driver is not a pg the SDK wraps is not captured.
  */
 export function createOwnHelper(): object {

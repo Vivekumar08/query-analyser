@@ -155,6 +155,10 @@ fingerprint, so those queries start new history.
   operation from the SQL verb, and the `prisma` label is inferred from the
   adapter's call shape. `count()` is labelled with model `(sql)`, because its
   table is inside a subquery.
+- On Node 20/22, Prisma 7 statements are labelled from the SQL (table and
+  verb), not the Prisma model and method. Reading Prisma's labels there would
+  slow every `await` in your app; Node 24 and later carry them at no such cost
+  (unless started with `--no-async-context-frame`).
 - With your own Prisma tracing, labels (adapter path) or statements (engine
   path) cover only the operations your sampler keeps.
 - On the engine path, failed statements are not counted as errors.
