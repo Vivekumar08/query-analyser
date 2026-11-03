@@ -78,7 +78,9 @@ export async function createThrowawayDb(prefix: string): Promise<{ url: string; 
     url: urlFor(base, name),
     name,
     drop() {
-      dropped ??= withAdmin(async (c) => { await c.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`); });
+      // A failed drop is not memoised, so a later call tries again.
+      dropped ??= withAdmin(async (c) => { await c.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`); })
+        .catch((e: unknown) => { dropped = null; throw e; });
       return dropped;
     },
   };
