@@ -60,6 +60,16 @@ describe('ingestPayloadSchema', () => {
     expect(ingestPayloadSchema.safeParse({ ...payload, thresholdMs: 1e10 }).success).toBe(false);
   });
 
+  it('caps count and every hist and histFine bucket at the int range (2_147_483_647)', () => {
+    const MAX = 2_147_483_647;
+    const fine = (n: number) => Array.from({ length: FINE_HIST_SIZE }, (_, i) => (i === 3 ? n : 0));
+    const ok = (over: object) => ingestPayloadSchema.safeParse({ ...payload, items: [{ ...item, ...over }] }).success;
+    expect(ok({ count: MAX, hist: [MAX, 0, 0, 0, 0, 0, 0, 0], histFine: fine(MAX) })).toBe(true);
+    expect(ok({ count: MAX + 1 })).toBe(false);
+    expect(ok({ hist: [0, MAX + 1, 0, 0, 0, 0, 0, 0] })).toBe(false);
+    expect(ok({ histFine: fine(MAX + 1) })).toBe(false);
+  });
+
   it('rejects an app name that is empty', () => {
     expect(() => ingestPayloadSchema.parse({ ...payload, app: '' })).toThrow();
   });

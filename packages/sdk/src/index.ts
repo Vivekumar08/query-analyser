@@ -60,15 +60,24 @@ const engineWarning = (version: string): string =>
   `query-analyser: @prisma/client ${version} without @prisma/adapter-pg runs its SQL inside the query engine, which the SDK captures only when your app already enables Prisma tracing. Use @prisma/adapter-pg, or Prisma 7, to capture these queries.`;
 
 const SAMPLE_RATE_WARNING = 'query-analyser: sql.sampleRate must be a number greater than 0 and at most 1; using 1';
+const MIN_SAMPLE_RATE = 0.001;
+const SAMPLE_RATE_FLOOR_WARNING = `query-analyser: sql.sampleRate must be at least ${MIN_SAMPLE_RATE}; using ${MIN_SAMPLE_RATE}`;
 const DEFAULT_THRESHOLD_MS = 100;
 const THRESHOLD_WARNING = `query-analyser: thresholdMs must be a finite number of milliseconds, 0 or more (fractions are rounded); using ${DEFAULT_THRESHOLD_MS}`;
 const MAX_THRESHOLD_MS = 3_600_000;
 const THRESHOLD_MAX_WARNING = `query-analyser: thresholdMs must be at most ${MAX_THRESHOLD_MS} (one hour); using ${MAX_THRESHOLD_MS}`;
 
-/** `sql.sampleRate`, validated once here so the sink never reports per statement. Invalid -> reported, 1. */
+/**
+ * `sql.sampleRate`, validated once here so the sink never reports per statement. Invalid -> reported, 1;
+ * above 0 but below 0.001 -> reported, 0.001 (a tinier rate weights each kept statement past int range).
+ */
 function resolveSampleRate(requested: unknown, report: (e: Error) => void): number {
   if (requested === undefined) return 1;
-  if (typeof requested === 'number' && Number.isFinite(requested) && requested > 0 && requested <= 1) return requested;
+  if (typeof requested === 'number' && Number.isFinite(requested) && requested > 0 && requested <= 1) {
+    if (requested >= MIN_SAMPLE_RATE) return requested;
+    report(new Error(SAMPLE_RATE_FLOOR_WARNING));
+    return MIN_SAMPLE_RATE;
+  }
   report(new Error(SAMPLE_RATE_WARNING));
   return 1;
 }
