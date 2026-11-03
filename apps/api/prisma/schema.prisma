@@ -174,7 +174,8 @@ model QuerySignature {
   database        String?
   /// Normalised SQL text with every literal replaced by `?`; null for Mongo.
   sqlText         String?
-  /// Most recent SQLSTATE (5 chars) of a failed statement; null when none has failed.
+  /// SQLSTATE (5 chars) that failed most often in the latest batch with any failure (ties: lowest code);
+  /// a batch with no failures keeps it. Null when none has failed.
   lastErrorCode   String?
   firstSeen       DateTime           @default(now()) @db.Timestamptz(3)
   lastSeen        DateTime           @default(now()) @db.Timestamptz(3)
