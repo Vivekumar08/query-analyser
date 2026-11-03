@@ -74,6 +74,17 @@ afterEach(() => {
 });
 
 describe('pg wrapper: promise form', () => {
+  it('hands pg the very arguments object, with no copy (Reflect.apply on arguments)', async () => {
+    const c = new FakeClient({ ok: {} });
+    const slice = vi.spyOn(Array.prototype, 'slice');
+    const p = c.query('SELECT 1', [1]);
+    const slices = slice.mock.calls.length;
+    slice.mockRestore();
+    await p;
+    expect(slices).toBe(0);
+    expect(c.seen!.config).toBe('SELECT 1');
+  });
+
   it('promise form: resolves with the same value and records once', async () => {
     const res = { rows: [{ a: 1 }] }; const c = new FakeClient({ ok: res });
     await expect(c.query('SELECT 1')).resolves.toBe(res);
@@ -195,6 +206,38 @@ describe('pg wrapper: callback forms', () => {
     const c = new FakeClient({ ok: {} });
     await new Promise<void>((r) => { c.query('SELECT 1', [], function three(_a: unknown, _b: unknown, _c: unknown) { r(); }); });
     expect((c.seen!.callback as Cb).length).toBe(3);
+  });
+
+  // Final ruling (perf): arities 0-3 use fixed-arity templates, with no defineProperty per query.
+  const arityCallbacks: Array<[number, (done: (self: unknown, args: unknown[]) => void) => Cb]> = [
+    [0, (done) => function (this: unknown) { done(this, [...arguments]); } as Cb],
+    [1, (done) => function (this: unknown, _e: unknown) { done(this, [...arguments]); } as Cb],
+    [2, (done) => function (this: unknown, _e: unknown, _r: unknown) { done(this, [...arguments]); } as Cb],
+    [3, (done) => function (this: unknown, _e: unknown, _r: unknown, _x: unknown) { done(this, [...arguments]); } as Cb],
+  ];
+  for (const [arity, make] of arityCallbacks) {
+    it(`a callback of arity ${arity} keeps its length, this and every argument, with no defineProperty per query`, async () => {
+      const res = { rows: [] }; const c = new FakeClient({ ok: res });
+      const define = vi.spyOn(Object, 'defineProperty');
+      let seen: { self: unknown; args: unknown[] } | undefined;
+      const settled = new Promise<void>((r) => { c.query('SELECT 1', [], make((self, args) => { seen = { self, args }; r(); })); });
+      // On a function other than the spy itself (vitest's spy defines its own `mock` on first call).
+      const defines = define.mock.calls.filter(([target]) => typeof target === 'function' && target !== (define as unknown)).length;
+      define.mockRestore();
+      await settled;
+      expect(defines).toBe(0);
+      expect((c.seen!.callback as Cb).length).toBe(arity);
+      expect(seen).toEqual({ self: QUERY_THIS, args: [null, res] });
+      expect(seen!.args[1]).toBe(res);
+      await tick();
+      expect(recorded).toEqual([expect.objectContaining({ text: 'SELECT 1', failed: false })]);
+    });
+  }
+
+  it('a callback of arity 4 or more still keeps its length', async () => {
+    const c = new FakeClient({ ok: {} });
+    await new Promise<void>((r) => { c.query('SELECT 1', [], function four(_a: unknown, _b: unknown, _c: unknown, _d: unknown) { r(); }); });
+    expect((c.seen!.callback as Cb).length).toBe(4);
   });
 
   it('the callback argument wins over a function in values, as in pg, and is recorded once', async () => {
