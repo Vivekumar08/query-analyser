@@ -323,8 +323,9 @@ require('@vivekumar08/query-analyser').init({
   driver's command monitoring has a cost for very large reads; see the
   [changelog](./CHANGELOG.md).
 - For `pg` and Prisma the SDK wraps `pg`'s `query()` and times it. On an Apple
-  M4 with a local Postgres we measured about 4 µs per `pg` query and about
-  1–2 µs per Prisma call; see the [changelog](./CHANGELOG.md).
+  M4 with a local Postgres we measured about 1–1.6 µs per `pg` query and
+  about 2–6 µs per Prisma call, depending on the Prisma version; see the
+  [changelog](./CHANGELOG.md).
 - Known limitation: an app that loads both the CommonJS and ESM copies of the SDK
   and calls `init()` in both can lose zero-setup capture for clients that connect
   later. Call `init()` from one module system.

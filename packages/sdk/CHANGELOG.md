@@ -49,22 +49,35 @@
 
 ### Cost of PostgreSQL capture
 
-The SDK times every `pg` query, so it adds a small fixed cost to each one. We
-measured about 4 µs per `pg` query and about 1–2 µs per Prisma call. That is
-against a local database round trip of about 36 µs; against a networked
-database (typically 0.5 ms or more per round trip) it is a small fraction.
-For `pg`, `sql.sampleRate` below 1 saves only about 1 µs, because every call
-is still timed.
+The SDK times every `pg` query, so it adds a small fixed cost to each one.
+Across two runs we measured about 1–1.6 µs per `pg` query, about 2–3 µs per
+Prisma 7.10 call, about 6 µs per Prisma 6.19 call, and no measurable
+difference on Prisma 5.22. That is against a local database round trip of
+about 35 µs; against a networked database (typically 0.5 ms or more per round
+trip) it is a small fraction. `sql.sampleRate` below 1 saves little (under
+1 µs for `pg`), because every call is still timed.
 
 Measured on an Apple M4 with Node 26.7.0 and a local Postgres, modes
-interleaved, median of 5 rounds, µs per operation:
+interleaved, median of 6 rounds, µs per operation (one of the two runs):
 
 | stack | SDK off (µs/op) | SDK, sampleRate 1 (µs/op) | SDK, sampleRate 0.1 (µs/op) |
 |---|---|---|---|
-| pg 8.23 `pool.query` by id | 35.6 | 40.0 | 38.8 |
-| Prisma 7.10 `findUnique` | 66.6 | 68.5 | 68.1 |
-| Prisma 6.19 `findUnique` | 120.5 | 122.0 | 121.3 |
-| Prisma 5.22 `findUnique` | 111.9 | 113.9 | 113.4 |
+| pg 8.23 `pool.query` by id | 33.9 | 35.5 | 34.6 |
+| Prisma 7.10 `findUnique` | 64.0 | 65.8 | 65.6 |
+| Prisma 6.19 `findUnique` | 113.7 | 119.5 | 117.2 |
+| Prisma 5.22 `findUnique` | 114.6 | 115.2 | 114.7 |
+
+### Deploying the 0.4.0 API
+
+- The API now rejects `thresholdMs` above 3,600,000 (one hour) with a 400. An
+  0.3.x SDK configured above that will see every batch rejected; 0.4.0 clamps
+  it. Lower the setting before deploying.
+- The API rejects a batch whose `bucket` is malformed or outside the last 48
+  hours to the next hour (server UTC). SDKs always send the current hour, so a
+  rejection means a badly wrong client clock.
+- The `20261101220000_sql_postgres` migration takes a short exclusive lock on
+  `QueryRollup`. Deploy at a quiet time, or set `lock_timeout` for the deploy
+  session and retry on timeout.
 
 ## 0.3.0
 
