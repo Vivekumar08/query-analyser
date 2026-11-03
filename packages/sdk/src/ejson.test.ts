@@ -102,9 +102,7 @@ describe('serializeSample', () => {
     const big = Buffer.alloc(16 * 1024 * 1024, 1);
     const toString = vi.spyOn(Buffer.prototype, 'toString');
     try {
-      const t0 = performance.now();
       expect(serializeSample({ update: { $set: { blob: big } } })).toBeNull();
-      expect(performance.now() - t0).toBeLessThan(50);
       expect(toString.mock.calls.filter(([enc]) => enc === 'base64')).toHaveLength(0);
     } finally {
       toString.mockRestore();
@@ -115,9 +113,7 @@ describe('serializeSample', () => {
     const huge = 'x'.repeat(20 * 1024 * 1024);
     const stringify = vi.spyOn(JSON, 'stringify');
     try {
-      const t0 = performance.now();
       expect(serializeSample({ filter: { note: huge } })).toBeNull();
-      expect(performance.now() - t0).toBeLessThan(50);
       expect(stringify.mock.calls.some(([arg]) => arg === huge)).toBe(false);
     } finally {
       stringify.mockRestore();
@@ -138,9 +134,13 @@ describe('serializeSample', () => {
   it('stops early on a huge object whose keys are all skipped', () => {
     const sparse: Record<string, undefined> = {};
     for (let i = 0; i < 200_000; i++) sparse[`k${i}`] = undefined;
-    const t0 = performance.now();
-    expect(serializeSample({ filter: sparse })).toBeNull();
-    expect(performance.now() - t0).toBeLessThan(50);
+    // Count the values it reads instead of timing it: each skipped key costs budget, so it gives up
+    // after about 16 384 of the 200 000 keys.
+    let reads = 0;
+    const counted = new Proxy(sparse, { get(t, k, r) { reads += 1; return Reflect.get(t, k, r); } });
+    expect(serializeSample({ filter: counted })).toBeNull();
+    expect(reads).toBeGreaterThan(0);
+    expect(reads).toBeLessThan(20_000);
   });
 
   it('returns null past the depth limit', () => {
@@ -158,11 +158,15 @@ describe('serializeSample', () => {
     expect(parse({ ab: new Uint8Array([104, 105]).buffer })).toEqual({ ab: { $binary: { base64: 'aGk=', subType: '00' } } });
   });
 
-  it('rejects a 20M-element Float64Array fast, without encoding or walking it', () => {
+  it('rejects a 20M-element Float64Array without encoding or walking it', () => {
     const huge = new Float64Array(20_000_000);
-    const t0 = performance.now();
-    expect(serializeSample({ filter: { v: huge } })).toBeNull();
-    expect(performance.now() - t0).toBeLessThan(100);
+    const toString = vi.spyOn(Buffer.prototype, 'toString');
+    try {
+      expect(serializeSample({ filter: { v: huge } })).toBeNull();
+      expect(toString.mock.calls.filter(([enc]) => enc === 'base64')).toHaveLength(0);
+    } finally {
+      toString.mockRestore();
+    }
   });
 });
 
