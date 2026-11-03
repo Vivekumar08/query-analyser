@@ -88,30 +88,38 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
 
       // Quota: only new hashes count toward it. At the quota the batch is
       // not refused: items for known signatures are kept, new ones past the
-      // room left are dropped and the drop is recorded. The check and the
-      // write run under a per-app lock so two batches racing at the boundary
-      // cannot both claim the last slots (in-process; across replicas the
-      // overshoot is bounded by one batch per replica).
+      // room left are dropped and the drop is recorded. A batch of known
+      // hashes only (the steady state) writes without the per-app lock. One
+      // with new hashes re-checks under the lock, so two batches racing at
+      // the boundary cannot both claim the last slots (in-process; across
+      // replicas the overshoot is bounded by one batch per replica).
       const appId = resolved.appId;
       const keyId = resolved.keyId;
-      return withAppLock(appId, handleBatch);
-
-      async function handleBatch() {
-      const dropped = new Set<string>();
       const hashes = [...new Set(payload.items.map((i) => i.hash))];
-      if (hashes.length > 0) {
+      const freshOf = async (candidates: string[]): Promise<string[]> => {
+        if (candidates.length === 0) return [];
         const knownRows = await app.prisma.querySignature.findMany({
-          where: { appId, hash: { in: hashes } },
+          where: { appId, hash: { in: candidates } },
           select: { hash: true },
         });
         const known = new Set(knownRows.map((r) => r.hash));
-        const fresh = hashes.filter((h) => !known.has(h));
+        return candidates.filter((h) => !known.has(h));
+      };
+      const freshOutside = await freshOf(hashes);
+      if (freshOutside.length === 0) return handleBatch(new Set());
+      return withAppLock(appId, async () => {
+        // Re-check: another batch may have stored some of these meanwhile.
+        const fresh = await freshOf(freshOutside);
+        const dropped = new Set<string>();
         if (fresh.length > 0) {
           const existing = await app.prisma.querySignature.count({ where: { appId } });
           const room = Math.max(0, SIGNATURE_QUOTA - existing);
           for (const h of fresh.slice(room)) dropped.add(h);
         }
-      }
+        return handleBatch(dropped);
+      });
+
+      async function handleBatch(dropped: Set<string>) {
       if (dropped.size > 0) {
         payload.items = payload.items.filter((i) => !dropped.has(i.hash));
       }

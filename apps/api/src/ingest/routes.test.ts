@@ -4,6 +4,7 @@ import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import { generateKey } from './keys.js';
 import * as writer from './writer.js';
+import * as lock from './lock.js';
 import { bucketToDate } from './writer.js';
 import { bucketOf } from '@query-analyser/contract/runtime';
 import type { FastifyInstance } from 'fastify';
@@ -207,6 +208,31 @@ describe('POST /v1/ingest', () => {
     expect(rows).toHaveLength(1);
     expect(bucketOf(rows[0]!.bucketHour)).not.toBe(body.bucket);
     expect(Math.abs(rows[0]!.bucketHour.getTime() - before)).toBeLessThan(2 * 3_600_000);
+  });
+
+  it('takes the per-app lock only for a batch that carries new hashes', async () => {
+    const { key } = await seedKey();
+    const spy = vi.spyOn(lock, 'withAppLock');
+    expect((await post(key, payload(2))).statusCode).toBe(202);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect((await post(key, payload(2))).statusCode).toBe(202); // the same two hashes, now known
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-checks known hashes inside the lock: a hash another batch stored meanwhile is not dropped at quota', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 5000);
+    const body = payload(1);
+    const real = lock.withAppLock;
+    vi.spyOn(lock, 'withAppLock').mockImplementation(async (id, fn) => {
+      // A concurrent batch commits this hash between the check outside the lock and the one inside it.
+      await app.prisma.querySignature.create({ data: {
+        appId: a.id, hash: body.items[0]!.hash, signature: 's', model: 'M', operation: 'find', filterShape: [], sortKeys: [], stages: [],
+      } });
+      return real(id, fn);
+    });
+    // fillQuota's 5000 plus the one created above: the quota is already passed, but the hash is known.
+    expect((await post(key, body)).json()).toEqual({ accepted: 1, droppedNew: 0 });
   });
 
   it('still accepts a batch of already-known signatures at quota', async () => {
