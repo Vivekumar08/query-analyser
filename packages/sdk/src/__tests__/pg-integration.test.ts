@@ -257,28 +257,59 @@ describe.skipIf(!available.ok)('pg against a real Postgres (throwaway database)'
 
   it('sampling at 0.1: scaled counts within 20% of the truth, slow statements and errors exact', async () => {
     // The default threshold (100 ms): pg_sleep(0.15) is slow, SELECT $1::int is fast.
-    const { a, bodies } = start({ thresholdMs: undefined, sql: { sampleRate: 0.1 } });
-    const FAST = 2000;
-    for (let i = 0; i < FAST; i += 20) {
-      await Promise.all(Array.from({ length: 20 }, (_, j) => pool.query('SELECT $1::int AS fast', [i + j])));
-    }
-    await Promise.all(Array.from({ length: 5 }, () => pool.query('SELECT pg_sleep(0.15)')));
-    for (let i = 0; i < 3; i++) {
-      await expect(pool.query('SELECT 1 / $1::int AS boom', [0])).rejects.toMatchObject({ code: '22012' });
-    }
-    await a.flush();
+    // Deterministic sampling: a seeded mulberry32 stands in for Math.random, restored in finally.
+    let seed = 0x9e3779b9;
+    const mulberry32 = (): number => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = seed;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const random = vi.spyOn(Math, 'random').mockImplementation(mulberry32);
+    try {
+      const { a, bodies } = start({ thresholdMs: undefined, sql: { sampleRate: 0.1 } });
+      const FAST = 2000;
+      for (let i = 0; i < FAST; i += 20) {
+        await Promise.all(Array.from({ length: 20 }, (_, j) => pool.query('SELECT $1::int AS fast', [i + j])));
+      }
+      await Promise.all(Array.from({ length: 5 }, () => pool.query('SELECT pg_sleep(0.15)')));
+      for (let i = 0; i < 3; i++) {
+        await expect(pool.query('SELECT 1 / $1::int AS boom', [0])).rejects.toMatchObject({ code: '22012' });
+      }
+      await a.flush();
 
-    const items = itemsOf(bodies);
-    const fast = itemMatching(items, /AS fast/i);
-    expect(fast.count).toBeGreaterThanOrEqual(1600);
-    expect(fast.count).toBeLessThanOrEqual(2400);
-    const sleep = itemMatching(items, /pg_sleep/i);
-    expect(sleep.count).toBe(5);
-    expect(sum(sleep.hist)).toBe(5);
-    const boom = itemMatching(items, /boom/i);
-    expect(boom).toMatchObject({ count: 3, errors: 3, errorCodes: [{ code: '22012', count: 3 }] });
-    for (const i of items) expect(i.sampleRate).toBe(0.1);
+      const items = itemsOf(bodies);
+      const fast = itemMatching(items, /AS fast/i);
+      // Not degenerate: some but not all fast statements were sampled (count = sampled x 10).
+      expect(fast.count / 10).toBeGreaterThan(0);
+      expect(fast.count / 10).toBeLessThan(FAST);
+      expect(fast.count).toBeGreaterThanOrEqual(1600);
+      expect(fast.count).toBeLessThanOrEqual(2400);
+      const sleep = itemMatching(items, /pg_sleep/i);
+      expect(sleep.count).toBe(5);
+      expect(sum(sleep.hist)).toBe(5);
+      const boom = itemMatching(items, /boom/i);
+      expect(boom).toMatchObject({ count: 3, errors: 3, errorCodes: [{ code: '22012', count: 3 }] });
+      for (const i of items) expect(i.sampleRate).toBe(0.1);
+    } finally {
+      random.mockRestore();
+    }
   }, 120_000);
+
+  it('a failed drop() can be retried', async () => {
+    const extra = await createThrowawayDb('it');
+    const saved = process.env.QA_PG_URL;
+    try {
+      process.env.QA_PG_URL = 'postgres://unreachable@127.0.0.1:1/none';
+      await expect(extra.drop()).rejects.toThrow(/could not connect/);
+    } finally {
+      if (saved === undefined) delete process.env.QA_PG_URL; else process.env.QA_PG_URL = saved;
+    }
+    await extra.drop();
+    const left = await pool.query('SELECT 1 FROM pg_database WHERE datname = $1', [extra.name]);
+    expect(left.rowCount).toBe(0);
+  });
 
   it('statements under the threshold are counted when thresholdMs is the default 100', async () => {
     const { a, bodies } = start({ thresholdMs: undefined });
