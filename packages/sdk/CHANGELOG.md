@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.4.0
+
+- **PostgreSQL capture** for `pg` 8 (`>=8.0 <9`, tested 8.0.3 to 8.23.1) and
+  Prisma 5.22 to 7 (tested 5.22.0, 6.0.1, 6.19.3 and 7.10.1), with exactly one
+  event per executed SQL statement. `pg` and Prisma 7 need nothing beyond
+  `init()`; Prisma 5.22 and 6.x are captured through `@prisma/adapter-pg`, or
+  on the engine path only when the app already enables Prisma tracing itself.
+  The SDK never changes the SQL your database receives. A bundled `pg` the SDK
+  cannot resolve: `init({ pg })` or `instrument(pool)`. See the README for the
+  setup and the known limitations.
+- **New optional peers:** `pg` (`>=8.0 <9`) and `@prisma/client`
+  (`>=5.22 <8`). Mongo-only apps install nothing new. There are still no
+  runtime dependencies.
+- **SQL fingerprints with values removed:** every literal, `$n` parameter,
+  comment and dollar-quoted body becomes `?` or is dropped before anything is
+  buffered. SQL items carry no sample. Parameter values, results, error
+  messages and connection strings never leave the process.
+- **Every SQL statement is counted**, not only slow ones: errors (with their
+  top SQLSTATE codes), P50/P99 and a fine latency histogram. `thresholdMs`
+  still defines "slow".
+- **`sql.sampleRate`** (default `1`) times only a fraction of fast, successful
+  statements; slow ones and failures are never sampled. The dashboard labels
+  such figures "estimated (sampled at N%)". **`sql.maskIdentifiers`** replaces
+  table, column, schema and database names with keyed hashes; it is not
+  encryption, and turning it on starts new history.
+- **The API's quota is gentler** (any SDK version): at the 5,000-signature
+  quota it still stores every item whose shape it already knows, drops only
+  new shapes, and answers `202 { accepted, droppedNew }` instead of 429. You
+  should see far fewer 429s.
+- **Mongo is unchanged from 0.3:** the same payloads, key order and hashes, so
+  Mongo history continues. Mongo stays slow-only, and its counts are never
+  added to SQL counts.
+- **Deploy order:** deploy the API and web before publishing or upgrading to
+  0.4.0. Older APIs ignore the new SQL keys (`orm`, `database`, `sql`,
+  `errors`, `errorCodes`, `histFine`, `sampleRate`).
+- Prisma 7: the SDK's own tracing helper always reports itself disabled, so it
+  never adds headers to Prisma Accelerate requests (Accelerate statements are
+  not visible) and Prisma never adds trace context because of it.
+
+### Cost of PostgreSQL capture
+
+Within measurement noise on the machine we measured, roughly 0 to 1.5 µs per
+`pg` query. Measured on an Apple M4 with Node 26.7.0, median of 5 runs, µs per
+operation, no statement crossing the threshold. Across runs the added cost
+swung between -5% and +4%, so the table below shows noise, not a speed-up:
+
+| stack | SDK off (µs/op) | SDK, sampleRate 1 (µs/op) | SDK, sampleRate 0.1 (µs/op) |
+|---|---|---|---|
+| pg 8.23 `pool.query` by id | 39.2 | 37.1 | 35.9 |
+| Prisma 7.10 `findUnique` | 72.9 | 71.6 | 69.2 |
+| Prisma 6.19 `findUnique` | 123.5 | 123.2 | 120.7 |
+| Prisma 5.22 `findUnique` | 121.2 | 118.6 | 117.7 |
+
 ## 0.3.0
 
 - Capture moved from Mongoose middleware to the driver's command monitoring. It
