@@ -87,6 +87,7 @@ function query(prisma: PrismaClient, appId: string, w: Window, f: Filter): Promi
       ), hf AS (
         SELECT source, ARRAY_AGG(v ORDER BY idx) AS "histFine" FROM (
           SELECT source, idx, SUM(u.h)::bigint AS v FROM r, unnest(r."histFine") WITH ORDINALITY AS u(h, idx)
+          -- Defensive: the table CHECK allows only 0 or 14 entries, but a stray length would misalign the buckets.
           WHERE cardinality(r."histFine") = 14 GROUP BY source, idx
         ) t GROUP BY source
       )
@@ -111,6 +112,7 @@ function query(prisma: PrismaClient, appId: string, w: Window, f: Filter): Promi
       ), hf AS (
         SELECT source, ARRAY_AGG(v ORDER BY idx) AS "histFine" FROM (
           SELECT source, idx, SUM(u.h)::bigint AS v FROM r, unnest(r."histFine") WITH ORDINALITY AS u(h, idx)
+          -- Defensive: the table CHECK allows only 0 or 14 entries, but a stray length would misalign the buckets.
           WHERE cardinality(r."histFine") = 14 GROUP BY source, idx
         ) t GROUP BY source
       )
