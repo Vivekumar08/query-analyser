@@ -101,6 +101,7 @@
 11. **Masking** (`sql.maskIdentifiers`):
     - It masks quoted and unquoted identifiers, Prisma's model, the table and the `database` name, each as `t_` plus the first 8 hex characters of the sha256 of the name. An unquoted name is lower-cased first.
     - Kept: keywords, the `KNOWN_FUNCTIONS` list, and type names right after `::`.
+    - **Changed during implementation (Task 2 fix, 2026-11-02):** masking is HMAC-SHA256 keyed by `sha256('qa-mask:' + apiKey)`, written as `t_` plus 16 hex characters, not a plain sha256 with 8 hex characters.
 12. **Errors:**
     - A failed statement counts in `errors`, whatever its SQLSTATE. The code is recorded when it matches `/^[0-9A-Z]{5}$/`.
     - Engine spans carry no SQLSTATE, so on the delegated engine path failures are not counted as errors. This is documented.

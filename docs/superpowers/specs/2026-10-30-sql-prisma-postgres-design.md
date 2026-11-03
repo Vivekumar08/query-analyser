@@ -206,6 +206,7 @@ The core fingerprints the SQL with a hand-written Postgres lexer and folds the s
   - every identifier, table and column, becomes `t_` plus the first 8 hex characters of its sha256;
   - Prisma's model name is masked the same way;
   - turning the option on starts new hashes. The README says plainly that this hides names and is not encryption.
+  - **Changed during implementation (Task 2 fix, 2026-11-02):** masking is HMAC-SHA256 keyed by `sha256('qa-mask:' + apiKey)`, written as `t_` plus 16 hex characters, not a plain sha256 with 8 hex characters.
 - **Cost:** an LRU from raw SQL text to fingerprint result (2,000 entries, texts at most 16 KiB; builder's call). Prisma and parameterised `pg` code repeat the same text, so the hot path is one `Map` lookup.
 
 ## The event schema (wire)

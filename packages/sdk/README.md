@@ -144,6 +144,11 @@ and cast types stay readable. This hides names; it is **not encryption**.
 Turning it on (or rotating the API key while it is on) changes every
 fingerprint, so those queries start new history.
 
+Masking hides names from anyone reading the dashboard or the database. It is
+not a secret from the service operator: the operator receives your API key
+with every batch, so it could derive the masking key and reverse common names
+by guessing them.
+
 ### Known limitations
 
 - A Prisma upgrade, including a 6.x minor, can change the SQL Prisma generates
@@ -319,7 +324,7 @@ require('@vivekumar08/query-analyser').init({
   [changelog](./CHANGELOG.md).
 - For `pg` and Prisma the SDK wraps `pg`'s `query()` and times it. On an Apple
   M4 with a local Postgres we measured about 4 µs per `pg` query and about
-  2–3 µs per Prisma call; see the [changelog](./CHANGELOG.md).
+  1–2 µs per Prisma call; see the [changelog](./CHANGELOG.md).
 - Known limitation: an app that loads both the CommonJS and ESM copies of the SDK
   and calls `init()` in both can lose zero-setup capture for clients that connect
   later. Call `init()` from one module system.
