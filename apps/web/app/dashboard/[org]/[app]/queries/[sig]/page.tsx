@@ -4,19 +4,16 @@ import { ArrowLeft } from 'lucide-react';
 import { getQuery, getSampleKey, getSeries } from '@/src/dashboard-api';
 import { getShellContext } from '@/src/shell-context';
 import { parseRange, rangeToParams, rangeToWindow } from '@/src/range';
-import { formatMs } from '@/src/format';
 import { histogramData, trendData } from '@/src/detail-view';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { PageHeader } from '@/components/dashboard/PageHeader';
 import { RangeControl } from '@/components/dashboard/RangeControl';
-import { Percentile } from '@/components/dashboard/Percentile';
-import { StatCard } from '@/components/dashboard/StatCard';
+import { AllTimeStats } from '@/components/dashboard/AllTimeStats';
 import { HistogramChart } from '@/components/dashboard/HistogramChart';
 import { TrendChart } from '@/components/dashboard/TrendChart';
 import { AdviceCard } from '@/components/dashboard/AdviceCard';
 import { CopyButton } from '@/components/dashboard/CopyButton';
 import { CompassQuery } from '@/components/dashboard/CompassQuery';
-import { CountUp } from '@/components/dashboard/CountUp';
 import { FadeIn } from '@/components/dashboard/FadeIn';
 
 const COPY_CLASS = 'rounded-md border px-3 py-1 text-xs text-muted-foreground hover:bg-muted';
@@ -83,12 +80,7 @@ export default async function QueryDetailPage({
 
         <section aria-label="All-time stats" className="flex flex-col gap-2">
           <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">All time</p>
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <StatCard label="Calls"><CountUp value={d.count} kind="count" /></StatCard>
-            <StatCard label="Time wasted">{formatMs(d.totalMs)}</StatCard>
-            <StatCard label="p95" hint={<Percentile label="p99" value={d.p99} />}><Percentile label="p95" showLabel={false} value={d.p95} /></StatCard>
-            <StatCard label="Max"><CountUp value={d.maxMs} kind="ms" /></StatCard>
-          </div>
+          <AllTimeStats d={d} />
         </section>
 
         <div className="grid gap-4 lg:grid-cols-2">

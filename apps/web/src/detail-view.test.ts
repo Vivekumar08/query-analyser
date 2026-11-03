@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { createIndexCall, histogramData, trendData, trendValueText } from './detail-view';
 
+describe('trendData with a null p95', () => {
+  it('a populated bucket with no p95 plots as a gap', () => {
+    const d = trendData([{ at: '2026-10-18T09:00:00.000Z', count: 4, totalMs: '400', maxMs: 200, avgMs: 100, p95: null }], 'hourly');
+    expect(d[0]).toMatchObject({ calls: 4, p95: null, p95Basis: null });
+  });
+});
+
 describe('createIndexCall', () => {
   it('keeps field order and direction', () =>
     expect(createIndexCall('Order', [{ field: 'email', dir: 1 }, { field: 'total', dir: -1 }]))

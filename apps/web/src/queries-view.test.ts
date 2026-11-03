@@ -27,8 +27,10 @@ describe('SQL labels', () => {
       base({}),
     ] as never);
     expect(sql).toMatchObject({ source: 'postgresql', sourceLabel: 'PostgreSQL', ormLabel: 'Prisma', errors: 2, sampledLabel: 'estimated (sampled at 10%)' });
-    expect(mongo).toMatchObject({ source: 'mongodb', sourceLabel: 'MongoDB', ormLabel: 'Mongoose / driver', errors: 0, sampledLabel: null });
+    expect(mongo).toMatchObject({ source: 'mongodb', sourceLabel: 'MongoDB', ormLabel: 'Mongoose / driver', errors: null, sampledLabel: null });
   });
+  it('a SQL row with no errors keeps a real 0', () =>
+    expect(toRowsView([base({ source: 'postgresql', errors: 0 })] as never)[0]!.errors).toBe(0));
   it('passes null SQL percentiles through', () =>
     expect(toRowsView([base({ source: 'postgresql', p95: null })] as never)[0]!.p95).toBeNull());
 });

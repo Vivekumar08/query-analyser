@@ -18,7 +18,7 @@ export function Percentile({
   const prefix = showLabel ? `${label} ` : '';
   if (!value) {
     return (
-      <span className="tabular-nums" title="Not available: this query's timings are not recorded finely enough to estimate a percentile">
+      <span className="tabular-nums" aria-label="Not available" title="Not available: this query's timings are not recorded finely enough to estimate a percentile">
         {prefix}—
       </span>
     );

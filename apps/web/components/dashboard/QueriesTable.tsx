@@ -40,7 +40,9 @@ export function QueriesTable({ base, search, rows }: { base: string; search: str
                 {formatCount(r.count)}
                 {r.sampledLabel && <span className="block text-xs font-normal text-muted-foreground">{r.sampledLabel}</span>}
               </TableCell>
-              <TableCell className="text-right tabular-nums">{formatCount(r.errors)}</TableCell>
+              <TableCell className="text-right tabular-nums">{r.errors === null
+                  ? <span title="Errors are not tracked for MongoDB" aria-label="Errors are not tracked for MongoDB">—</span>
+                  : formatCount(r.errors)}</TableCell>
               <TableCell>
                 <div className="flex items-center gap-2">
                   <span className="w-14 tabular-nums">{r.wasted}</span>

@@ -9,7 +9,7 @@ export interface RowView {
   hash: string; title: string; signature: string; count: number;
   wasted: string; wastedShare: number; avg: string;
   p95: PercentileResult | null; max: string;
-  source: string; sourceLabel: string; ormLabel: string; errors: number; sampledLabel: string | null;
+  source: string; sourceLabel: string; ormLabel: string; errors: number | null; sampledLabel: string | null;
 }
 
 export function toRowsView(rows: QueryRow[]): RowView[] {
@@ -28,7 +28,8 @@ export function toRowsView(rows: QueryRow[]): RowView[] {
     source: r.source ?? 'mongodb',
     sourceLabel: sourceLabel(r.source),
     ormLabel: ormLabel(r.source, r.orm),
-    errors: r.errors ?? 0,
+    // The SDK never tracks Mongo errors: null, not a false 0.
+    errors: (r.source ?? 'mongodb') === 'mongodb' ? null : (r.errors ?? 0),
     sampledLabel: sampledLabel(r.sampleRate),
   }));
 }
