@@ -143,3 +143,35 @@ export interface QueryListResponse {
   to: string;
   items: QueryRow[];
 }
+
+/**
+ * One source's figures in GET /v1/apps/:id/summary. `counts` says what `count`
+ * counts: MongoDB records only slow queries, SQL sources every statement, so
+ * sources are shown side by side and never added together. `totalMs` is a BigInt
+ * on the API, hence a string here.
+ */
+export interface SourceSummary {
+  source: string;
+  counts: 'all-statements' | 'slow-only';
+  count: number;
+  totalMs: string;
+  avgMs: number;
+  maxMs: number;
+  p50: PercentileResult | null;
+  p95: PercentileResult | null;
+  p99: PercentileResult | null;
+  slowCount: number;
+  errors: number;
+  sampled: boolean;
+  sampleRate: number | null;
+}
+
+/** GET /v1/apps/:id/summary. `droppedNew` sums dropped shape records per batch (repeats add), not distinct shapes. */
+export interface SummaryResponse {
+  grain: 'hourly' | 'daily';
+  from: string;
+  to: string;
+  thresholdMs: number | null;
+  droppedNew: number;
+  sources: SourceSummary[];
+}

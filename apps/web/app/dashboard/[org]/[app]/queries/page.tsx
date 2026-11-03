@@ -1,8 +1,8 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { listQueries } from '@/src/dashboard-api';
+import { getSummary, listQueries } from '@/src/dashboard-api';
 import { getShellContext } from '@/src/shell-context';
-import { filtersToApiQuery, filtersToSearch, optionsApiQuery, parseFilters } from '@/src/filters';
+import { filtersToApiQuery, filtersToSearch, optionsApiQuery, parseFilters, summaryApiQuery } from '@/src/filters';
 import { clearFiltersHref, emptyKind, listOutcome, toRowsView } from '@/src/queries-view';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -11,6 +11,7 @@ import { RangeControl } from '@/components/dashboard/RangeControl';
 import { QueryFiltersBar } from '@/components/dashboard/QueryFilters';
 import { QueriesTable } from '@/components/dashboard/QueriesTable';
 import { QueriesEmpty } from '@/components/dashboard/EmptyState';
+import { SummaryStrip } from '@/components/dashboard/SummaryStrip';
 import { Pagination } from '@/components/dashboard/Pagination';
 import { FadeIn } from '@/components/dashboard/FadeIn';
 
@@ -34,7 +35,12 @@ export default async function QueriesPage({
   const search = filtersToSearch(filters);
 
   const token = ctx.session.accessToken;
-  const res = await listQueries(token, ctx.app.id, filtersToApiQuery(filters, undefined, retentionDays));
+  // The summary is fetched in parallel; a failed one hides the strip and never fails the page.
+  const [res, summaryRes] = await Promise.all([
+    listQueries(token, ctx.app.id, filtersToApiQuery(filters, undefined, retentionDays)),
+    getSummary(token, ctx.app.id, summaryApiQuery(filters, undefined, retentionDays)).catch(() => null),
+  ]);
+  const summary = summaryRes && summaryRes.ok && summaryRes.data.sources.length + summaryRes.data.droppedNew > 0 ? summaryRes.data : null;
   if (!res.ok && res.status === 401) redirect(`/api/auth/refresh?next=${encodeURIComponent(`${base}/queries${search ? `?${search}` : ''}`)}`);
   const outcome = listOutcome(res);
   if (outcome === 'error') throw new Error('Could not load queries');
@@ -69,6 +75,7 @@ export default async function QueriesPage({
       <PageHeader title="Queries" crumbs={[{ label: org }, { label: 'Queries' }]} actions={<RangeControl value={filters.range} retentionDays={retentionDays} />} />
       <FadeIn>
       <div className="flex flex-col gap-4 p-6">
+        {summary && <SummaryStrip summary={summary} />}
         <QueryFiltersBar models={models} ops={ops} sources={sources} orms={orms} value={filters} />
         {(!sortExact || sortNote) && (
           <p className="text-xs text-muted-foreground">{sortNote ?? 'Ordering by this column is approximate.'}</p>

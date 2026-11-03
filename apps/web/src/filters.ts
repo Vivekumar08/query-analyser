@@ -74,3 +74,12 @@ export function optionsApiQuery(range: RangeState, now: Date = new Date(), reten
   const { from, to } = rangeToWindow(range, now, retentionDays);
   return new URLSearchParams({ from, to, sort: 'wasted', limit: String(MAX_LIMIT) }).toString();
 }
+
+/** The summary route takes the window and the source/orm filters only (no model, op, sort or paging). */
+export function summaryApiQuery(f: QueryFilters, now: Date = new Date(), retentionDays = Infinity): string {
+  const { from, to } = rangeToWindow(f.range, now, retentionDays);
+  const s = new URLSearchParams({ from, to });
+  if (f.source) s.set('source', f.source);
+  if (f.orm) s.set('orm', f.orm);
+  return s.toString();
+}
