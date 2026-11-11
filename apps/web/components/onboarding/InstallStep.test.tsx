@@ -21,6 +21,14 @@ describe('InstallStep', () => {
     expect(screen.getByText(/shown once/i)).toBeTruthy();
     expect(screen.getByText(/qa_secret/)).toBeTruthy();
   });
+  it('shows the mongoose and the driver snippet, each copyable', () => {
+    render(<InstallStep appId="a1" appName="svc" ingestKey="qa_secret" doneHref="/x" />);
+    expect(screen.getByText('Mongoose')).toBeTruthy();
+    expect(screen.getByText('MongoDB driver')).toBeTruthy();
+    expect(screen.getByText(/mongoClient: client/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /copy driver snippet/i })).toBeTruthy();
+    expect(screen.getByText(/qa_secret/)).toBeTruthy();
+  });
   it('without a key in memory shows "already shown" and no key', () => {
     render(<InstallStep appId="a1" appName="svc" ingestKey={null} doneHref="/x" />);
     expect(screen.getByText(/already shown/i)).toBeTruthy();

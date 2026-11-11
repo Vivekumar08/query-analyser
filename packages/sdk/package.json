@@ -1,6 +1,6 @@
 {
   "name": "@vivekumar08/query-analyser",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Find your slow MongoDB queries. One line of setup.",
   "license": "MIT",
   "type": "module",
@@ -14,7 +14,7 @@
       "require": "./dist/index.cjs"
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"],
   "engines": { "node": ">=20" },
   "keywords": ["mongodb", "mongoose", "slow-query", "performance", "apm", "profiler"],
   "publishConfig": { "access": "public" },
@@ -25,12 +25,14 @@
     "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test"
   },
   "dependencies": {},
-  "peerDependencies": { "mongoose": ">=8 <9" },
+  "peerDependencies": { "mongoose": ">=5.13 <10", "mongodb": ">=4 <8" },
+  "peerDependenciesMeta": { "mongoose": { "optional": true }, "mongodb": { "optional": true } },
   "devDependencies": {
     "@query-analyser/contract": "workspace:*",
     "@types/node": "^22.0.0",
-    "mongoose": "^8.9.0",
+    "mongodb": "^6.20.0",
     "mongodb-memory-server": "^10.1.2",
+    "mongoose": "^8.9.0",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

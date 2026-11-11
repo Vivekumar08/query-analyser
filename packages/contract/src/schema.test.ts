@@ -95,3 +95,26 @@ describe('ingest item encryptedSample', () => {
     expect(() => ingestPayloadSchema.parse(withSample({ ...env, v: 2 }))).toThrow();
   });
 });
+
+describe('ingest item source and collection', () => {
+  it('accepts a 0.2 item with neither field and leaves both absent', () => {
+    const parsed = ingestPayloadSchema.parse(payload);
+    expect(parsed.items[0]).not.toHaveProperty('source');
+    expect(parsed.items[0]).not.toHaveProperty('collection');
+  });
+  it('accepts a 0.3 item with both', () =>
+    expect(
+      ingestPayloadSchema.parse({ ...payload, items: [{ ...item, source: 'mongodb', collection: 'orders' }] }).items[0],
+    ).toMatchObject({ source: 'mongodb', collection: 'orders' }));
+  it('accepts a source it does not know yet', () =>
+    expect(ingestPayloadSchema.safeParse({ ...payload, items: [{ ...item, source: 'prisma' }] }).success).toBe(true));
+  it.each([{ source: '' }, { collection: '' }, { source: 'x'.repeat(41) }, { collection: 'c'.repeat(256) }])(
+    'rejects %o',
+    (extra) =>
+      expect(ingestPayloadSchema.safeParse({ ...payload, items: [{ ...item, ...extra }] }).success).toBe(false),
+  );
+  it('strips unknown item keys rather than rejecting them', () =>
+    expect(ingestPayloadSchema.parse({ ...payload, items: [{ ...item, future: 1 }] }).items[0]).not.toHaveProperty(
+      'future',
+    ));
+});

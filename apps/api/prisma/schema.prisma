@@ -161,6 +161,10 @@ model QuerySignature {
   redactedSample  Json?
   /// End-to-end encrypted real-value sample (`EncryptedSample`); opaque here.
   encryptedSample Json?
+  /// Where the query came from (`mongodb` for SDK 0.3); null reads as mongodb.
+  source          String?
+  /// The real collection name, null from SDKs before 0.3.
+  collection      String?
   firstSeen       DateTime           @default(now()) @db.Timestamptz(3)
   lastSeen        DateTime           @default(now()) @db.Timestamptz(3)
   app             App                @relation(fields: [appId], references: [id], onDelete: Cascade)

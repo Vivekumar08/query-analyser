@@ -1,0 +1,821 @@
+{
+  "sdkVersion": "0.2.0",
+  "mongoose": "8.24.4",
+  "cases": {
+    "find-eq": {
+      "signature": "GoldenUser.find(email:eq)",
+      "hash": "fe96f25f018385a2",
+      "model": "GoldenUser",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        }
+      }
+    },
+    "find-range-sort": {
+      "signature": "GoldenUser.find(age:range)[age:-1]",
+      "hash": "71cf0158b138ad10",
+      "model": "GoldenUser",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "range"
+        }
+      ],
+      "sortKeys": [
+        {
+          "key": "age",
+          "dir": -1
+        }
+      ],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": {
+            "$gte": "<number>"
+          }
+        },
+        "sort": {
+          "age": "<number>"
+        }
+      }
+    },
+    "find-in": {
+      "signature": "GoldenUser.find(email:in)",
+      "hash": "cfd6b3a46dea4927",
+      "model": "GoldenUser",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "in"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": {
+            "$in": "<array[string]>"
+          }
+        }
+      }
+    },
+    "find-or": {
+      "signature": "GoldenUser.find(email:eq,name:eq)",
+      "hash": "2c7d7bbd9395343f",
+      "model": "GoldenUser",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        },
+        {
+          "key": "name",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "$or": [
+            {
+              "email": "<string>"
+            },
+            {
+              "name": "<string>"
+            }
+          ]
+        }
+      }
+    },
+    "find-regex": {
+      "signature": "GoldenUser.find(name:regex)",
+      "hash": "a98747f2cbf7ec60",
+      "model": "GoldenUser",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "name",
+          "op": "regex"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "name": "<RegExp>"
+        }
+      }
+    },
+    "find-exists-ne": {
+      "signature": "GoldenUser.find(age:ne,name:exists)",
+      "hash": "55c3deab1f3375a6",
+      "model": "GoldenUser",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "ne"
+        },
+        {
+          "key": "name",
+          "op": "exists"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "name": {
+            "$exists": "<boolean>"
+          },
+          "age": {
+            "$ne": "<number>"
+          }
+        }
+      }
+    },
+    "find-nested-path": {
+      "signature": "GoldenUser.find(address.city:eq)",
+      "hash": "cb506988613e4529",
+      "model": "GoldenUser",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "address.city",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "address.city": "<string>"
+        }
+      }
+    },
+    "find-string-sort": {
+      "signature": "GoldenUser.find(age:eq)[createdAt:-1,name:1]",
+      "hash": "2afc3853559997c8",
+      "model": "GoldenUser",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [
+        {
+          "key": "createdAt",
+          "dir": -1
+        },
+        {
+          "key": "name",
+          "dir": 1
+        }
+      ],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": "<number>"
+        },
+        "sort": {
+          "createdAt": "<number>",
+          "name": "<number>"
+        }
+      }
+    },
+    "find-limit-1": {
+      "signature": "GoldenUser.find(age:eq)",
+      "hash": "b52cf44e8f40bd52",
+      "model": "GoldenUser",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": "<number>"
+        }
+      }
+    },
+    "find-explicit-collection": {
+      "signature": "GoldenThing.find(a:eq)",
+      "hash": "f00ce8dd9e7ee743",
+      "model": "GoldenThing",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "a",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "a": "<number>"
+        }
+      }
+    },
+    "findOne": {
+      "signature": "GoldenUser.findOne(email:eq)",
+      "hash": "ce3de6d7224c3fa9",
+      "model": "GoldenUser",
+      "operation": "findOne",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        }
+      }
+    },
+    "findOne-sort": {
+      "signature": "GoldenUser.findOne(age:range)[age:1]",
+      "hash": "08a505cd7acecad1",
+      "model": "GoldenUser",
+      "operation": "findOne",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "range"
+        }
+      ],
+      "sortKeys": [
+        {
+          "key": "age",
+          "dir": 1
+        }
+      ],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": {
+            "$lt": "<number>"
+          }
+        },
+        "sort": {
+          "age": "<number>"
+        }
+      }
+    },
+    "findById": {
+      "signature": "GoldenUser.findOne(_id:eq)",
+      "hash": "7b3a6e3baa5e4815",
+      "model": "GoldenUser",
+      "operation": "findOne",
+      "filterShape": [
+        {
+          "key": "_id",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "_id": "<ObjectId>"
+        }
+      }
+    },
+    "exists": {
+      "signature": "GoldenUser.findOne(email:eq)",
+      "hash": "ce3de6d7224c3fa9",
+      "model": "GoldenUser",
+      "operation": "findOne",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        }
+      }
+    },
+    "countDocuments": {
+      "signature": "GoldenUser.countDocuments(age:eq)",
+      "hash": "928700bdd82b6dd6",
+      "model": "GoldenUser",
+      "operation": "countDocuments",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": "<number>"
+        }
+      }
+    },
+    "countDocuments-skip-limit": {
+      "signature": "GoldenUser.countDocuments(age:eq)",
+      "hash": "928700bdd82b6dd6",
+      "model": "GoldenUser",
+      "operation": "countDocuments",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": "<number>"
+        }
+      }
+    },
+    "distinct": {
+      "signature": "GoldenUser.distinct(age:eq)",
+      "hash": "e72bd42c9ab47f27",
+      "model": "GoldenUser",
+      "operation": "distinct",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": "<number>"
+        }
+      }
+    },
+    "updateOne-set": {
+      "signature": "GoldenUser.updateOne(email:eq)",
+      "hash": "f4cfcbba6f1b88a0",
+      "model": "GoldenUser",
+      "operation": "updateOne",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        },
+        "update": {
+          "$set": {
+            "age": "<number>"
+          }
+        }
+      }
+    },
+    "updateMany-inc": {
+      "signature": "GoldenUser.updateMany(age:eq)",
+      "hash": "d2c65a7d59cedc91",
+      "model": "GoldenUser",
+      "operation": "updateMany",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": "<number>"
+        },
+        "update": {
+          "$inc": {
+            "age": "<number>"
+          }
+        }
+      }
+    },
+    "updateOne-no-dollar": {
+      "signature": "GoldenUser.updateOne(email:eq)",
+      "hash": "f4cfcbba6f1b88a0",
+      "model": "GoldenUser",
+      "operation": "updateOne",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        },
+        "update": {
+          "$set": {
+            "age": "<number>"
+          }
+        }
+      }
+    },
+    "updateOne-timestamps": {
+      "signature": "GoldenStamped.updateOne(status:eq)",
+      "hash": "0697dd404689adc3",
+      "model": "GoldenStamped",
+      "operation": "updateOne",
+      "filterShape": [
+        {
+          "key": "status",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "status": "<string>"
+        },
+        "update": {
+          "$setOnInsert": {
+            "createdAt": "<Date>"
+          },
+          "$set": {
+            "status": "<string>",
+            "updatedAt": "<Date>"
+          }
+        }
+      }
+    },
+    "replaceOne": {
+      "signature": "GoldenUser.replaceOne(email:eq)",
+      "hash": "34dd4709cedbab3d",
+      "model": "GoldenUser",
+      "operation": "replaceOne",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        },
+        "update": {
+          "email": "<string>",
+          "age": "<number>",
+          "tags": "<array[]>",
+          "__v": "<number>"
+        }
+      }
+    },
+    "deleteOne": {
+      "signature": "GoldenUser.deleteOne(email:eq)",
+      "hash": "132b9a5c7fc7ce1c",
+      "model": "GoldenUser",
+      "operation": "deleteOne",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        }
+      }
+    },
+    "deleteMany": {
+      "signature": "GoldenUser.deleteMany(age:range)",
+      "hash": "2737a70a019a352e",
+      "model": "GoldenUser",
+      "operation": "deleteMany",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "range"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": {
+            "$gt": "<number>"
+          }
+        }
+      }
+    },
+    "doc-deleteOne": {
+      "signature": "GoldenUser.deleteOne(_id:eq)",
+      "hash": "f6a9a60ac6ab9879",
+      "model": "GoldenUser",
+      "operation": "deleteOne",
+      "filterShape": [
+        {
+          "key": "_id",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "_id": "<ObjectId>"
+        }
+      }
+    },
+    "findOneAndUpdate": {
+      "signature": "GoldenUser.findOneAndUpdate(email:eq)",
+      "hash": "f552b8185b4778ab",
+      "model": "GoldenUser",
+      "operation": "findOneAndUpdate",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        },
+        "update": {
+          "$set": {
+            "age": "<number>"
+          }
+        }
+      }
+    },
+    "findByIdAndUpdate": {
+      "signature": "GoldenUser.findOneAndUpdate(_id:eq)",
+      "hash": "89da61c9bd68a21f",
+      "model": "GoldenUser",
+      "operation": "findOneAndUpdate",
+      "filterShape": [
+        {
+          "key": "_id",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "_id": "<ObjectId>"
+        },
+        "update": {
+          "$inc": {
+            "age": "<number>"
+          }
+        }
+      }
+    },
+    "findOneAndUpdate-sort": {
+      "signature": "GoldenUser.findOneAndUpdate(age:eq)[age:-1]",
+      "hash": "7b39fed7ca3869fd",
+      "model": "GoldenUser",
+      "operation": "findOneAndUpdate",
+      "filterShape": [
+        {
+          "key": "age",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [
+        {
+          "key": "age",
+          "dir": -1
+        }
+      ],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "age": "<number>"
+        },
+        "update": {
+          "$set": {
+            "name": "<string>"
+          }
+        },
+        "sort": {
+          "age": "<number>"
+        }
+      }
+    },
+    "findOneAndDelete": {
+      "signature": "GoldenUser.findOneAndDelete(email:eq)",
+      "hash": "2bcff2fb16f3edf6",
+      "model": "GoldenUser",
+      "operation": "findOneAndDelete",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        }
+      }
+    },
+    "findOneAndReplace": {
+      "signature": "GoldenUser.findOneAndReplace(email:eq)",
+      "hash": "de9648917febd477",
+      "model": "GoldenUser",
+      "operation": "findOneAndReplace",
+      "filterShape": [
+        {
+          "key": "email",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "email": "<string>"
+        },
+        "update": {
+          "email": "<string>",
+          "age": "<number>",
+          "tags": "<array[]>"
+        }
+      }
+    },
+    "aggregate": {
+      "signature": "GoldenUser.aggregate($match,$group)",
+      "hash": "8c0484a911d4412b",
+      "model": "GoldenUser",
+      "operation": "aggregate",
+      "filterShape": [],
+      "sortKeys": [],
+      "stages": [
+        "$match",
+        "$group"
+      ],
+      "sample": {
+        "pipeline": [
+          {
+            "$match": {
+              "age": "<number>"
+            }
+          },
+          {
+            "$group": {
+              "_id": "<string>",
+              "n": {
+                "$sum": "<number>"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "discriminator-find": {
+      "signature": "GoldenDog.find(__t:eq,name:eq)",
+      "hash": "f3d0e921fc6b36d0",
+      "model": "GoldenDog",
+      "operation": "find",
+      "filterShape": [
+        {
+          "key": "__t",
+          "op": "eq"
+        },
+        {
+          "key": "name",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "__t": "<string>",
+          "name": "<string>"
+        }
+      }
+    },
+    "discriminator-findOne": {
+      "signature": "GoldenDog.findOne(__t:eq,name:eq)",
+      "hash": "a84a4f8c94f3814f",
+      "model": "GoldenDog",
+      "operation": "findOne",
+      "filterShape": [
+        {
+          "key": "__t",
+          "op": "eq"
+        },
+        {
+          "key": "name",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "__t": "<string>",
+          "name": "<string>"
+        }
+      }
+    },
+    "discriminator-updateMany": {
+      "signature": "GoldenDog.updateMany(__t:eq,breed:eq)",
+      "hash": "8534f3a88b221232",
+      "model": "GoldenDog",
+      "operation": "updateMany",
+      "filterShape": [
+        {
+          "key": "__t",
+          "op": "eq"
+        },
+        {
+          "key": "breed",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "__t": "<string>",
+          "breed": "<string>"
+        },
+        "update": {
+          "$set": {
+            "name": "<string>"
+          }
+        }
+      }
+    },
+    "discriminator-countDocuments": {
+      "signature": "GoldenDog.countDocuments(__t:eq,name:eq)",
+      "hash": "3b221bd78b789f7e",
+      "model": "GoldenDog",
+      "operation": "countDocuments",
+      "filterShape": [
+        {
+          "key": "__t",
+          "op": "eq"
+        },
+        {
+          "key": "name",
+          "op": "eq"
+        }
+      ],
+      "sortKeys": [],
+      "stages": [],
+      "sample": {
+        "filter": {
+          "__t": "<string>",
+          "name": "<string>"
+        }
+      }
+    }
+  }
+}

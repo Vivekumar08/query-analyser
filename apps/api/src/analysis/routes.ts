@@ -358,6 +358,8 @@ export default async function analysisRoutes(app: FastifyInstance): Promise<void
       signature: signature.signature,
       model: signature.model,
       operation: signature.operation,
+      source: signature.source ?? 'mongodb',
+      collection: signature.collection,
       firstSeen: signature.firstSeen,
       lastSeen: signature.lastSeen,
       count,

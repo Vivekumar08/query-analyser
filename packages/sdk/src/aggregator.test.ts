@@ -181,3 +181,44 @@ describe('Aggregator', () => {
     expect(dropped).toBe(0);
   });
 });
+
+describe('occurrences and collection', () => {
+  it('add returns an occurrence and keeps the collection on the item', () => {
+    const agg = new Aggregator(10);
+    expect(agg.add(sigA, 120, null, undefined, 'orders')).toEqual({ hash: sigA.hash, generation: 0, ms: 120 });
+    agg.add(sigB, 120, null);
+    const [a, b] = agg.swap().items;
+    expect(a!.collection).toBe('orders');
+    expect(b!.collection).toBe('User');
+  });
+  it('extend grows the occurrence: bucket moves, total and max add, count and lastMs stay', () => {
+    const agg = new Aggregator(10);
+    const occ = agg.add(sigA, 120, null)!;
+    expect(agg.extend(occ, 200)).toBe(true);
+    const item = agg.swap().items[0]!;
+    expect(item).toMatchObject({ count: 1, totalMs: 320, maxMs: 320, lastMs: 120 });
+    expect(item.hist).toEqual([0, 0, 1, 0, 0, 0, 0, 0]);
+  });
+  it('extend is a no-op once the window was swapped', () => {
+    const agg = new Aggregator(10);
+    const occ = agg.add(sigA, 120, null)!;
+    expect(agg.generation).toBe(0);
+    agg.swap();
+    expect(agg.generation).toBe(1);
+    expect(agg.extend(occ, 200)).toBe(false);
+    expect(agg.swap().items).toEqual([]);
+  });
+  it('add returns null for a new signature past the cap', () => {
+    const agg = new Aggregator(1);
+    expect(agg.add(sigA, 120, null)).not.toBeNull();
+    expect(agg.add(sigB, 120, null)).toBeNull();
+    expect(agg.add(sigA, 130, null)).not.toBeNull();
+  });
+  it('merge keeps the collection', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 120, null, undefined, 'orders');
+    const { items } = agg.swap();
+    agg.merge(items);
+    expect(agg.swap().items[0]!.collection).toBe('orders');
+  });
+});
