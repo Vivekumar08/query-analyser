@@ -38,6 +38,8 @@ export const ingestItemSchema = z.object({
   lastTs: z.number().int().nonnegative(),
   hist: z.array(z.number().int().nonnegative()).length(HIST_SIZE),
   sample: z.unknown().nullable(),
+  source: z.string().min(1).max(40).optional(),
+  collection: z.string().min(1).max(255).optional(),
   // Sent only by an SDK configured with a `sampleKey`; absent otherwise.
   encryptedSample: encryptedSampleSchema.nullable().optional(),
 });

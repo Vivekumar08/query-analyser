@@ -1,0 +1,397 @@
+import { CAPTURED_COMMANDS, isIgnoredDatabase, mapCommand } from './command-map.js';
+import { shapeOf, type CapturedShape } from './capture.js';
+import type { Aggregator, Occurrence } from './aggregator.js';
+
+/**
+ * Per-client command monitor. Pairs `commandStarted` with
+ * `commandSucceeded` / `commandFailed` by `requestId` (one map per client:
+ * request ids come from a counter per driver copy, shared by its clients),
+ * and ties each `getMore` to the cursor its `find` / `aggregate` opened.
+ *
+ * Never throws into the driver: every listener body is guarded and failures
+ * go to `sink.onError`. Privacy: the start's command reference lives only
+ * until its end arrives or the entry is evicted; of the reply, only
+ * `cursor.id` is read, and nothing of it is kept but its string form in a key.
+ */
+
+export interface MonitorSink {
+  aggregator: Aggregator;
+  thresholdMs: number;
+  onError(e: Error): void;                 // already safe to call
+  isDisabled(): boolean;
+  captureRawSample(): boolean;
+  resolveModel(database: string, collection: string, filter: unknown): string;
+}
+
+export const MAX_IN_FLIGHT = 2_000;
+export const MAX_IN_FLIGHT_AGE_MS = 600_000;
+export const MAX_CURSORS = 2_000;
+export const MAX_CURSOR_IDLE_MS = 600_000;
+
+export const MONITORING_OFF_WARNING =
+  'query-analyser: command monitoring is off for a MongoClient, so if this client was already connected its queries are not captured. Pass `monitorCommands: true` in its connect options, or call init() before connecting.';
+
+/**
+ * Connections checked out (after attach) and checked back in with no command
+ * event seen on the client, before the probe says monitoring is off. More
+ * than one, because driver 7's explicit connect() checks one connection out
+ * and in with no command (a connect-time ping that emits no command event).
+ */
+export const MONITORING_PROBE_CYCLES = 3;
+
+const ATTACHED = Symbol.for('query-analyser.client-attached');
+
+// Clients already warned about monitoring being off: at most one warning per
+// client, whether it comes from watchClient's check or from the probe.
+const warnedClients = new WeakSet<object>();
+
+/** True the first time it is called for a client, false after. */
+export function claimMonitoringWarning(client: object): boolean {
+  if (warnedClients.has(client)) return false;
+  warnedClients.add(client);
+  return true;
+}
+
+/** True when a monitorCommands setter exists on the prototype chain (driver 4+). Never throws. */
+export function hasMonitorSetter(client: object): boolean {
+  try {
+    for (let p: object | null = client; p; p = Object.getPrototypeOf(p) as object | null) {
+      const d = Object.getOwnPropertyDescriptor(p, 'monitorCommands');
+      if (d) return typeof d.set === 'function';
+    }
+  } catch {
+    // a hostile prototype chain: treat as driver 3
+  }
+  return false;
+}
+
+interface InFlight {
+  startedAt: number;
+  commandName: string;
+  database: string;
+  /** Dropped (with the entry) on end or eviction. Undefined for insert and getMore. */
+  command: Record<string, unknown> | undefined;
+  /** insert only: the collection name, instead of the command. */
+  collection?: string;
+  connectionId: unknown;
+  /** getMore only. */
+  cursorKey?: string;
+}
+
+interface OpenCursor {
+  shape: CapturedShape;
+  occurrence: Occurrence | null;
+  lastUsed: number;
+}
+
+/**
+ * Whether this client's commands raise command events at all. Setting
+ * monitorCommands on a client that is already connected has no effect
+ * (spike Q1), so the flag can read 'on' while nothing is emitted. The pool's
+ * CMAP events (public, emitted whatever monitorCommands says) show commands
+ * running: a connection checked out and back in carried a command, which
+ * would have raised commandStarted first. Only counters; off once settled.
+ */
+interface Probe {
+  active: boolean;
+  checkedOut: number;
+  silentCycles: number;
+}
+
+interface ClientState {
+  inFlight: Map<unknown, InFlight>;
+  cursors: Map<string, OpenCursor>;
+  probe: Probe;
+}
+
+interface EventEmitterLike {
+  on(event: string, listener: (event: unknown) => void): unknown;
+  removeListener?(event: string, listener: (event: unknown) => void): unknown;
+}
+
+const states = new WeakMap<object, ClientState>();
+let sink: MonitorSink | null = null;
+
+export function setSink(next: MonitorSink | null): void {
+  sink = next;
+}
+
+export function currentSink(): MonitorSink | null {
+  return sink;
+}
+
+/** A finite d ≥ 0 → Math.round(d), else null. */
+export function toDurationMs(d: unknown): number | null {
+  return typeof d === 'number' && Number.isFinite(d) && d >= 0 ? Math.round(d) : null;
+}
+
+/** Test seam. */
+export function clientStats(client: object): { inFlight: number; cursors: number } | null {
+  const st = states.get(client);
+  return st ? { inFlight: st.inFlight.size, cursors: st.cursors.size } : null;
+}
+
+function report(s: MonitorSink | null, e: unknown): void {
+  try {
+    s?.onError(e instanceof Error ? e : new Error(String(e)));
+  } catch {
+    // onError is meant to be safe; never let it escape either.
+  }
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+function evictOlderThan<V>(map: Map<unknown, V>, cutoff: number, at: (v: V) => number): void {
+  for (const [k, v] of map) {
+    if (at(v) >= cutoff) break;
+    map.delete(k);
+  }
+}
+
+function evictOldest(map: Map<unknown, unknown>, max: number): void {
+  while (map.size >= max) {
+    const first = map.keys().next();
+    if (first.done) return;
+    map.delete(first.value);
+  }
+}
+
+function evictCursors(cursors: Map<string, OpenCursor>, now: number): void {
+  evictOlderThan(cursors as Map<unknown, OpenCursor>, now - MAX_CURSOR_IDLE_MS, (c) => c.lastUsed);
+}
+
+/** Age bounds hold whatever the sink's state, so a start that never ends can't outlive 600 s. */
+function evictStale(state: ClientState, now: number): void {
+  evictOlderThan(state.inFlight, now - MAX_IN_FLIGHT_AGE_MS, (e) => e.startedAt);
+  evictCursors(state.cursors, now);
+}
+
+function onCheckedOut(state: ClientState): void {
+  if (state.probe.active) state.probe.checkedOut++;
+}
+
+function onCheckedIn(client: object, state: ClientState): void {
+  const s = sink;
+  try {
+    const probe = state.probe;
+    // Only a connection checked out since attach counts: one already out
+    // when the listeners went on may have had its commandStarted before them.
+    if (!probe.active || probe.silentCycles >= probe.checkedOut) return;
+    probe.silentCycles++;
+    if (probe.silentCycles < MONITORING_PROBE_CYCLES || !s || s.isDisabled()) return;
+    probe.active = false;
+    if (claimMonitoringWarning(client)) report(s, new Error(MONITORING_OFF_WARNING));
+  } catch (e) {
+    report(s, e);
+  }
+}
+
+function onStarted(state: ClientState, ev: unknown): void {
+  state.probe.active = false;
+  const s = sink;
+  try {
+    const now = Date.now();
+    evictStale(state, now);
+    if (!s || s.isDisabled() || !isRecord(ev)) return;
+
+    const commandName = ev.commandName;
+    const database = ev.databaseName;
+    const command = ev.command;
+    if (typeof commandName !== 'string' || typeof database !== 'string' || !isRecord(command)) return;
+
+    if (commandName === 'getMore') {
+      evictOldest(state.inFlight, MAX_IN_FLIGHT);
+      state.inFlight.set(ev.requestId, {
+        startedAt: now,
+        commandName,
+        database,
+        command: undefined,
+        connectionId: ev.connectionId,
+        cursorKey: `${database}.${String(command.collection)}#${String(command.getMore)}`,
+      });
+      return;
+    }
+
+    if (commandName === 'killCursors') {
+      const ids = command.cursors;
+      if (Array.isArray(ids)) {
+        for (const id of ids) state.cursors.delete(`${database}.${String(command.killCursors)}#${String(id)}`);
+      }
+      return;
+    }
+
+    if (!CAPTURED_COMMANDS.has(commandName)) return;
+    if (commandName !== 'bulkWrite' && isIgnoredDatabase(database)) return;
+
+    evictOldest(state.inFlight, MAX_IN_FLIGHT);
+    const entry: InFlight =
+      commandName === 'insert'
+        ? { startedAt: now, commandName, database, command: undefined, connectionId: ev.connectionId,
+            collection: typeof command.insert === 'string' ? command.insert : '' }
+        : { startedAt: now, commandName, database, command, connectionId: ev.connectionId };
+    state.inFlight.set(ev.requestId, entry);
+  } catch (e) {
+    report(s, e);
+  }
+}
+
+function onEnded(state: ClientState, ev: unknown, failed: boolean): void {
+  const s = sink;
+  try {
+    evictStale(state, Date.now());
+    if (!isRecord(ev)) return;
+    // Take and drop the entry first, so the command reference never outlives its end.
+    const entry = state.inFlight.get(ev.requestId);
+    if (!entry) return;
+    state.inFlight.delete(ev.requestId);
+
+    if (!s || s.isDisabled()) return;
+    if (
+      entry.connectionId !== undefined &&
+      ev.connectionId !== undefined &&
+      String(entry.connectionId) !== String(ev.connectionId)
+    ) {
+      return;
+    }
+    const d = toDurationMs(ev.duration);
+    if (d === null) return;
+    const replyCursorId = failed ? 'undefined' : cursorIdOf(ev.reply);
+
+    if (entry.commandName === 'getMore') {
+      onGetMoreEnded(state, s, entry.cursorKey ?? '', d, failed, replyCursorId);
+      return;
+    }
+
+    const command = entry.commandName === 'insert' ? { insert: entry.collection } : entry.command ?? {};
+    // Only collection operations are captured: a database-level command
+    // (`aggregate: 1`, e.g. db.watch() or $documents) maps to collection ''
+    // and is not attributable to one, and an item with an empty model or
+    // collection would fail the ingest schema and drop the whole batch.
+    const statements = mapCommand(entry.commandName, entry.database, command).filter((st) => st.collection !== '');
+    entry.command = undefined;
+
+    const counted = d >= s.thresholdMs;
+    const live =
+      !failed &&
+      (entry.commandName === 'find' || entry.commandName === 'aggregate') &&
+      statements.length === 1 &&
+      replyCursorId !== '0' &&
+      replyCursorId !== 'undefined';
+    if (!counted && !live) return;
+
+    const seen = new Set<string>();
+    let lastShape: CapturedShape | null = null;
+    let lastOcc: Occurrence | null = null;
+    for (const st of statements) {
+      const shape = shapeOf(st, s.resolveModel(st.database, st.collection, st.modelFilter ?? st.filter));
+      if (seen.has(shape.sig.hash)) continue;
+      seen.add(shape.sig.hash);
+      lastShape = shape;
+      lastOcc = null;
+      if (counted) {
+        const raw = s.captureRawSample() ? st.sampleInput ?? undefined : undefined;
+        lastOcc = s.aggregator.add(shape.sig, d, shape.sample, raw, shape.collection);
+      }
+    }
+
+    if (live && lastShape) {
+      const st = statements[0]!;
+      const now = Date.now();
+      evictCursors(state.cursors, now);
+      evictOldest(state.cursors as Map<unknown, unknown>, MAX_CURSORS);
+      state.cursors.set(`${st.database}.${st.collection}#${replyCursorId}`, {
+        shape: lastShape,
+        occurrence: lastOcc,
+        lastUsed: now,
+      });
+    }
+  } catch (e) {
+    report(s, e);
+  }
+}
+
+function cursorIdOf(reply: unknown): string {
+  if (!isRecord(reply)) return 'undefined';
+  const cursor = reply.cursor;
+  return isRecord(cursor) ? String(cursor.id) : 'undefined';
+}
+
+function onGetMoreEnded(
+  state: ClientState,
+  s: MonitorSink,
+  key: string,
+  d: number,
+  failed: boolean,
+  replyCursorId: string,
+): void {
+  const cursor = state.cursors.get(key);
+  if (!cursor) return;
+  // Touch: re-insert so the map's order stays least-recently-used first.
+  state.cursors.delete(key);
+  cursor.lastUsed = Date.now();
+  const ends = failed || replyCursorId === '0';
+  if (!ends) state.cursors.set(key, cursor);
+
+  if (cursor.occurrence && s.aggregator.extend(cursor.occurrence, d)) return;
+  if (d >= s.thresholdMs) {
+    const { shape } = cursor;
+    cursor.occurrence = s.aggregator.add(shape.sig, d, shape.sample, undefined, shape.collection);
+  }
+}
+
+/**
+ * Adds the command listeners, and the two CMAP listeners of the monitoring
+ * probe, once per client (guard: Symbol.for('query-analyser.client-attached')).
+ * True when added now. The probe runs only for driver 4+ (a monitorCommands
+ * setter); on driver 3 the SDK does not detect whether monitoring is on.
+ */
+export function attachClient(client: object): boolean {
+  try {
+    if (!isRecord(client) || typeof (client as Partial<EventEmitterLike>).on !== 'function') return false;
+    const tagged = client as Record<PropertyKey, unknown>;
+    if (tagged[ATTACHED] === true) return false;
+    const state: ClientState = {
+      inFlight: new Map(),
+      cursors: new Map(),
+      probe: { active: hasMonitorSetter(client), checkedOut: 0, silentCycles: 0 },
+    };
+    const emitter = client as unknown as EventEmitterLike;
+    const listeners: [string, (ev: unknown) => void][] = [
+      ['commandStarted', (ev) => onStarted(state, ev)],
+      ['commandSucceeded', (ev) => onEnded(state, ev, false)],
+      ['commandFailed', (ev) => onEnded(state, ev, true)],
+    ];
+    if (state.probe.active) {
+      listeners.push(
+        ['connectionCheckedOut', () => onCheckedOut(state)],
+        ['connectionCheckedIn', () => onCheckedIn(client, state)],
+      );
+    }
+    const added: [string, (ev: unknown) => void][] = [];
+    try {
+      for (const pair of listeners) {
+        emitter.on(pair[0], pair[1]);
+        added.push(pair);
+      }
+    } catch (e) {
+      // Undo a partial attach so a retry doesn't stack listeners.
+      for (const [event, fn] of added) {
+        try {
+          emitter.removeListener?.(event, fn);
+        } catch {
+          // best effort
+        }
+      }
+      throw e;
+    }
+    // Mark only once all are on, so a failed attach can be retried.
+    Object.defineProperty(client, ATTACHED, { value: true, enumerable: false, configurable: true });
+    states.set(client, state);
+    return true;
+  } catch (e) {
+    report(sink, e);
+    return false;
+  }
+}

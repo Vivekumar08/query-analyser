@@ -34,6 +34,10 @@ export interface IngestItem {
   lastTs: number;
   hist: number[];
   sample: unknown | null;
+  /** Where the query was captured from. Absent on SDK 0.1/0.2 payloads, which read as `mongodb`. Open-ended: unknown values are accepted. */
+  source?: string;
+  /** The real collection name the command ran against (at most 255 characters). Absent on SDK 0.1/0.2 payloads. */
+  collection?: string;
   /** Present only when the SDK was given a `sampleKey`; `null` when this item's sample was skipped. */
   encryptedSample?: EncryptedSample | null;
 }
