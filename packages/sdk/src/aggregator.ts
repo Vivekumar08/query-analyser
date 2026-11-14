@@ -1,5 +1,5 @@
 import type { IngestItem } from './types.js';
-import { HIST_SIZE } from '@query-analyser/contract/runtime';
+import { HIST_SIZE, FINE_HIST_BOUNDS, FINE_HIST_SIZE } from '@query-analyser/contract/runtime';
 import { addToHist, bucketIndex, newHist } from './histogram.js';
 import type { SignatureResult } from './signature.js';
 import { serializeSample } from './ejson.js';
@@ -12,6 +12,35 @@ import { serializeSample } from './ejson.js';
  */
 export interface AggregatedItem extends IngestItem {
   sampleText?: string;
+  /** SQL items only: failed-statement counts by SQLSTATE. Folded to `errorCodes` on the wire. */
+  codeCounts?: Map<string, number>;
+}
+
+/** One captured SQL statement, already normalised and labelled. */
+export interface SqlStatement {
+  hash: string;
+  signature: string;
+  model: string;
+  operation: string;
+  table: string | null;
+  orm?: string;
+  database?: string;
+  sql: string;
+  durationMs: number;
+  slow: boolean;
+  /** 1 / sampleRate for a sampled-in fast statement, else 1. */
+  weight: number;
+  failed: boolean;
+  errorCode: string | null;
+  sampleRate: number;
+}
+
+/** Index of the fine-histogram bucket a duration belongs to. The last bucket is unbounded. */
+export function fineBucketIndex(ms: number): number {
+  for (let i = 0; i < FINE_HIST_BOUNDS.length; i++) {
+    if (ms < FINE_HIST_BOUNDS[i]!) return i;
+  }
+  return FINE_HIST_SIZE - 1;
 }
 
 /** A handle on one counted occurrence, so a later getMore can extend it. */
@@ -87,6 +116,69 @@ export class Aggregator {
     return { hash: sig.hash, generation: this.gen, ms: durationMs };
   }
 
+  /**
+   * Fold one SQL statement in. False when its hash is new and the cap is
+   * reached (counted as dropped).
+   */
+  addStatement(st: SqlStatement): boolean {
+    let item = this.buffer.get(st.hash);
+    if (!item) {
+      if (this.buffer.size >= this.maxSignatures) {
+        this.droppedCount++;
+        return false;
+      }
+      item = {
+        signature: st.signature,
+        hash: st.hash,
+        model: st.model,
+        operation: st.operation,
+        filterShape: [],
+        sortKeys: [],
+        stages: [],
+        count: 0,
+        totalMs: 0,
+        maxMs: 0,
+        lastMs: 0,
+        lastTs: 0,
+        hist: newHist(),
+        sample: null,
+        source: 'postgresql',
+        collection: (st.table ?? st.model).slice(0, 255),
+        ...(st.orm !== undefined ? { orm: st.orm } : {}),
+        ...(st.database !== undefined ? { database: st.database } : {}),
+        sql: st.sql,
+        errors: 0,
+        histFine: new Array<number>(FINE_HIST_SIZE).fill(0),
+      };
+      this.buffer.set(st.hash, item);
+    }
+
+    const ms = st.durationMs;
+    item.count += st.weight;
+    item.totalMs += ms * st.weight;
+    const fi = fineBucketIndex(ms);
+    const hf = (item.histFine ??= new Array<number>(FINE_HIST_SIZE).fill(0));
+    hf[fi] = (hf[fi] ?? 0) + st.weight;
+    if (st.slow) addToHist(item.hist, ms);
+    if (ms >= item.maxMs) item.maxMs = ms;
+    item.lastMs = ms;
+    item.lastTs = Date.now();
+    if (st.failed) {
+      item.errors = (item.errors ?? 0) + 1;
+      if (st.errorCode) {
+        const codes = (item.codeCounts ??= new Map());
+        codes.set(st.errorCode, (codes.get(st.errorCode) ?? 0) + 1);
+      }
+    }
+    if (st.sampleRate < 1) item.sampleRate = Math.min(item.sampleRate ?? 1, st.sampleRate);
+    if (item.orm === undefined && st.orm !== undefined) {
+      item.orm = st.orm;
+      item.model = st.model;
+      item.operation = st.operation;
+    }
+    return true;
+  }
+
   /** Add `extraMs` to a counted occurrence. False once its window was swapped. */
   extend(occ: Occurrence, extraMs: number): boolean {
     if (occ.generation !== this.gen) return false;
@@ -120,13 +212,33 @@ export class Aggregator {
       const existing = this.buffer.get(incoming.hash);
       if (!existing) {
         if (this.buffer.size >= this.maxSignatures) { this.droppedCount++; continue; }
-        this.buffer.set(incoming.hash, { ...incoming, hist: [...incoming.hist] });
+        const copy: AggregatedItem = { ...incoming, hist: [...incoming.hist] };
+        if (incoming.histFine) copy.histFine = [...incoming.histFine];
+        if (incoming.codeCounts) copy.codeCounts = new Map(incoming.codeCounts);
+        this.buffer.set(incoming.hash, copy);
         continue;
       }
       existing.count += incoming.count;
       existing.totalMs += incoming.totalMs;
       for (let i = 0; i < HIST_SIZE; i++) {
         existing.hist[i] = (existing.hist[i] ?? 0) + (incoming.hist[i] ?? 0);
+      }
+      if (incoming.histFine) {
+        const hf = (existing.histFine ??= new Array<number>(FINE_HIST_SIZE).fill(0));
+        for (let i = 0; i < FINE_HIST_SIZE; i++) hf[i] = (hf[i] ?? 0) + (incoming.histFine[i] ?? 0);
+      }
+      if (incoming.errors) existing.errors = (existing.errors ?? 0) + incoming.errors;
+      if (incoming.codeCounts) {
+        const codes = (existing.codeCounts ??= new Map());
+        for (const [code, n] of incoming.codeCounts) codes.set(code, (codes.get(code) ?? 0) + n);
+      }
+      if (incoming.sampleRate !== undefined) {
+        existing.sampleRate = Math.min(existing.sampleRate ?? 1, incoming.sampleRate);
+      }
+      if (existing.orm === undefined && incoming.orm !== undefined) {
+        existing.orm = incoming.orm;
+        existing.model = incoming.model;
+        existing.operation = incoming.operation;
       }
       if (incoming.maxMs > existing.maxMs) {
         existing.maxMs = incoming.maxMs;
