@@ -34,6 +34,19 @@ describe('InstallStep', () => {
     expect(screen.getByText(/already shown/i)).toBeTruthy();
     expect(screen.queryByText(/qa_/)).toBeNull();
   });
+  it('the not-seeing-data help names PostgreSQL, Prisma and pg', async () => {
+    const realNow = Date.now();
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValueOnce(realNow).mockReturnValue(realNow + 200_000);
+    render(<InstallStep appId="a1" appName="svc" ingestKey="qa_secret" doneHref="/x" />);
+    await waitFor(() => expect(screen.getByText('Not seeing data?')).toBeTruthy());
+    expect(screen.getByText('Your app uses Mongoose 6–9, the MongoDB Node.js driver 4–7, pg 8, or Prisma 5.22–7 on PostgreSQL.')).toBeTruthy();
+    expect(screen.getByText('Prisma 5 or 6 needs @prisma/adapter-pg (Prisma 7 always uses an adapter).')).toBeTruthy();
+    expect(screen.getByText('init() runs before your app connects to MongoDB, or the connection sets monitorCommands: true.')).toBeTruthy();
+    expect(screen.getByText('MongoDB queries are reported at 100 ms or more (your thresholdMs); every SQL statement is reported.')).toBeTruthy();
+    expect(screen.queryByText(/Only queries taking/)).toBeNull();
+    now.mockRestore();
+  });
   it('leaving before copying asks for confirmation', () => {
     render(<InstallStep appId="a1" appName="svc" ingestKey="qa_secret" doneHref="/x" />);
     fireEvent.click(screen.getByRole('button', { name: /skip|go to/i }));

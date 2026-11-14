@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { IngestItem } from './types.js';
 import type { SignatureResult } from './signature.js';
-import { Aggregator } from './aggregator.js';
+import { Aggregator, type SqlStatement } from './aggregator.js';
 import { buildSignature } from './signature.js';
 import { newHist, addToHist } from './histogram.js';
 
@@ -220,5 +220,69 @@ describe('occurrences and collection', () => {
     const { items } = agg.swap();
     agg.merge(items);
     expect(agg.swap().items[0]!.collection).toBe('orders');
+  });
+
+  describe('SQL statements', () => {
+    const stmt = (over: Partial<SqlStatement> = {}): SqlStatement => ({
+      hash: 'h'.repeat(16), signature: 'SELECT ?', model: 'users', operation: 'select', table: 'users',
+      sql: 'SELECT ?', durationMs: 5, slow: false, weight: 1, failed: false, errorCode: null, sampleRate: 1,
+      ...over,
+    });
+
+    it('a later prisma-labelled statement fills the labels of a pg-first item once', () => {
+      const agg = new Aggregator(10);
+      agg.addStatement(stmt({ model: 'User', operation: 'select' }));
+      agg.addStatement(stmt({ orm: 'prisma', model: 'User', operation: 'findMany' }));
+      agg.addStatement(stmt({ orm: 'prisma', model: 'User', operation: 'findFirst' }));
+      expect(agg.swap().items[0]).toMatchObject({ orm: 'prisma', operation: 'findMany', count: 3 });
+    });
+
+    it('addStatement returns false for a new hash past the cap and counts it as dropped', () => {
+      const agg = new Aggregator(1);
+      expect(agg.addStatement(stmt())).toBe(true);
+      expect(agg.addStatement(stmt({ hash: 'x'.repeat(16) }))).toBe(false);
+      expect(agg.addStatement(stmt())).toBe(true);
+      const { items, dropped } = agg.swap();
+      expect(items).toHaveLength(1);
+      expect(dropped).toBe(1);
+    });
+
+    it('counts weights, the fine histogram, and only slow statements in hist', () => {
+      const agg = new Aggregator(10);
+      agg.addStatement(stmt({ durationMs: 3, weight: 10, sampleRate: 0.1 }));
+      agg.addStatement(stmt({ durationMs: 150, slow: true }));
+      const it0 = agg.swap().items[0]!;
+      expect(it0).toMatchObject({ count: 11, totalMs: 180, maxMs: 150, lastMs: 150, source: 'postgresql', collection: 'users', sample: null, sampleRate: 0.1 });
+      expect(it0.histFine![2]).toBe(10);
+      expect(it0.histFine![7]).toBe(1);
+      expect(it0.hist).toEqual([0, 1, 0, 0, 0, 0, 0, 0]);
+    });
+
+    it('merge folds SQL errors, histFine, codes and the lowest sample rate', () => {
+      const agg = new Aggregator(10);
+      agg.addStatement(stmt({ failed: true, errorCode: '23505', sampleRate: 0.5 }));
+      const first = agg.swap().items;
+      agg.addStatement(stmt({ failed: true, errorCode: '23505' }));
+      agg.merge(first);
+      const merged = agg.swap().items[0]!;
+      expect(merged).toMatchObject({ count: 2, errors: 2, sampleRate: 0.5 });
+      expect(merged.codeCounts!.get('23505')).toBe(2);
+      expect(merged.histFine![3]).toBe(2);
+    });
+
+    it('merge applies the label fill', () => {
+      const agg = new Aggregator(10);
+      agg.addStatement(stmt({ orm: 'prisma', model: 'User', operation: 'findMany' }));
+      const first = agg.swap().items;
+      agg.addStatement(stmt());
+      agg.merge(first);
+      expect(agg.swap().items[0]).toMatchObject({ orm: 'prisma', model: 'User', operation: 'findMany' });
+    });
+  });
+
+  it('Mongo add() is unchanged: no source key on the buffered item', () => {
+    const agg = new Aggregator(10);
+    agg.add(sigA, 120, null);
+    expect(Object.prototype.hasOwnProperty.call(agg.swap().items[0], 'source')).toBe(false);
   });
 });

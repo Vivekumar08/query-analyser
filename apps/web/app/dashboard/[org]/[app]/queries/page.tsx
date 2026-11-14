@@ -1,9 +1,9 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
-import { listQueries } from '@/src/dashboard-api';
+import { getSummary, listQueries } from '@/src/dashboard-api';
 import { getShellContext } from '@/src/shell-context';
-import { filtersToApiQuery, filtersToSearch, optionsApiQuery, parseFilters } from '@/src/filters';
-import { clearFiltersHref, emptyKind, listOutcome, toRowsView } from '@/src/queries-view';
+import { filtersToApiQuery, filtersToSearch, optionsApiQuery, parseFilters, summaryApiQuery } from '@/src/filters';
+import { clearFiltersHref, emptyKind, listOutcome, loadSummary, toRowsView } from '@/src/queries-view';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { PageHeader } from '@/components/dashboard/PageHeader';
@@ -11,6 +11,7 @@ import { RangeControl } from '@/components/dashboard/RangeControl';
 import { QueryFiltersBar } from '@/components/dashboard/QueryFilters';
 import { QueriesTable } from '@/components/dashboard/QueriesTable';
 import { QueriesEmpty } from '@/components/dashboard/EmptyState';
+import { SummaryStrip } from '@/components/dashboard/SummaryStrip';
 import { Pagination } from '@/components/dashboard/Pagination';
 import { FadeIn } from '@/components/dashboard/FadeIn';
 
@@ -34,12 +35,18 @@ export default async function QueriesPage({
   const search = filtersToSearch(filters);
 
   const token = ctx.session.accessToken;
-  const res = await listQueries(token, ctx.app.id, filtersToApiQuery(filters, undefined, retentionDays));
+  // The summary is fetched in parallel; a failed one hides the strip and never fails the page.
+  const now = new Date(); // one instant, so the strip and the list share a window
+  const [res, loaded] = await Promise.all([
+    listQueries(token, ctx.app.id, filtersToApiQuery(filters, now, retentionDays)),
+    loadSummary(() => getSummary(token, ctx.app.id, summaryApiQuery(filters, now, retentionDays))),
+  ]);
+  const summary = loaded && loaded.sources.length + loaded.droppedNew > 0 ? loaded : null;
   if (!res.ok && res.status === 401) redirect(`/api/auth/refresh?next=${encodeURIComponent(`${base}/queries${search ? `?${search}` : ''}`)}`);
   const outcome = listOutcome(res);
   if (outcome === 'error') throw new Error('Could not load queries');
 
-  const filtered = filters.model !== undefined || filters.op !== undefined;
+  const filtered = filters.model !== undefined || filters.op !== undefined || filters.source !== undefined || filters.orm !== undefined;
   const { items, sortExact, sortNote, hasMore } = res.ok ? res.data : { items: [], sortExact: true, sortNote: undefined, hasMore: false };
   const rows = toRowsView(items);
   const kind = emptyKind({ rows: rows.length, filtered });
@@ -53,6 +60,8 @@ export default async function QueriesPage({
   }
   const models = [...new Set([...optionRows.map((r) => r.model), ...(filters.model ? [filters.model] : [])])].sort();
   const ops = [...new Set([...optionRows.map((r) => r.operation), ...(filters.op ? [filters.op] : [])])].sort();
+  const sources = [...new Set([...optionRows.map((r) => r.source ?? 'mongodb'), ...(filters.source ? [filters.source] : [])])].sort();
+  const orms = [...new Set([...optionRows.flatMap((r) => (r.orm ? [r.orm] : [])), ...(filters.orm ? [filters.orm] : [])])].sort();
   const pageHref = (p: number) => {
     const q = new URLSearchParams(search);
     if (p > 1) q.set('page', String(p));
@@ -67,7 +76,8 @@ export default async function QueriesPage({
       <PageHeader title="Queries" crumbs={[{ label: org }, { label: 'Queries' }]} actions={<RangeControl value={filters.range} retentionDays={retentionDays} />} />
       <FadeIn>
       <div className="flex flex-col gap-4 p-6">
-        <QueryFiltersBar models={models} ops={ops} value={filters} />
+        {summary && <SummaryStrip summary={summary} />}
+        <QueryFiltersBar models={models} ops={ops} sources={sources} orms={orms} value={filters} />
         {(!sortExact || sortNote) && (
           <p className="text-xs text-muted-foreground">{sortNote ?? 'Ordering by this column is approximate.'}</p>
         )}

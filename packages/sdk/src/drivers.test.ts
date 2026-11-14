@@ -1,6 +1,12 @@
 import { EventEmitter } from 'node:events';
-import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, it, expect, vi, afterEach, beforeEach, beforeAll, afterAll } from 'vitest';
 import { Aggregator } from './aggregator.js';
+import { sqlRuntime } from './sql/context.js';
+import { installPgWrap, undoPgWraps, PG_QUERY_WRAP } from './integrations/pg.js';
 import { setSink, type MonitorSink } from './monitor.js';
 import {
   CONNECT_WRAP,
@@ -8,8 +14,19 @@ import {
   enableMonitoring,
   installConnectWrap,
   monitorState,
+  pgClientClass,
+  pgClientOf,
+  pgPoolClass,
+  pgPoolOf,
+  prismaClientVersion,
+  resolveAppPath,
+  resolveAppPaths,
+  appLookupChains,
+  resolvePgClients,
   mongooseClients,
+  requireFrom,
   resolvePeer,
+  resolvePeerPath,
   undoConnectWraps,
 } from './drivers.js';
 
@@ -327,5 +344,411 @@ describe('mongooseClients', () => {
     expect(mongooseClients({})).toEqual([]);
     const evil = { get connections(): unknown { throw new Error('x'); } };
     expect(mongooseClients(evil)).toEqual([]);
+  });
+});
+
+describe('pg copies', () => {
+  let FIX: string;
+  const put = (rel: string, src: string): void => {
+    mkdirSync(join(FIX, rel), { recursive: true });
+    writeFileSync(join(FIX, rel, 'index.js'), src);
+  };
+  const PG = 'exports.Client = class Client { query() {} }; exports.Pool = class Pool { query() {} };';
+  const at = (root: string) => (name: string): string | null => {
+    try { return createRequire(join(root, 'x.js')).resolve(name); } catch { return null; }
+  };
+  const load = (rel: string): { Client: Function; Pool: Function } => createRequire(join(FIX, 'x.js'))(join(FIX, rel)) as { Client: Function; Pool: Function };
+
+  beforeAll(() => {
+    FIX = mkdtempSync(join(tmpdir(), 'qa-pg-copies-'));
+    put('app/node_modules/pg', PG);
+    put('app/node_modules/@prisma/adapter-pg/node_modules/pg', PG);
+    put('app/node_modules/@prisma/adapter-pg', 'module.exports = {};');
+    put('shared/node_modules/pg', PG);
+    put('shared/node_modules/@prisma/adapter-pg', 'module.exports = {};');
+    put('other/node_modules/pg', PG);
+    const pc = join(FIX, 'prisma/node_modules/@prisma/client');
+    mkdirSync(join(pc, 'dist/nested'), { recursive: true });
+    writeFileSync(join(pc, 'package.json'), JSON.stringify({ name: '@prisma/client', version: '6.19.3' }));
+    writeFileSync(join(pc, 'dist/index.js'), '');
+    writeFileSync(join(pc, 'dist/nested/index.js'), '');
+    writeFileSync(join(pc, 'dist/package.json'), JSON.stringify({ name: 'not-prisma', version: '0.0.1' }));
+    mkdirSync(join(FIX, 'nopkg'), { recursive: true });
+    writeFileSync(join(FIX, 'nopkg/index.js'), '');
+  });
+  afterAll(() => { rmSync(FIX, { recursive: true, force: true }); });
+
+  it('Review Focus: an app with two pg copies yields both Client classes', () => {
+    const r = resolvePgClients(undefined, { appEntry: at(FIX + '/app') });
+    expect(r.clients).toHaveLength(2); expect(r.adapterResolved).toBe(true);
+    expect(new Set(r.clients.map((c) => c.prototype)).size).toBe(2);
+  });
+
+  it("an adapter sharing the app's pg yields one class", () => {
+    const r = resolvePgClients(undefined, { appEntry: at(FIX + '/shared') });
+    expect(r.clients).toHaveLength(1); expect(r.adapterResolved).toBe(true);
+  });
+
+  it('a given pg module is added and deduplicated by prototype', () => {
+    const app = load('app/node_modules/pg');
+    expect(resolvePgClients(app, { appEntry: at(FIX + '/app') }).clients).toHaveLength(2);
+    expect(resolvePgClients({ default: app }, { appEntry: at(FIX + '/app') }).clients).toHaveLength(2);
+    const third = load('other/node_modules/pg');
+    expect(resolvePgClients(third, { appEntry: at(FIX + '/app') }).clients).toHaveLength(3);
+    expect(resolvePgClients(third, { appEntry: () => null })).toEqual({ clients: [third.Client], pools: [third.Pool], adapterResolved: false });
+  });
+
+  it('no pg anywhere yields none, and adapterResolved false', () => {
+    expect(resolvePgClients(undefined, { appEntry: () => null })).toEqual({ clients: [], pools: [], adapterResolved: false });
+    expect(resolvePgClients(42, { appEntry: () => { throw new Error('x'); } })).toEqual({ clients: [], pools: [], adapterResolved: false });
+  });
+
+  it('never touches pg.native', () => {
+    const mod = { Client: class {}, get native(): never { throw new Error('native loaded'); } };
+    expect(() => pgClientClass(mod)).not.toThrow(); expect(pgClientClass({ default: mod })).toBe(mod.Client);
+    expect(pgClientClass(null)).toBeNull(); expect(pgClientClass({})).toBeNull();
+  });
+
+  it('pgClientOf takes a Pool or a Client and refuses anything else', () => {
+    class Client { connectionParameters = {}; query() {} }
+    expect(pgClientOf({ Client, totalCount: 0, query() {} })).toBe(Client);
+    expect(pgClientOf(new Client())).toBe(Client);
+    expect(pgClientOf(new EventEmitter())).toBeNull(); expect(pgClientOf(null)).toBeNull();
+  });
+
+  it('two pg copies yield both Pool classes too, deduplicated by prototype', () => {
+    const r = resolvePgClients(undefined, { appEntry: at(FIX + '/app') });
+    expect(r.pools).toHaveLength(2);
+    expect(new Set(r.pools.map((p) => p.prototype)).size).toBe(2);
+    expect(r.pools).toContain(load('app/node_modules/pg').Pool);
+    expect(r.pools).toContain(load('app/node_modules/@prisma/adapter-pg/node_modules/pg').Pool);
+    expect(resolvePgClients(undefined, { appEntry: at(FIX + '/shared') }).pools).toHaveLength(1);
+    const app = load('app/node_modules/pg');
+    expect(resolvePgClients(app, { appEntry: at(FIX + '/app') }).pools).toHaveLength(2);
+  });
+
+  it('a given pool instance adds its Pool class and its Client', () => {
+    const third = load('other/node_modules/pg');
+    const pool = Object.assign(Object.create((third.Pool as { prototype: object }).prototype) as object, { Client: third.Client });
+    expect(resolvePgClients(pool, { appEntry: () => null })).toEqual({ clients: [third.Client], pools: [third.Pool], adapterResolved: false });
+  });
+
+  it('pgPoolClass reads Pool (CJS or default) and never touches pg.native', () => {
+    const mod = { Pool: class {}, get native(): never { throw new Error('native loaded'); } };
+    expect(pgPoolClass(mod)).toBe(mod.Pool); expect(pgPoolClass({ default: mod })).toBe(mod.Pool);
+    expect(pgPoolClass(null)).toBeNull(); expect(pgPoolClass({})).toBeNull(); expect(pgPoolClass({ Pool: 1 })).toBeNull();
+  });
+
+  it('pgPoolOf takes a pool instance (Client + query) and refuses a client or anything else', () => {
+    class Client { connectionParameters = {}; query() {} }
+    class Pool { Client = Client; query() {} }
+    expect(pgPoolOf(new Pool())).toBe(Pool);
+    expect(pgPoolOf(new Client())).toBeNull();
+    expect(pgPoolOf({ Client, query() {} })).toBeNull(); // a plain object: no class to wrap
+    expect(pgPoolOf(null)).toBeNull();
+    expect(pgPoolOf({ get Client(): never { throw new Error('x'); } })).toBeNull();
+  });
+
+  it('resolvePeerPath and requireFrom never throw', () => {
+    expect(resolvePeerPath('definitely-not-installed-xyz')).toBeNull();
+    expect(typeof resolvePeerPath('vitest')).toBe('string');
+    expect(requireFrom(join(FIX, 'nope', 'x.js'), 'definitely-not-installed-xyz')).toBeNull();
+    expect(requireFrom(join(FIX, 'app', 'x.js'), 'pg')).not.toBeNull();
+  });
+
+  it('prismaClientVersion: nothing resolvable gives null; a resolver that throws gives null', () => {
+    expect(prismaClientVersion({ resolve: () => null })).toBeNull();
+    expect(prismaClientVersion({ resolve: () => { throw new Error('x'); } })).toBeNull();
+  });
+
+  it('prismaClientVersion walks up from a subdirectory entry to the @prisma/client package.json', () => {
+    const entry = join(FIX, 'prisma/node_modules/@prisma/client/dist/index.js');
+    expect(prismaClientVersion({ resolve: (n) => (n === '@prisma/client' ? entry : null) })).toBe('6.19.3');
+  });
+
+  it('prismaClientVersion skips a package.json with another name on the way up', () => {
+    const entry = join(FIX, 'prisma/node_modules/@prisma/client/dist/nested/index.js');
+    expect(prismaClientVersion({ resolve: () => entry })).toBe('6.19.3');
+  });
+
+  it('prismaClientVersion returns null when no @prisma/client package.json is above the entry', () => {
+    expect(prismaClientVersion({ resolve: () => join(FIX, 'nopkg/index.js') })).toBeNull();
+  });
+
+  it('resolvePgClients returns the adapter\'s own pg module (the app\'s when they are one copy)', () => {
+    expect(resolvePgClients(undefined, { appEntry: at(FIX + '/app') }).adapterPg)
+      .toBe(load('app/node_modules/@prisma/adapter-pg/node_modules/pg'));
+    expect(resolvePgClients(undefined, { appEntry: at(FIX + '/shared') }).adapterPg).toBe(load('shared/node_modules/pg'));
+    // Only the fixture's own chain (the plain `at` resolver would also see pnpm's NODE_PATH).
+    const otherOnly = (n: string) => resolveAppPath(n, { lookup: [join(FIX, 'other/node_modules')] });
+    const other = resolvePgClients(undefined, { appEntry: otherOnly });
+    expect(other.adapterResolved).toBe(false);
+    expect(other.adapterPg).toBeUndefined();
+    expect(other.clients).toEqual([load('other/node_modules/pg').Client]);
+  });
+
+  it('resolveAppPath finds a package in the app\'s node_modules chain, and nothing else', () => {
+    const pc = join(FIX, 'appprisma/node_modules/@prisma/client');
+    mkdirSync(join(pc, 'dist'), { recursive: true });
+    writeFileSync(join(pc, 'package.json'), JSON.stringify({ name: '@prisma/client', version: '6.19.3', main: 'dist/index.js' }));
+    writeFileSync(join(pc, 'dist/index.js'), '');
+    const lookup = [join(FIX, 'appprisma/sub/node_modules'), join(FIX, 'appprisma/node_modules')];
+    expect(resolveAppPath('@prisma/client', { lookup })).toBe(realpathSync(join(pc, 'dist/index.js')));
+    expect(prismaClientVersion({ resolve: (n) => resolveAppPath(n, { lookup }) })).toBe('6.19.3');
+    expect(resolveAppPath('@prisma/client', { lookup: [join(FIX, 'app/node_modules')] })).toBeNull();
+    expect(resolveAppPath('@prisma/client', { lookup: [] })).toBeNull();
+  });
+
+  it('resolveAppPath ignores a package reachable only through NODE_PATH (a hoisted transitive copy)', () => {
+    const glob = join(FIX, 'global');
+    const pc = join(glob, '@prisma/client');
+    mkdirSync(pc, { recursive: true });
+    writeFileSync(join(pc, 'package.json'), JSON.stringify({ name: '@prisma/client', version: '6.19.3' }));
+    writeFileSync(join(pc, 'index.js'), '');
+    const Module = createRequire(import.meta.url)('node:module') as { _initPaths(): void };
+    const before = process.env.NODE_PATH;
+    try {
+      process.env.NODE_PATH = glob;
+      Module._initPaths();
+      expect(resolvePeerPath('@prisma/client')).toBe(realpathSync(join(pc, 'index.js'))); // the plain resolver is fooled
+      expect(resolveAppPath('@prisma/client')).toBeNull();
+      expect(resolveAppPath('pg')).not.toBeNull(); // a real devDependency of the SDK still resolves
+    } finally {
+      if (before === undefined) delete process.env.NODE_PATH; else process.env.NODE_PATH = before;
+      Module._initPaths();
+    }
+    expect(resolveAppPath('@prisma/client')).toBeNull(); // nor through the NODE_PATH the test runner may set
+  });
+
+  it('Review Focus: a statement through either copy is recorded exactly once', async () => {
+    const recorded: unknown[] = [];
+    sqlRuntime().sink = { record: (ev) => { recorded.push(ev); } };
+    try {
+      const { clients } = resolvePgClients(undefined, { appEntry: at(FIX + '/app') });
+      for (const C of clients) {
+        (C.prototype as { query: unknown }).query = function () { return Promise.resolve({ rows: [] }); };
+        expect(installPgWrap(C)).toBe(true);
+      }
+      for (const C of clients) await (new (C as new () => { query(s: string): Promise<unknown> })()).query('SELECT 1');
+      expect(recorded).toHaveLength(2);
+      for (const C of clients) expect(installPgWrap(C)).toBe(false);
+      for (const C of clients) await (new (C as new () => { query(s: string): Promise<unknown> })()).query('SELECT 1');
+      expect(recorded).toHaveLength(4);
+    } finally {
+      undoPgWraps();
+      sqlRuntime().sink = null;
+    }
+  });
+});
+
+describe('resolveAppPath: real install layouts (Task 8 fix round 1)', () => {
+  let ROOT: string;
+  /** A package dir with a package.json and an index.js exporting pg-shaped classes. */
+  const pkg = (dir: string, name: string): void => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, version: '1.0.0', main: 'index.js' }));
+    writeFileSync(join(dir, 'index.js'), 'exports.Client = class Client { query() {} }; exports.Pool = class Pool { query() {} };');
+  };
+  /** The SDK's built entry at `dir` (only its location matters). */
+  const sdkAt = (dir: string): string => {
+    mkdirSync(join(dir, 'dist'), { recursive: true });
+    writeFileSync(join(dir, 'dist/index.cjs'), '');
+    return join(dir, 'dist/index.cjs');
+  };
+  const SDK = 'node_modules/@vivekumar08/query-analyser';
+  const STORE_SDK = 'node_modules/.pnpm/@vivekumar08+query-analyser@0.4.0/node_modules/@vivekumar08/query-analyser';
+  const real = (p: string): string => realpathSync(p);
+
+  beforeAll(() => { ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'qa-layouts-'))); });
+  afterAll(() => { rmSync(ROOT, { recursive: true, force: true }); });
+
+  it('npm flat: the app\'s pg next to the SDK', () => {
+    const app = join(ROOT, 'npm-flat');
+    const moduleFile = sdkAt(join(app, SDK));
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null })).toBe(real(join(app, 'node_modules/pg/index.js')));
+  });
+
+  it('standard pnpm: the peer link beside the SDK in the store', () => {
+    const app = join(ROOT, 'pnpm-std');
+    const moduleFile = sdkAt(join(app, STORE_SDK));
+    pkg(join(app, 'node_modules/.pnpm/@vivekumar08+query-analyser@0.4.0/node_modules/pg'), 'pg');
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null }))
+      .toBe(real(join(app, 'node_modules/.pnpm/@vivekumar08+query-analyser@0.4.0/node_modules/pg/index.js')));
+  });
+
+  it('pnpm with no peer link: the app\'s own pg up the chain', () => {
+    const app = join(ROOT, 'pnpm-nolink');
+    const moduleFile = sdkAt(join(app, STORE_SDK));
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null })).toBe(real(join(app, 'node_modules/pg/index.js')));
+  });
+
+  it('pnpm\'s hidden hoist (.pnpm/node_modules) is not the app: a sibling\'s Prisma is ignored', () => {
+    const root = join(ROOT, 'pnpm-mono');
+    const app = join(root, 'apps/x');
+    mkdirSync(app, { recursive: true });
+    const moduleFile = sdkAt(join(root, STORE_SDK));
+    pkg(join(root, 'node_modules/.pnpm/node_modules/@prisma/adapter-pg'), '@prisma/adapter-pg');
+    pkg(join(root, 'node_modules/.pnpm/node_modules/@prisma/client'), '@prisma/client');
+    pkg(join(root, 'node_modules/.pnpm/node_modules/pg'), 'pg');
+    const from = { moduleFile, cwd: app, entry: null };
+    expect(resolveAppPath('@prisma/adapter-pg', from)).toBeNull();
+    expect(resolveAppPath('@prisma/client', from)).toBeNull();
+    expect(resolveAppPath('pg', from)).toBeNull();
+    const r = resolvePgClients(undefined, { appEntry: (n) => resolveAppPath(n, from) });
+    expect(r).toEqual({ clients: [], pools: [], adapterResolved: false });
+  });
+
+  it('npm monorepo, SDK hoisted to the root, the app\'s pg nested, cwd = the app: found through cwd and wrapped', () => {
+    const root = join(ROOT, 'npm-mono-nested');
+    const app = join(root, 'apps/x');
+    const moduleFile = sdkAt(join(root, SDK));
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    const from = { moduleFile, cwd: app, entry: null };
+    expect(resolveAppPath('pg', from)).toBe(real(join(app, 'node_modules/pg/index.js')));
+    const { clients } = resolvePgClients(undefined, { appEntry: (n) => resolveAppPath(n, from) });
+    const nested = createRequire(join(app, 'x.js'))('pg') as { Client: Function };
+    expect(clients).toEqual([nested.Client]);
+    try {
+      expect(installPgWrap(nested.Client)).toBe(true);
+      expect(PG_QUERY_WRAP in nested.Client.prototype).toBe(true);
+    } finally {
+      undoPgWraps();
+    }
+  });
+
+  it('npm monorepo with both hoisted: the root copy', () => {
+    const root = join(ROOT, 'npm-mono-hoisted');
+    const app = join(root, 'apps/x');
+    mkdirSync(app, { recursive: true });
+    const moduleFile = sdkAt(join(root, SDK));
+    pkg(join(root, 'node_modules/pg'), 'pg');
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null })).toBe(real(join(root, 'node_modules/pg/index.js')));
+  });
+
+  /** npm/yarn workspaces nest an app's pg only when the root holds a conflicting one. */
+  const conflicting = (name: string): { root: string; app: string; moduleFile: string } => {
+    const root = join(ROOT, name);
+    const app = join(root, 'apps/x');
+    const moduleFile = sdkAt(join(root, SDK));
+    pkg(join(root, 'node_modules/pg'), 'pg');
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    writeFileSync(join(app, 'server.js'), '');
+    return { root, app, moduleFile };
+  };
+  const pgAt = (dir: string) => createRequire(join(dir, 'x.js'))('pg') as { Client: Function; Pool: Function };
+
+  it('root pg plus the app\'s nested pg, cwd = the app: both copies are found and both wrapped', () => {
+    const { root, app, moduleFile } = conflicting('conflict-cwd');
+    const from = { moduleFile, cwd: app, entry: null };
+    expect(resolveAppPaths('pg', from)).toEqual([real(join(app, 'node_modules/pg/index.js')), real(join(root, 'node_modules/pg/index.js'))]);
+    const { clients, pools } = resolvePgClients(undefined, { appEntries: (n) => resolveAppPaths(n, from) });
+    expect(clients).toEqual([pgAt(app).Client, pgAt(root).Client]);
+    expect(pools).toEqual([pgAt(app).Pool, pgAt(root).Pool]);
+    try {
+      for (const C of clients) installPgWrap(C);
+      expect(PG_QUERY_WRAP in pgAt(app).Client.prototype).toBe(true);
+      expect(PG_QUERY_WRAP in pgAt(root).Client.prototype).toBe(true);
+    } finally {
+      undoPgWraps();
+    }
+  });
+
+  it('the same layout with cwd = the monorepo root and the entry script in the app: the app\'s pg is wrapped', () => {
+    const { root, app, moduleFile } = conflicting('conflict-entry');
+    const from = { moduleFile, cwd: root, entry: join(app, 'server.js') };
+    expect(resolveAppPath('pg', from)).toBe(real(join(app, 'node_modules/pg/index.js')));
+    const { clients } = resolvePgClients(undefined, { appEntries: (n) => resolveAppPaths(n, from) });
+    expect(clients).toContain(pgAt(app).Client);
+    expect(clients).toContain(pgAt(root).Client);
+  });
+
+  it('Prisma: the app\'s own nested copy wins over a sibling\'s at the root', () => {
+    const root = join(ROOT, 'prisma-nested');
+    const app = join(root, 'apps/x');
+    const moduleFile = sdkAt(join(root, SDK));
+    const prisma = (dir: string, version: string): void => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@prisma/client', version, main: 'index.js' }));
+      writeFileSync(join(dir, 'index.js'), '');
+    };
+    prisma(join(root, 'node_modules/@prisma/client'), '5.22.0');
+    prisma(join(app, 'node_modules/@prisma/client'), '7.10.0');
+    pkg(join(root, 'node_modules/@prisma/adapter-pg'), '@prisma/adapter-pg');
+    pkg(join(root, 'node_modules/@prisma/adapter-pg/node_modules/pg'), 'pg');
+    pkg(join(app, 'node_modules/@prisma/adapter-pg'), '@prisma/adapter-pg');
+    pkg(join(app, 'node_modules/@prisma/adapter-pg/node_modules/pg'), 'pg');
+    for (const from of [{ moduleFile, cwd: app, entry: null }, { moduleFile, cwd: root, entry: join(app, 'server.js') }]) {
+      expect(prismaClientVersion({ resolve: (n) => resolveAppPath(n, from) })).toBe('7.10.0');
+      const r = resolvePgClients(undefined, { appEntries: (n) => resolveAppPaths(n, from) });
+      expect(r.adapterResolved).toBe(true);
+      expect(r.adapterPg).toBe(createRequire(join(app, 'node_modules/@prisma/adapter-pg/index.js'))('pg'));
+    }
+  });
+
+  it('an entry script inside node_modules (a hoisted tool such as next or vitest) is not the app: cwd decides', () => {
+    const root = join(ROOT, 'hoisted-tool');
+    const app = join(root, 'apps/x');
+    const moduleFile = sdkAt(join(root, SDK));
+    const prisma = (dir: string, version: string): void => {
+      mkdirSync(join(dir, '@prisma/client'), { recursive: true });
+      writeFileSync(join(dir, '@prisma/client/package.json'), JSON.stringify({ name: '@prisma/client', version, main: 'index.js' }));
+      writeFileSync(join(dir, '@prisma/client/index.js'), '');
+      pkg(join(dir, '@prisma/adapter-pg'), '@prisma/adapter-pg');
+      pkg(join(dir, '@prisma/adapter-pg/node_modules/pg'), 'pg');
+    };
+    prisma(join(root, 'node_modules'), '6.19.0');
+    prisma(join(app, 'node_modules'), '7.10.0');
+    mkdirSync(join(root, 'node_modules/fakecli/bin'), { recursive: true });
+    const cli = join(root, 'node_modules/fakecli/bin/cli.js');
+    writeFileSync(cli, '');
+    mkdirSync(join(root, 'node_modules/.bin'), { recursive: true });
+    const bin = join(root, 'node_modules/.bin/fakecli');
+    symlinkSync('../fakecli/bin/cli.js', bin);
+    const appAdapterPg = createRequire(join(app, 'node_modules/@prisma/adapter-pg/index.js'))('pg') as { Client: Function };
+    for (const entry of [cli, bin]) {
+      const from = { moduleFile, cwd: app, entry };
+      expect(prismaClientVersion({ resolve: (n) => resolveAppPath(n, from) })).toBe('7.10.0');
+      const r = resolvePgClients(undefined, { appEntries: (n) => resolveAppPaths(n, from) });
+      expect(r.adapterResolved).toBe(true);
+      expect(r.adapterPg).toBe(appAdapterPg);
+      expect(r.clients).toContain(appAdapterPg.Client);
+      try {
+        for (const C of r.clients) installPgWrap(C);
+        expect(PG_QUERY_WRAP in appAdapterPg.Client.prototype).toBe(true);
+      } finally {
+        undoPgWraps();
+      }
+    }
+    // The chain from such an entry is dropped entirely.
+    expect(appLookupChains('pg', { entry: cli, cwd: null, moduleFile: null })).toEqual([[], [], []]);
+    expect(appLookupChains('pg', { entry: bin, cwd: null, moduleFile: null })).toEqual([[], [], []]);
+  });
+
+  it('an entry script in the app (outside node_modules) still leads', () => {
+    const { app, root, moduleFile } = conflicting('entry-still-leads');
+    expect(appLookupChains('pg', { entry: join(app, 'server.js'), cwd: null, moduleFile: null })[0]![0]).toBe(join(app, 'node_modules'));
+    expect(resolveAppPath('pg', { moduleFile, cwd: root, entry: join(app, 'server.js') })).toBe(real(join(app, 'node_modules/pg/index.js')));
+  });
+
+  it('a throwing process.cwd() loses only the cwd chain', () => {
+    const app = join(ROOT, 'cwd-throws');
+    const moduleFile = sdkAt(join(app, SDK));
+    pkg(join(app, 'node_modules/pg'), 'pg');
+    const spy = vi.spyOn(process, 'cwd').mockImplementation(() => { throw new Error('ENOENT: uv_cwd'); });
+    try {
+      expect(resolveAppPath('pg', { moduleFile, entry: null })).toBe(real(join(app, 'node_modules/pg/index.js')));
+      expect(resolveAppPaths('pg', { moduleFile, entry: null })).toEqual([real(join(app, 'node_modules/pg/index.js'))]);
+      expect(resolveAppPath('pg')).not.toBeNull(); // the defaults too: the SDK's own devDependency
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('nothing installed anywhere gives null', () => {
+    const app = join(ROOT, 'empty');
+    const moduleFile = sdkAt(join(app, SDK));
+    expect(resolveAppPath('pg', { moduleFile, cwd: app, entry: null })).toBeNull();
   });
 });

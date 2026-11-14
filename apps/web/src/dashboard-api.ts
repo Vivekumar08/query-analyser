@@ -1,6 +1,6 @@
 import { authedFetch, type ApiResult } from './api';
 import type {
-  AppAccessList, AppDetail, AppSummary, Member, OrgSummary, PendingInvite, QueryDetail, QueryListResponse, SampleKeyStatus, SeriesResponse,
+  AppAccessList, AppDetail, AppSummary, Member, OrgSummary, PendingInvite, QueryDetail, QueryListResponse, SampleKeyStatus, SeriesResponse, SummaryResponse,
 } from './dashboard-types';
 import type { Session } from './auth';
 
@@ -30,3 +30,6 @@ export const listInvites = (t: string, orgId: string): Promise<ApiResult<Pending
 /** Who can open the app, its pending invites and the org's seat usage (ADMIN+). */
 export const getAppAccess = (t: string, appId: string): Promise<ApiResult<AppAccessList>> =>
   authedFetch(`/v1/apps/${e(appId)}/access`, t);
+/** Per-source figures for the window (GET /v1/apps/:id/summary). `apiQuery` is `summaryApiQuery(...)`. */
+export const getSummary = (t: string, app: string, apiQuery: string): Promise<ApiResult<SummaryResponse>> =>
+  authedFetch(`/v1/apps/${e(app)}/summary?${apiQuery}`, t);

@@ -13,7 +13,7 @@ describe('buildSnippet', () => {
   it('escapes quotes in the app name', () =>
     expect(buildSnippet('k', 'a"b').code).toContain('app: "a\\"b"'));
   it('the main snippet says to call it before connecting', () =>
-    expect(buildSnippet('k', 'a').code.split('\n')[0]).toBe('// Call this before your app connects to MongoDB.'));
+    expect(buildSnippet('k', 'a').code.split('\n')[0]).toBe('// Call this before your app connects to its database.'));
   it('the driver snippet passes the client with monitorCommands and never inlines the key', () => {
     const s = buildSnippet('qa_live_abc', 'a"b');
     expect(s.driverCode).toContain('{ monitorCommands: true }');

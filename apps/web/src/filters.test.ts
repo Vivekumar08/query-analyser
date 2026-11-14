@@ -1,7 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { parseFilters, filtersToSearch, filtersToApiQuery, optionsApiQuery, MAX_LIMIT } from './filters';
+import { parseFilters, filtersToSearch, filtersToApiQuery, optionsApiQuery, summaryApiQuery, MAX_LIMIT } from './filters';
 
 const NOW = new Date('2026-10-18T12:00:00.000Z');
+
+describe('source and orm filters', () => {
+  it('parses, round-trips and sends source and orm', () => {
+    const f = parseFilters({ source: 'postgresql', orm: 'prisma' });
+    expect(filtersToSearch(f)).toBe('source=postgresql&orm=prisma');
+    expect(new URLSearchParams(filtersToApiQuery(f, NOW)).get('orm')).toBe('prisma');
+    expect(new URLSearchParams(filtersToApiQuery(f, NOW)).get('source')).toBe('postgresql');
+  });
+  it('accepts sort=errors', () => expect(parseFilters({ sort: 'errors' }).sort).toBe('errors'));
+});
 
 describe('parseFilters', () => {
   it('passes the retention through to the range', () =>
@@ -78,5 +88,20 @@ describe('paging in the API query', () => {
     expect(q.get('limit')).toBe('200');
     expect(q.get('offset')).toBeNull();
     expect(q.get('model')).toBeNull();
+  });
+});
+
+describe('summaryApiQuery', () => {
+  it('summary query carries the window and source/orm only', () => {
+    const f = parseFilters(new URLSearchParams('range=1h&model=Order&op=find&sort=count&page=3&source=postgresql&orm=prisma'));
+    const q = new URLSearchParams(summaryApiQuery(f, NOW));
+    expect([...q.keys()].sort()).toEqual(['from', 'orm', 'source', 'to']);
+    expect(q.get('from')).toBe('2026-10-18T11:00:00.000Z');
+    expect(q.get('to')).toBe('2026-10-18T12:00:00.000Z');
+    expect(q.get('source')).toBe('postgresql');
+    expect(q.get('orm')).toBe('prisma');
+  });
+  it('omits source and orm when unset', () => {
+    expect([...new URLSearchParams(summaryApiQuery(parseFilters({}), NOW)).keys()].sort()).toEqual(['from', 'to']);
   });
 });

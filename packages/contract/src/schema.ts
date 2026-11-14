@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { HIST_SIZE } from './runtime.js';
+import { HIST_SIZE, FINE_HIST_SIZE } from './runtime.js';
 
 export const opClassSchema = z.enum(['eq', 'in', 'range', 'regex', 'exists', 'ne', 'other']);
 
@@ -23,6 +23,9 @@ export const encryptedSampleSchema = z.object({
   ct: z.string().min(1).max(24_000),
 });
 
+// The API stores counts and histogram buckets in Postgres int columns.
+const INT_MAX = 2_147_483_647;
+
 export const ingestItemSchema = z.object({
   signature: z.string().min(1).max(400),
   hash: z.string().length(16),
@@ -31,15 +34,25 @@ export const ingestItemSchema = z.object({
   filterShape: z.array(filterShapeItemSchema).max(64),
   sortKeys: z.array(sortKeySchema).max(32),
   stages: z.array(z.string().max(40)).max(64),
-  count: z.number().int().nonnegative(),
+  count: z.number().int().nonnegative().max(INT_MAX),
   totalMs: z.number().nonnegative(),
   maxMs: z.number().nonnegative(),
   lastMs: z.number().nonnegative(),
   lastTs: z.number().int().nonnegative(),
-  hist: z.array(z.number().int().nonnegative()).length(HIST_SIZE),
+  hist: z.array(z.number().int().nonnegative().max(INT_MAX)).length(HIST_SIZE),
   sample: z.unknown().nullable(),
   source: z.string().min(1).max(40).optional(),
   collection: z.string().min(1).max(255).optional(),
+  orm: z.string().min(1).max(40).optional(),
+  database: z.string().min(1).max(255).optional(),
+  sql: z.string().min(1).max(16_384).optional(),
+  errors: z.number().int().nonnegative().optional(),
+  errorCodes: z
+    .array(z.object({ code: z.string().regex(/^[0-9A-Z]{5}$/), count: z.number().int().positive() }))
+    .max(8)
+    .optional(),
+  histFine: z.array(z.number().int().nonnegative().max(INT_MAX)).length(FINE_HIST_SIZE).optional(),
+  sampleRate: z.number().gt(0).lte(1).optional(),
   // Sent only by an SDK configured with a `sampleKey`; absent otherwise.
   encryptedSample: encryptedSampleSchema.nullable().optional(),
 });
@@ -53,7 +66,9 @@ export const ingestPayloadSchema = z.object({
   // Fix round 4, Critical 2: `thresholdMs: 0` ("capture every query") is a
   // legitimate, SDK-accepted debugging setting — the schema, not the SDK,
   // was wrong to reject it with `.positive()`.
-  thresholdMs: z.number().int().nonnegative(),
+  // Capped at one hour: the API stores it in an int column, and an
+  // out-of-range value must never get as far as the database.
+  thresholdMs: z.number().int().nonnegative().max(3_600_000),
   dropped: z.number().int().nonnegative(),
   items: z.array(ingestItemSchema).max(5000),
 });

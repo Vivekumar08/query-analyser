@@ -130,6 +130,9 @@ model App {
   signatures       QuerySignature[]
   access           AppAccess[]
   invites          Invite[]
+  /// Slow-query threshold in ms the SDK reported for this app; null = not reported (default 100).
+  thresholdMs      Int?
+  quotaDrops       QuotaDrop[]
 
   @@unique([orgId, name, env])
   @@index([orgId])
@@ -165,6 +168,15 @@ model QuerySignature {
   source          String?
   /// The real collection name, null from SDKs before 0.3.
   collection      String?
+  /// ORM that issued the statement (`prisma`), null when none or for Mongo.
+  orm             String?
+  /// Database name the statement ran on (a label, not part of the hash); null for Mongo.
+  database        String?
+  /// Normalised SQL text with every literal replaced by `?`; null for Mongo.
+  sqlText         String?
+  /// SQLSTATE (5 chars) that failed most often in the latest batch with any failure (ties: lowest code);
+  /// a batch with no failures keeps it. Null when none has failed.
+  lastErrorCode   String?
   firstSeen       DateTime           @default(now()) @db.Timestamptz(3)
   lastSeen        DateTime           @default(now()) @db.Timestamptz(3)
   app             App                @relation(fields: [appId], references: [id], onDelete: Cascade)
@@ -178,28 +190,40 @@ model QuerySignature {
 }
 
 model QueryRollup {
-  id          String         @id @default(uuid())
-  signatureId String
-  bucketHour  DateTime       @db.Timestamptz(3)
-  count       Int
-  totalMs     BigInt
-  maxMs       Int
-  hist        Int[]
-  signature   QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
+  id            String         @id @default(uuid())
+  signatureId   String
+  bucketHour    DateTime       @db.Timestamptz(3)
+  count         Int
+  totalMs       BigInt
+  maxMs         Int
+  hist          Int[]
+  /// Failed statements in the bucket (any SQLSTATE).
+  errors        Int            @default(0)
+  /// all-statement histogram (FINE_HIST_BOUNDS); empty for Mongo (CHECK: cardinality 0 or 14)
+  histFine      Int[]          @default([])
+  /// Lowest sql.sampleRate applied to the bucket's under-threshold statements; null = none sampled.
+  minSampleRate Float?
+  signature     QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
 
   @@unique([signatureId, bucketHour])
   @@index([bucketHour])
 }
 
 model QueryDailyRollup {
-  id          String         @id @default(uuid())
-  signatureId String
-  day         DateTime       @db.Timestamptz(3)
-  count       Int
-  totalMs     BigInt
-  maxMs       Int
-  hist        Int[]
-  signature   QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
+  id            String         @id @default(uuid())
+  signatureId   String
+  day           DateTime       @db.Timestamptz(3)
+  count         Int
+  totalMs       BigInt
+  maxMs         Int
+  hist          Int[]
+  /// Failed statements in the bucket (any SQLSTATE).
+  errors        Int            @default(0)
+  /// all-statement histogram (FINE_HIST_BOUNDS); empty for Mongo (CHECK: cardinality 0 or 14)
+  histFine      Int[]          @default([])
+  /// Lowest sql.sampleRate applied to the bucket's under-threshold statements; null = none sampled.
+  minSampleRate Float?
+  signature     QuerySignature @relation(fields: [signatureId], references: [id], onDelete: Cascade)
 
   @@unique([signatureId, day])
   @@index([day])
@@ -241,4 +265,15 @@ model VerificationToken {
   user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, purpose])
+}
+
+/// New signatures refused at the per-app quota, counted per hour.
+model QuotaDrop {
+  appId      String
+  bucketHour DateTime @db.Timestamptz(3)
+  /// New signatures dropped in this hour because the app was at its quota.
+  droppedNew Int
+  app        App      @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@id([appId, bucketHour])
 }

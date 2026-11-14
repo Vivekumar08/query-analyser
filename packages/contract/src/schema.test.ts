@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ingestPayloadSchema } from './schema.js';
+import { FINE_HIST_BOUNDS, FINE_HIST_SIZE } from './runtime.js';
 
 const item = {
   signature: 'Order.find(status:eq)',
@@ -51,6 +52,22 @@ describe('ingestPayloadSchema', () => {
   it('rejects a batch larger than the cap', () => {
     const bad = { ...payload, items: Array.from({ length: 5001 }, () => item) };
     expect(() => ingestPayloadSchema.parse(bad)).toThrow();
+  });
+
+  it('caps thresholdMs at one hour (3_600_000 ms)', () => {
+    expect(ingestPayloadSchema.safeParse({ ...payload, thresholdMs: 3_600_000 }).success).toBe(true);
+    expect(ingestPayloadSchema.safeParse({ ...payload, thresholdMs: 3_600_001 }).success).toBe(false);
+    expect(ingestPayloadSchema.safeParse({ ...payload, thresholdMs: 1e10 }).success).toBe(false);
+  });
+
+  it('caps count and every hist and histFine bucket at the int range (2_147_483_647)', () => {
+    const MAX = 2_147_483_647;
+    const fine = (n: number) => Array.from({ length: FINE_HIST_SIZE }, (_, i) => (i === 3 ? n : 0));
+    const ok = (over: object) => ingestPayloadSchema.safeParse({ ...payload, items: [{ ...item, ...over }] }).success;
+    expect(ok({ count: MAX, hist: [MAX, 0, 0, 0, 0, 0, 0, 0], histFine: fine(MAX) })).toBe(true);
+    expect(ok({ count: MAX + 1 })).toBe(false);
+    expect(ok({ hist: [0, MAX + 1, 0, 0, 0, 0, 0, 0] })).toBe(false);
+    expect(ok({ histFine: fine(MAX + 1) })).toBe(false);
   });
 
   it('rejects an app name that is empty', () => {
@@ -117,4 +134,22 @@ describe('ingest item source and collection', () => {
     expect(ingestPayloadSchema.parse({ ...payload, items: [{ ...item, future: 1 }] }).items[0]).not.toHaveProperty(
       'future',
     ));
+});
+
+describe('sql item keys', () => {
+  const sqlItem = { ...item, source: 'postgresql', collection: 'User', orm: 'prisma', database: 'shop', sql: 'SELECT id FROM "User" WHERE id = ?',
+    errors: 2, errorCodes: [{ code: '23505', count: 2 }], histFine: [0, 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0], sampleRate: 0.1 };
+  it('accepts a 0.4 SQL item with every key', () =>
+    expect(ingestPayloadSchema.parse({ ...payload, items: [sqlItem] }).items[0]).toMatchObject(sqlItem));
+  it('a 0.3 Mongo item still parses with none of the new keys', () => {
+    const parsed = ingestPayloadSchema.parse({ ...payload, items: [{ ...item, source: 'mongodb', collection: 'orders' }] }).items[0]!;
+    for (const k of ['orm', 'database', 'sql', 'errors', 'errorCodes', 'histFine', 'sampleRate']) expect(parsed).not.toHaveProperty(k);
+  });
+  it.each([
+    { histFine: [1, 2] }, { sampleRate: 0 }, { sampleRate: 1.5 }, { errors: -1 }, { errors: 1.5 },
+    { errorCodes: [{ code: '2350', count: 1 }] }, { errorCodes: [{ code: '23505', count: 0 }] },
+    { errorCodes: Array.from({ length: 9 }, (_, i) => ({ code: `2350${i}`, count: 1 })) },
+    { sql: 'x'.repeat(16_385) }, { orm: '' }, { database: 'd'.repeat(256) },
+  ])('rejects %o', (extra) => expect(ingestPayloadSchema.safeParse({ ...payload, items: [{ ...sqlItem, ...extra }] }).success).toBe(false));
+  it('FINE_HIST_SIZE is one more than the bounds', () => expect(FINE_HIST_SIZE).toBe(FINE_HIST_BOUNDS.length + 1));
 });

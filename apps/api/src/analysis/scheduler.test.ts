@@ -15,6 +15,7 @@ vi.mock('./jobs.js', async (importOriginal) => ({
     dailyPruned: 0,
     adviceWritten: 0,
     newExpensive: 0,
+    quotaDropsPruned: 0,
   })),
 }));
 import { buildApp } from '../app.js';

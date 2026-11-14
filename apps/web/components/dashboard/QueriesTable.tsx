@@ -14,6 +14,7 @@ export function QueriesTable({ base, search, rows }: { base: string; search: str
           <TableRow>
             <TableHead className="w-[40%]">Query</TableHead>
             <TableHead className="text-right">Calls</TableHead>
+            <TableHead className="text-right">Errors</TableHead>
             <TableHead>Time wasted</TableHead>
             <TableHead className="text-right">Avg</TableHead>
             <TableHead className="text-right">p95</TableHead>
@@ -27,6 +28,7 @@ export function QueriesTable({ base, search, rows }: { base: string; search: str
                 <Link href={`${base}/queries/${encodeURIComponent(r.hash)}${q}`} className="block font-medium group-hover:text-accent-text">
                   {r.title}
                 </Link>
+                <span className="block text-xs text-muted-foreground">{r.sourceLabel} · {r.ormLabel}</span>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <code className="block truncate font-mono text-xs text-muted-foreground">{r.signature}</code>
@@ -34,7 +36,13 @@ export function QueriesTable({ base, search, rows }: { base: string; search: str
                   <TooltipContent className="max-w-md font-mono text-xs">{r.signature}</TooltipContent>
                 </Tooltip>
               </TableCell>
-              <TableCell className="text-right tabular-nums">{formatCount(r.count)}</TableCell>
+              <TableCell className="text-right tabular-nums">
+                {formatCount(r.count)}
+                {r.sampledLabel && <span className="block text-xs font-normal text-muted-foreground">{r.sampledLabel}</span>}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{r.errors === null
+                  ? <span title="Errors are not tracked for MongoDB" aria-label="Errors are not tracked for MongoDB">—</span>
+                  : formatCount(r.errors)}</TableCell>
               <TableCell>
                 <div className="flex items-center gap-2">
                   <span className="w-14 tabular-nums">{r.wasted}</span>

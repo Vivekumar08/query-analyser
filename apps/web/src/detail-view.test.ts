@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { createIndexCall, histogramData, trendData, trendValueText } from './detail-view';
 
+describe('trendData with a null p95', () => {
+  it('a populated bucket with no p95 plots as a gap', () => {
+    const d = trendData([{ at: '2026-10-18T09:00:00.000Z', count: 4, totalMs: '400', maxMs: 200, avgMs: 100, p95: null }], 'hourly');
+    expect(d[0]).toMatchObject({ calls: 4, p95: null, p95Basis: null });
+  });
+});
+
 describe('createIndexCall', () => {
   it('keeps field order and direction', () =>
     expect(createIndexCall('Order', [{ field: 'email', dir: 1 }, { field: 'total', dir: -1 }]))
@@ -41,4 +48,15 @@ describe('trend floor basis', () => {
   it('floor tooltip uses the lower-bound glyph via formatMs', () => expect(trendValueText('p95', 14002, 'floor')).toBe('≥ 14s'));
   it('interpolated tooltip uses ≈', () => expect(trendValueText('p95', 300, 'interpolated')).toBe('≈ 300ms'));
   it('calls use formatCount', () => expect(trendValueText('calls', 1234, null)).toBe('1,234'));
+});
+
+describe('trendData errors', () => {
+  it('carries errors, and null where there were no calls', () => {
+    const d = trendData([
+      { at: '2026-10-18T09:00:00.000Z', count: 4, totalMs: '400', maxMs: 200, avgMs: 100, p95: null, errors: 2 },
+      { at: '2026-10-18T10:00:00.000Z', count: 0, totalMs: '0', maxMs: 0, avgMs: 0, p95: null, errors: 0 },
+      { at: '2026-10-18T11:00:00.000Z', count: 3, totalMs: '3', maxMs: 1, avgMs: 1, p95: null },
+    ], 'hourly');
+    expect(d.map((p) => p.errors)).toEqual([2, null, 0]);
+  });
 });

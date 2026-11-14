@@ -4,6 +4,9 @@ import { buildApp } from '../app.js';
 import { resetDb } from '../test/db.js';
 import { generateKey } from './keys.js';
 import * as writer from './writer.js';
+import * as lock from './lock.js';
+import { bucketToDate } from './writer.js';
+import { bucketOf } from '@query-analyser/contract/runtime';
 import type { FastifyInstance } from 'fastify';
 import { encryptSample, generateSampleKeyPair, type IngestPayload } from '@query-analyser/contract';
 
@@ -26,7 +29,7 @@ async function seedKey(opts: { suspended?: boolean; revoked?: boolean; samplePub
 }
 
 const payload = (n = 1): IngestPayload => ({
-  app: 'web', env: 'prod', host: 'h', sdkVersion: '0.1.0', bucket: '2026092014', thresholdMs: 100, dropped: 0,
+  app: 'web', env: 'prod', host: 'h', sdkVersion: '0.1.0', bucket: bucketOf(new Date()), thresholdMs: 100, dropped: 0,
   items: Array.from({ length: n }, (_, i) => ({
     signature: `S${i}`, hash: i.toString(16).padStart(16, '0'), model: 'M', operation: 'find',
     filterShape: [], sortKeys: [], stages: [], count: 1, totalMs: 120, maxMs: 120, lastMs: 120, lastTs: 1,
@@ -46,7 +49,7 @@ describe('POST /v1/ingest', () => {
     const { app: a, key } = await seedKey();
     const res = await post(key, payload(2));
     expect(res.statusCode).toBe(202);
-    expect(res.json()).toEqual({ accepted: 2 });
+    expect(res.json()).toEqual({ accepted: 2, droppedNew: 0 });
     expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(2);
   });
 
@@ -64,7 +67,7 @@ describe('POST /v1/ingest', () => {
     const { key } = await seedKey();
     const res = await post(key, gzipSync(JSON.stringify(payload(3))), { 'content-encoding': 'gzip' });
     expect(res.statusCode).toBe(202);
-    expect(res.json()).toEqual({ accepted: 3 });
+    expect(res.json()).toEqual({ accepted: 3, droppedNew: 0 });
   });
 
   it('stamps lastUsedAt on the key', async () => {
@@ -104,6 +107,13 @@ describe('POST /v1/ingest', () => {
     expect(res.json()).toMatchObject({ error: 'invalid payload', issues: expect.any(Array) });
   });
 
+  it('400s a thresholdMs over one hour and writes nothing', async () => {
+    const { app: a, key } = await seedKey();
+    const res = await post(key, { ...payload(1), thresholdMs: 1e10 });
+    expect(res.statusCode).toBe(400);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(0);
+  });
+
   it('400s a histogram of the wrong length', async () => {
     const { key } = await seedKey();
     const p = payload();
@@ -111,18 +121,118 @@ describe('POST /v1/ingest', () => {
     expect((await post(key, p)).statusCode).toBe(400);
   });
 
-  it('429s when the app is over its signature quota', async () => {
-    const { app: a, key } = await seedKey();
-    // Fill the quota directly.
-    await app.prisma.querySignature.createMany({
-      data: Array.from({ length: 5000 }, (_, i) => ({
-        appId: a.id, hash: `q${i}`.padStart(16, '0'), signature: 's', model: 'M', operation: 'find',
+  const fillQuota = (appId: string, n: number) =>
+    app.prisma.querySignature.createMany({
+      data: Array.from({ length: n }, (_, i) => ({
+        appId, hash: `q${i}`.padStart(16, '0'), signature: 's', model: 'M', operation: 'find',
         filterShape: [], sortKeys: [], stages: [],
       })),
     });
-    const res = await post(key, payload());
-    expect(res.statusCode).toBe(429);
-    expect(res.json()).toMatchObject({ error: 'signature quota exceeded', limit: 5000 });
+
+  it('at the quota, drops new shapes, answers 202 with droppedNew and records the drop', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 5000);
+    const res = await post(key, payload(3));
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: 0, droppedNew: 3 });
+    // Recorded under the server's current hour, not the payload's bucket.
+    const drop = await app.prisma.quotaDrop.findFirstOrThrow({ where: { appId: a.id } });
+    expect(drop.droppedNew).toBe(3);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
+  });
+
+  it('Review Focus: a 6,000-shape app stores every known item and the new ones up to the quota', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 4990);
+    const known = Array.from({ length: 50 }, (_, i) => `q${i}`.padStart(16, '0'));
+    const body = payload(1050);
+    body.items.forEach((it, i) => { it.hash = i < 50 ? known[i]! : `n${i}`.padStart(16, '0'); });
+    const res = await post(key, body);
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: 60, droppedNew: 990 });
+    const hourly = (h: string) => app.prisma.queryRollup.count({ where: { signature: { appId: a.id, hash: h } } });
+    expect(await app.prisma.queryRollup.count({ where: { signature: { appId: a.id, hash: { in: known } } } })).toBe(50);
+    const newHashes = body.items.slice(50).map((i) => i.hash);
+    const stored = await app.prisma.querySignature.findMany({ where: { appId: a.id, hash: { in: newHashes } }, select: { hash: true } });
+    expect(stored.map((r) => r.hash).sort()).toEqual(newHashes.slice(0, 10).sort());
+    expect(await hourly(newHashes[10]!)).toBe(0);
+    const dropRow = () => app.prisma.quotaDrop.findFirstOrThrow({ where: { appId: a.id } });
+    expect((await dropRow()).droppedNew).toBe(990);
+    const again = await post(key, body);
+    expect(again.json()).toEqual({ accepted: 60, droppedNew: 990 });
+    expect((await dropRow()).droppedNew).toBe(1980);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
+  });
+
+  it('a 0.3 Mongo payload at the quota is partially accepted the same way', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 4999);
+    const body = payload(3);
+    body.sdkVersion = '0.3.0';
+    body.items.forEach((it, i) => { it.hash = `m${i}`.padStart(16, '0'); it.source = 'mongodb'; it.collection = 'orders'; });
+    const res = await post(key, body);
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: 1, droppedNew: 2 });
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
+  });
+
+  it('two batches racing at the boundary do not push the count past the quota', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 4990);
+    const mk = (prefix: string) => {
+      const b = payload(10);
+      b.items.forEach((it, i) => { it.hash = `${prefix}${i}`.padStart(16, '0'); });
+      return b;
+    };
+    const [r1, r2] = await Promise.all([post(key, mk('x')), post(key, mk('y'))]);
+    expect(r1.statusCode).toBe(202);
+    expect(r2.statusCode).toBe(202);
+    const [b1, b2] = [r1.json(), r2.json()];
+    expect(b1.accepted + b2.accepted).toBe(10);
+    expect(b1.droppedNew + b2.droppedNew).toBe(10);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(5000);
+    const drops = await app.prisma.quotaDrop.findMany({ where: { appId: a.id } });
+    expect(drops.reduce((n, d) => n + d.droppedNew, 0)).toBe(10);
+    expect(app.ingestStats.droppedNew).toBeGreaterThanOrEqual(10);
+  });
+
+  it('records the drop under the server hour, not a client-supplied future bucket', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 5000);
+    const body = payload(2);
+    // The furthest-ahead bucket the route accepts (a far-future one is now a 400).
+    body.bucket = bucketOf(new Date(Date.now() + 3_600_000));
+    const before = Date.now();
+    expect((await post(key, body)).json()).toEqual({ accepted: 0, droppedNew: 2 });
+    const rows = await app.prisma.quotaDrop.findMany({ where: { appId: a.id } });
+    expect(rows).toHaveLength(1);
+    expect(bucketOf(rows[0]!.bucketHour)).not.toBe(body.bucket);
+    expect(Math.abs(rows[0]!.bucketHour.getTime() - before)).toBeLessThan(2 * 3_600_000);
+  });
+
+  it('takes the per-app lock only for a batch that carries new hashes', async () => {
+    const { key } = await seedKey();
+    const spy = vi.spyOn(lock, 'withAppLock');
+    expect((await post(key, payload(2))).statusCode).toBe(202);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect((await post(key, payload(2))).statusCode).toBe(202); // the same two hashes, now known
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-checks known hashes inside the lock: a hash another batch stored meanwhile is not dropped at quota', async () => {
+    const { app: a, key } = await seedKey();
+    await fillQuota(a.id, 5000);
+    const body = payload(1);
+    const real = lock.withAppLock;
+    vi.spyOn(lock, 'withAppLock').mockImplementation(async (id, fn) => {
+      // A concurrent batch commits this hash between the check outside the lock and the one inside it.
+      await app.prisma.querySignature.create({ data: {
+        appId: a.id, hash: body.items[0]!.hash, signature: 's', model: 'M', operation: 'find', filterShape: [], sortKeys: [], stages: [],
+      } });
+      return real(id, fn);
+    });
+    // fillQuota's 5000 plus the one created above: the quota is already passed, but the hash is known.
+    expect((await post(key, body)).json()).toEqual({ accepted: 1, droppedNew: 0 });
   });
 
   it('still accepts a batch of already-known signatures at quota', async () => {
@@ -134,7 +244,9 @@ describe('POST /v1/ingest', () => {
         filterShape: [], sortKeys: [], stages: [],
       })),
     });
-    expect((await post(key, payload(1))).statusCode).toBe(202);
+    const res = await post(key, payload(1));
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toEqual({ accepted: 1, droppedNew: 0 });
   });
 
   it('413s a body over the limit', async () => {
@@ -164,6 +276,50 @@ describe('POST /v1/ingest', () => {
     expect(body).toEqual({ error: 'Internal Server Error' });
     expect(JSON.stringify(body)).not.toMatch(/constraint|QueryRollup|relation/i);
     spy.mockRestore();
+  });
+});
+
+describe('POST /v1/ingest — bucket', () => {
+  const HOUR = 3_600_000;
+  const hoursFromNow = (h: number) => bucketOf(new Date(Date.now() + h * HOUR));
+  const withBucket = (bucket: string) => ({ ...payload(1), bucket });
+
+  it('accepts the current hour and writes the rollup under it', async () => {
+    const { app: a, key } = await seedKey();
+    const bucket = hoursFromNow(0);
+    expect((await post(key, withBucket(bucket))).statusCode).toBe(202);
+    const sig = await app.prisma.querySignature.findFirstOrThrow({ where: { appId: a.id } });
+    const roll = await app.prisma.queryRollup.findFirstOrThrow({ where: { signatureId: sig.id } });
+    expect(roll.bucketHour.toISOString()).toBe(bucketToDate(bucket).toISOString());
+  });
+
+  it('accepts the window edges it promises: 47 hours back and 1 hour ahead', async () => {
+    const { key } = await seedKey();
+    expect((await post(key, withBucket(hoursFromNow(-47)))).statusCode).toBe(202);
+    expect((await post(key, withBucket(hoursFromNow(1)))).statusCode).toBe(202);
+  });
+
+  it('400s a bucket that is not a real hour (month 13, hour 24, day 31 of February) and writes nothing', async () => {
+    const { app: a, key } = await seedKey();
+    for (const bucket of ['2026130110', '2026110324', '2026023110']) {
+      const res = await post(key, withBucket(bucket));
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({ error: 'invalid bucket' });
+    }
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(0);
+  });
+
+  it('400s a far-future bucket', async () => {
+    const { key } = await seedKey();
+    expect((await post(key, withBucket('2099010100'))).statusCode).toBe(400);
+    expect((await post(key, withBucket(hoursFromNow(3)))).statusCode).toBe(400);
+  });
+
+  it('400s a bucket 3 days old', async () => {
+    const { app: a, key } = await seedKey();
+    expect((await post(key, withBucket(hoursFromNow(-72)))).statusCode).toBe(400);
+    expect(await app.prisma.queryRollup.count()).toBe(0);
+    expect(await app.prisma.querySignature.count({ where: { appId: a.id } })).toBe(0);
   });
 });
 

@@ -5,7 +5,7 @@ export function buildSnippet(
   return {
     install: 'npm install @vivekumar08/query-analyser',
     code: [
-      `// Call this before your app connects to MongoDB.`,
+      `// Call this before your app connects to its database.`,
       `require('@vivekumar08/query-analyser').init({`,
       `  apiKey: ${JSON.stringify(key)},`,
       `  app: ${JSON.stringify(appName)},`,

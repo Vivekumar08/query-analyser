@@ -16,7 +16,13 @@ export function Percentile({
   showLabel?: boolean;
 }) {
   const prefix = showLabel ? `${label} ` : '';
-  if (!value) return <span className="tabular-nums">{prefix}—</span>;
+  if (!value) {
+    return (
+      <span className="tabular-nums" aria-label="Not available" title="Not available: this query's timings are not recorded finely enough to estimate a percentile">
+        {prefix}—
+      </span>
+    );
+  }
   const floor = value.basis === 'floor';
   return (
     <span

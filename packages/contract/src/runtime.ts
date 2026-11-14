@@ -7,6 +7,10 @@
 export const HIST_BOUNDS = [100, 250, 500, 1000, 2500, 5000, 10000] as const;
 export const HIST_SIZE = 8;
 
+/** Upper bounds (ms) of the fine latency histogram used by SQL items; the last bucket is open-ended. */
+export const FINE_HIST_BOUNDS = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000] as const;
+export const FINE_HIST_SIZE = 14;
+
 export type OpClass = 'eq' | 'in' | 'range' | 'regex' | 'exists' | 'ne' | 'other';
 
 export interface FilterShapeItem {
@@ -17,6 +21,11 @@ export interface FilterShapeItem {
 export interface SortKey {
   key: string;
   dir: 1 | -1;
+}
+
+export interface ErrorCodeCount {
+  code: string;
+  count: number;
 }
 
 export interface IngestItem {
@@ -38,6 +47,20 @@ export interface IngestItem {
   source?: string;
   /** The real collection name the command ran against (at most 255 characters). Absent on SDK 0.1/0.2 payloads. */
   collection?: string;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. The ORM that issued the statement (e.g. `prisma`). */
+  orm?: string;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. The database name (a label, not part of the hash). */
+  database?: string;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. The normalised SQL text, every literal replaced by `?`. */
+  sql?: string;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. Count of failed statements. */
+  errors?: number;
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. Failed-statement counts by SQLSTATE (at most 8). */
+  errorCodes?: ErrorCodeCount[];
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. Fine latency histogram, FINE_HIST_SIZE buckets. */
+  histFine?: number[];
+  /** SQL items only; absent on Mongo items and on SDK 0.1–0.3. Fraction (0 < r <= 1) of fast, successful statements that were counted. */
+  sampleRate?: number;
   /** Present only when the SDK was given a `sampleKey`; `null` when this item's sample was skipped. */
   encryptedSample?: EncryptedSample | null;
 }
@@ -51,6 +74,12 @@ export interface IngestPayload {
   thresholdMs: number;
   dropped: number;
   items: IngestItem[];
+}
+
+/** Response body of a successful ingest. */
+export interface IngestResponse {
+  accepted: number;
+  droppedNew: number;
 }
 
 /** `YYYYMMDDHH` in UTC — the hour bucket a measurement belongs to. */

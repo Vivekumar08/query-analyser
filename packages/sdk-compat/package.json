@@ -6,11 +6,13 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "bench": "QA_BENCH=1 vitest run src/overhead.test.ts"
+    "bench": "QA_BENCH=1 vitest run src/overhead.test.ts src/sql-overhead.test.ts",
+    "prisma:setup": "node scripts/prisma-setup.mjs"
   },
   "devDependencies": {
     "@query-analyser/contract": "workspace:*",
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.10",
     "mongodb-memory-server": "^10.1.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8",
@@ -22,6 +24,14 @@
     "mongoose6": "npm:mongoose@6.13.12",
     "mongoose7": "npm:mongoose@7.8.13",
     "mongoose8": "npm:mongoose@8.24.8",
-    "mongoose9": "npm:mongoose@9.11.4"
+    "mongoose9": "npm:mongoose@9.11.4",
+    "pg800": "npm:pg@8.0.3",
+    "pg804": "npm:pg@8.4.2",
+    "pg807": "npm:pg@8.7.3",
+    "pg811": "npm:pg@8.11.6",
+    "pg813": "npm:pg@8.13.3",
+    "pg816": "npm:pg@8.16.3",
+    "pg820": "npm:pg@8.20.0",
+    "pg823": "npm:pg@8.23.1"
   }
 }

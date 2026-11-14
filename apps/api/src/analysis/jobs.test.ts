@@ -101,6 +101,31 @@ describe('runNightlyJobs', () => {
     expect(order.indexOf('compact')).toBeLessThan(order.indexOf('prune'));
   });
 
+  it('prunes QuotaDrop per app by plan retention, at UTC day boundaries', async () => {
+    const mk = async (slug: string, plan: string) => {
+      const org = await app.prisma.organization.create({ data: { name: slug, slug, plan } });
+      return app.prisma.app.create({ data: { orgId: org.id, name: slug, env: 'prod' } });
+    };
+    const free = await mk('qf', 'free');
+    const pro = await mk('qp', 'pro');
+    const now = new Date('2026-09-20T02:00:00.000Z');
+    const past = new Date('2027-02-01T00:00:00.000Z'); // plan values apply (grace over)
+    // Cutoffs at 2026-09-20T02:00: free 30d -> 08-21T00:00 (day-truncated), pro 90d -> 06-22T00:00.
+    await app.prisma.quotaDrop.createMany({
+      data: [
+        { appId: free.id, bucketHour: new Date('2026-08-21T00:00:00.000Z'), droppedNew: 1 }, // first hour of window: kept
+        { appId: free.id, bucketHour: new Date('2026-08-20T23:00:00.000Z'), droppedNew: 2 }, // pruned
+        { appId: pro.id, bucketHour: new Date('2026-08-01T05:00:00.000Z'), droppedNew: 3 }, // inside 90d: kept
+        { appId: pro.id, bucketHour: new Date('2026-06-21T23:00:00.000Z'), droppedNew: 4 }, // pruned
+      ],
+    });
+    const res = await runNightlyJobs({ prisma: app.prisma, now: new Date('2026-09-20T02:00:00.000Z'), retentionGraceUntil: new Date('2026-01-01T00:00:00.000Z') });
+    void past;
+    expect(res.quotaDropsPruned).toBe(2);
+    const left = await app.prisma.quotaDrop.findMany();
+    expect(left.map((r) => r.droppedNew).sort()).toEqual([1, 3]);
+  });
+
   it('prunes hourly at 7 days and daily by plan', async () => {
     await seedRollup(new Date('2026-09-19T03:00:00.000Z'));
 
@@ -217,6 +242,17 @@ describe('refreshAdvice (via runNightlyJobs)', () => {
 
     const nullAfter = await app.prisma.advice.findUnique({ where: { signatureId: nullId } });
     expect(nullAfter).toBeNull();
+  });
+
+  it('writes no advice for a postgresql signature', async () => {
+    const id = await seedSignature([{ key: 'email', op: 'eq' }], []);
+    await app.prisma.querySignature.update({ where: { id }, data: { source: 'postgresql' } });
+    const mongoId = await seedSignature([{ key: 'email', op: 'eq' }], []);
+    await app.prisma.querySignature.update({ where: { id: mongoId }, data: { source: 'mongodb' } });
+    const result = await runNightlyJobs({ prisma: app.prisma, now: new Date('2026-09-20T02:00:00.000Z') });
+    expect(result.adviceWritten).toBe(1);
+    expect(await app.prisma.advice.findUnique({ where: { signatureId: id } })).toBeNull();
+    expect(await app.prisma.advice.findUnique({ where: { signatureId: mongoId } })).not.toBeNull();
   });
 
   /**
@@ -339,5 +375,52 @@ describe('runHourlyJobs', () => {
     expect(r.alertsCreated).toBe(0);
     const alerts = await app.prisma.alert.findMany({ where: { signatureId: sigId } });
     expect(alerts).toHaveLength(0);
+  });
+});
+
+describe('runHourlyJobs regression on SQL signatures', () => {
+  const now = new Date('2026-09-20T02:30:00.000Z');
+  const latestHour = new Date('2026-09-20T01:00:00.000Z');
+  const fineAt = (bucket: number, n: number) => Array.from({ length: 14 }, (_, i) => (i === bucket ? n : 0));
+
+  async function seedSql(latestFine: number[]) {
+    const org = await app.prisma.organization.create({ data: { name: 'S', slug: `s-${Math.random()}` } });
+    const a = await app.prisma.app.create({ data: { orgId: org.id, name: 's', env: 'production' } });
+    const sig = await app.prisma.querySignature.create({
+      data: {
+        appId: a.id, hash: `h${Math.random()}`.slice(0, 16), signature: 's', model: 'm', operation: 'select',
+        filterShape: [], sortKeys: [], stages: [], source: 'postgresql',
+      },
+    });
+    for (const h of [18, 19, 20, 21]) {
+      await app.prisma.queryRollup.create({
+        data: {
+          signatureId: sig.id, bucketHour: new Date(`2026-09-19T${h}:00:00.000Z`), count: 30, totalMs: 100n, maxMs: 4,
+          hist: [0, 0, 0, 0, 0, 0, 0, 0], histFine: fineAt(2, 30),
+        },
+      });
+    }
+    await app.prisma.queryRollup.create({
+      data: {
+        signatureId: sig.id, bucketHour: latestHour, count: 30, totalMs: 100n, maxMs: 900,
+        // coarse hist holds slow statements only; the real latency lives in histFine
+        hist: [0, 0, 0, 0, 0, 0, 10, 0], histFine: latestFine,
+      },
+    });
+    return sig.id;
+  }
+
+  it('alerts on a real regression read from a complete fine histogram', async () => {
+    const id = await seedSql(fineAt(9, 30));
+    const res = await runHourlyJobs({ prisma: app.prisma, now });
+    expect(res.alertsCreated).toBe(1);
+    expect(await app.prisma.alert.count({ where: { signatureId: id } })).toBe(1);
+  });
+
+  it('skips a SQL signature whose latest fine histogram is partial', async () => {
+    const id = await seedSql(fineAt(9, 10)); // 10 of 30 statements
+    const res = await runHourlyJobs({ prisma: app.prisma, now });
+    expect(res.alertsCreated).toBe(0);
+    expect(await app.prisma.alert.count({ where: { signatureId: id } })).toBe(0);
   });
 });

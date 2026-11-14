@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { percentileFromHist, avgMs } from './percentile.js';
+import { FINE_HIST_BOUNDS } from '@query-analyser/contract/runtime';
+import { percentileFromHist, percentiles, avgMs } from './percentile.js';
 
 describe('percentileFromHist', () => {
   it('returns zero for an empty histogram', () => {
@@ -56,5 +57,23 @@ describe('avgMs', () => {
 
   it('rounds to two decimals', () => {
     expect(avgMs(100n, 3)).toBe(33.33);
+  });
+});
+
+describe('fine histogram percentiles', () => {
+  const fine = [0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  it('reads the fine histogram with its own bounds', () =>
+    expect(percentileFromHist(fine, 4, 0.5, FINE_HIST_BOUNDS)).toEqual({ value: 3.5, basis: 'interpolated' }));
+  it('reports the observed max in the open top fine bucket', () =>
+    expect(percentileFromHist([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4], 20000, 0.5, FINE_HIST_BOUNDS)).toEqual({
+      value: 20000,
+      basis: 'floor',
+    }));
+  it('percentiles prefers histFine and falls back to hist', () => {
+    const hist = [10, 0, 0, 0, 0, 0, 0, 0];
+    expect(percentiles(hist, null, 80).p95).toEqual(percentileFromHist(hist, 80, 0.95));
+    expect(percentiles(hist, [], 80).p50).toEqual(percentileFromHist(hist, 80, 0.5));
+    expect(percentiles(hist, fine, 4).p50).toEqual({ value: 3.5, basis: 'interpolated' });
+    expect(percentiles(hist, fine, 4).p99.value).toBeLessThanOrEqual(4);
   });
 });

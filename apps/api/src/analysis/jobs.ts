@@ -1,10 +1,10 @@
 import type { PrismaClient } from '../db.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { isForeignKeyViolation } from '../db-errors.js';
-import { compactDay, pruneHourly, pruneDailyByPlan } from './compaction.js';
+import { compactDay, pruneHourly, pruneDailyByPlan, pruneQuotaDropsByPlan } from './compaction.js';
 import { DEFAULT_RETENTION_GRACE_UNTIL } from '../plans.js';
 import { detectRegression, type HourPoint } from './regression.js';
-import { percentileFromHist } from './percentile.js';
+import { percentileFromHist, percentiles, completeFine, isSqlSource } from './percentile.js';
 import { adviceFor, type SuggestionField } from './advice.js';
 import type { FilterShapeItem, SortKey } from '@query-analyser/contract/runtime';
 
@@ -41,6 +41,7 @@ export interface NightlyResult {
   dailyPruned: number;
   adviceWritten: number;
   newExpensive: number;
+  quotaDropsPruned: number;
 }
 
 /**
@@ -76,7 +77,15 @@ export async function runHourlyJobs(deps: JobDeps): Promise<HourlyResult> {
 
   const rollups = await deps.prisma.queryRollup.findMany({
     where: { bucketHour: { gte: windowStart, lte: lastComplete } },
-    select: { signatureId: true, bucketHour: true, count: true, maxMs: true, hist: true },
+    select: {
+      signatureId: true,
+      bucketHour: true,
+      count: true,
+      maxMs: true,
+      hist: true,
+      histFine: true,
+      signature: { select: { source: true } },
+    },
   });
 
   const bySignature = new Map<string, typeof rollups>();
@@ -92,13 +101,24 @@ export async function runHourlyJobs(deps: JobDeps): Promise<HourlyResult> {
     const latestRow = rows.find((r) => r.bucketHour.getTime() === lastComplete.getTime());
     if (!latestRow) continue;
 
-    const point = (r: (typeof rows)[number]): HourPoint => ({
-      p95: percentileFromHist(r.hist, r.maxMs, 0.95).value,
-      count: r.count,
-    });
+    // SQL: the coarse histogram holds slow statements only, so a p95 from it is
+    // not the p95 of the traffic. Use a complete fine histogram, or leave the
+    // hour out (a SQL signature whose latest hour has none is skipped).
+    const sql = isSqlSource(latestRow.signature.source);
+    const point = (r: (typeof rows)[number]): HourPoint | null => {
+      if (!sql) return { p95: percentileFromHist(r.hist, r.maxMs, 0.95).value, count: r.count };
+      const fine = completeFine(r.histFine, r.count);
+      if (!fine) return null;
+      return { p95: percentiles(r.hist, fine, r.maxMs).p95.value, count: r.count };
+    };
 
-    const trailing = rows.filter((r) => r !== latestRow).map(point);
-    const detail = detectRegression(trailing, point(latestRow));
+    const latest = point(latestRow);
+    if (!latest) continue;
+    const trailing = rows
+      .filter((r) => r !== latestRow)
+      .map(point)
+      .filter((x): x is HourPoint => x !== null);
+    const detail = detectRegression(trailing, latest);
     if (!detail) continue;
 
     const written = await unlessDeleted(() => deps.prisma.alert.create({
@@ -162,7 +182,9 @@ export async function runNightlyJobs(deps: JobDeps): Promise<NightlyResult> {
   const graceUntil = deps.retentionGraceUntil ?? new Date(`${DEFAULT_RETENTION_GRACE_UNTIL}T00:00:00.000Z`);
   const dailyPruned = await pruneDailyByPlan(deps.prisma, now, graceUntil);
 
-  return { daysCompacted, hourlyPruned, dailyPruned, adviceWritten, newExpensive };
+  const quotaDropsPruned = await pruneQuotaDropsByPlan(deps.prisma, now, graceUntil);
+
+  return { daysCompacted, hourlyPruned, dailyPruned, adviceWritten, newExpensive, quotaDropsPruned };
 }
 
 const NEW_SIGNATURE_WINDOW_MS = 24 * 3_600_000;
@@ -289,7 +311,8 @@ async function refreshAdviceForApp(prisma: PrismaClient, appId: string): Promise
 
   for (;;) {
     const signatures = await prisma.querySignature.findMany({
-      where: { appId },
+      // Index advice is a Mongo concept: SQL signatures never get any.
+      where: { appId, OR: [{ source: null }, { source: 'mongodb' }] },
       select: {
         id: true,
         filterShape: true,

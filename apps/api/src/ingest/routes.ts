@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import { bucketOf } from '@query-analyser/contract/runtime';
 import { ingestPayloadSchema, type IngestPayload } from '@query-analyser/contract';
-import { writeBatch } from './writer.js';
+import { writeBatch, bucketToDate } from './writer.js';
+import { withAppLock } from './lock.js';
 import { hashKey } from './keys.js';
 import { isForeignKeyViolation } from '../db-errors.js';
 
@@ -12,6 +14,25 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 // bounding a single-source flood. The per-app signature quota (below) is
 // the control for authenticated abuse; this is only the pre-auth backstop.
 const DEFAULT_RATE_LIMIT_MAX = 600;
+const HOUR_MS = 3_600_000;
+// The SDK always sends the hour it is flushing in. A bucket is accepted from
+// 48 hours back (a client that retried through an outage) to 1 hour ahead
+// (a client clock running fast), measured in whole server hours.
+const BUCKET_MAX_AGE_HOURS = 48;
+const BUCKET_MAX_LEAD_HOURS = 1;
+
+/**
+ * Whether a client `bucket` (YYYYMMDDHH, UTC) is a real hour inside the
+ * accepted window. The schema checks only its shape; without this, a client
+ * could write rollups into any hour (month 13 rolls over, 2099 is never pruned).
+ */
+function isAcceptableBucket(bucket: string, now: Date): boolean {
+  const at = bucketToDate(bucket);
+  if (Number.isNaN(at.getTime()) || bucketOf(at) !== bucket) return false;
+  const thisHour = bucketToDate(bucketOf(now)).getTime();
+  const t = at.getTime();
+  return t >= thisHour - BUCKET_MAX_AGE_HOURS * HOUR_MS && t <= thisHour + BUCKET_MAX_LEAD_HOURS * HOUR_MS;
+}
 
 export interface IngestRoutesOptions {
   rateLimitMax?: number;
@@ -20,11 +41,11 @@ export interface IngestRoutesOptions {
 export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptions = {}): Promise<void> {
   const rateLimitMax = opts.rateLimitMax ?? DEFAULT_RATE_LIMIT_MAX;
 
-  // Count every 429 this route emits, not just the signature-quota one
-  // below. @fastify/rate-limit's own preHandler can reject a request with
-  // 429 before the handler below ever runs, so counting only inside the
-  // quota branch would under-report during a rate-limit storm — exactly
-  // when an operator most needs `rejected429` to be accurate. This hook is
+  // Count every 429 this route emits. The signature quota no longer 429s;
+  // @fastify/rate-limit's own preHandler can reject a request with 429
+  // before the handler below ever runs, so counting in the handler would
+  // under-report during a rate-limit storm — exactly when an operator most
+  // needs `rejected429` to be accurate. This hook is
   // scoped to this plugin's encapsulation context, so it only observes
   // responses from the /v1/ingest route declared below.
   app.addHook('onResponse', async (_req, reply) => {
@@ -60,22 +81,47 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
       // (`unknown | null`). The runtime shapes agree — a parsed item always
       // has the key, possibly `null` — so this is a type-level-only cast.
       const payload = parsed.data as IngestPayload;
+      if (!isAcceptableBucket(payload.bucket, new Date())) {
+        app.ingestStats.rejected400 += 1;
+        return reply.code(400).send({ error: 'invalid bucket' });
+      }
 
-      // Quota: only new hashes count toward it.
+      // Quota: only new hashes count toward it. At the quota the batch is
+      // not refused: items for known signatures are kept, new ones past the
+      // room left are dropped and the drop is recorded. A batch of known
+      // hashes only (the steady state) writes without the per-app lock. One
+      // with new hashes re-checks under the lock, so two batches racing at
+      // the boundary cannot both claim the last slots (in-process; across
+      // replicas the overshoot is bounded by one batch per replica).
+      const appId = resolved.appId;
+      const keyId = resolved.keyId;
       const hashes = [...new Set(payload.items.map((i) => i.hash))];
-      if (hashes.length > 0) {
-        const known = await app.prisma.querySignature.count({
-          where: { appId: resolved.appId, hash: { in: hashes } },
+      const freshOf = async (candidates: string[]): Promise<string[]> => {
+        if (candidates.length === 0) return [];
+        const knownRows = await app.prisma.querySignature.findMany({
+          where: { appId, hash: { in: candidates } },
+          select: { hash: true },
         });
-        const newCount = hashes.length - known;
-        if (newCount > 0) {
-          const existing = await app.prisma.querySignature.count({ where: { appId: resolved.appId } });
-          if (existing + newCount > SIGNATURE_QUOTA) {
-            // Counted by the onResponse hook above, not here, to avoid
-            // double-counting against a plugin-level rate-limit 429.
-            return reply.code(429).send({ error: 'signature quota exceeded', limit: SIGNATURE_QUOTA });
-          }
+        const known = new Set(knownRows.map((r) => r.hash));
+        return candidates.filter((h) => !known.has(h));
+      };
+      const freshOutside = await freshOf(hashes);
+      if (freshOutside.length === 0) return handleBatch(new Set());
+      return withAppLock(appId, async () => {
+        // Re-check: another batch may have stored some of these meanwhile.
+        const fresh = await freshOf(freshOutside);
+        const dropped = new Set<string>();
+        if (fresh.length > 0) {
+          const existing = await app.prisma.querySignature.count({ where: { appId } });
+          const room = Math.max(0, SIGNATURE_QUOTA - existing);
+          for (const h of fresh.slice(room)) dropped.add(h);
         }
+        return handleBatch(dropped);
+      });
+
+      async function handleBatch(dropped: Set<string>) {
+      if (dropped.size > 0) {
+        payload.items = payload.items.filter((i) => !dropped.has(i.hash));
       }
 
       // A malformed payload should never reach writeBatch (zod already
@@ -85,7 +131,7 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
       // reach the client. Log it server-side and return a clean 500.
       let signatures: number;
       try {
-        ({ signatures } = await writeBatch(app.prisma, resolved.appId, payload));
+        ({ signatures } = await writeBatch(app.prisma, appId, payload));
       } catch (err) {
         // A key cached (here, for up to 60s) for an app deleted since: on
         // another replica, or by a delete that committed after this request
@@ -93,7 +139,7 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
         // its foreign key. If the app really is gone, the key is dead: evict
         // it and refuse it like any unknown key, rather than 500 until the
         // cache entry expires.
-        if (isForeignKeyViolation(err) && !(await app.prisma.app.findUnique({ where: { id: resolved.appId }, select: { id: true } }))) {
+        if (isForeignKeyViolation(err) && !(await app.prisma.app.findUnique({ where: { id: appId }, select: { id: true } }))) {
           app.keys.invalidate(hashKey(key));
           app.ingestStats.rejected401 += 1;
           return reply.code(401).send({ error: 'invalid ingest key' });
@@ -104,11 +150,28 @@ export async function ingestRoutes(app: FastifyInstance, opts: IngestRoutesOptio
 
       // Fire-and-forget: never make the SDK wait on a bookkeeping write.
       void app.prisma.ingestKey
-        .update({ where: { id: resolved.keyId }, data: { lastUsedAt: new Date() } })
+        .update({ where: { id: keyId }, data: { lastUsedAt: new Date() } })
         .catch((err: unknown) => req.log.warn({ err }, 'lastUsedAt update failed'));
 
+      if (dropped.size > 0) {
+        // Server clock, never the client's bucket: a far-future bucket would never be pruned.
+        const bucketHour = bucketToDate(bucketOf(new Date()));
+        try {
+          await app.prisma.$executeRaw`
+            INSERT INTO "QuotaDrop" ("appId", "bucketHour", "droppedNew")
+            VALUES (${appId}, ${bucketHour}, ${dropped.size})
+            ON CONFLICT ("appId", "bucketHour")
+            DO UPDATE SET "droppedNew" = "QuotaDrop"."droppedNew" + EXCLUDED."droppedNew"`;
+        } catch (err) {
+          // Bookkeeping only: the batch itself was stored.
+          req.log.warn({ err }, 'QuotaDrop write failed');
+        }
+        app.ingestStats.droppedNew += dropped.size;
+      }
+
       app.ingestStats.accepted += signatures;
-      return reply.code(202).send({ accepted: signatures });
+      return reply.code(202).send({ accepted: signatures, droppedNew: dropped.size });
+      }
     },
   );
 }
