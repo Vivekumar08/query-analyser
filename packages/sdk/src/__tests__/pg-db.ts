@@ -9,26 +9,26 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
-const API_ENV = fileURLToPath(new URL('../../../../apps/api/.env', import.meta.url));
+const ROOT_ENV = fileURLToPath(new URL('../../../../.env', import.meta.url));
 const NAME = /^qa_sdk_[a-z0-9_]+$/;
 
-/** DATABASE_URL from apps/api/.env (a regex over the file; quotes stripped), or null. */
-function urlFromApiEnv(): string | null {
+/** QA_PG_URL from the repo-root .env (a regex over the file; quotes stripped), or null. */
+function urlFromRootEnv(): string | null {
   let text: string;
-  try { text = readFileSync(API_ENV, 'utf8'); } catch { return null; }
-  const m = /^[ \t]*(?:export[ \t]+)?DATABASE_URL[ \t]*=[ \t]*(.*?)[ \t]*$/m.exec(text);
+  try { text = readFileSync(ROOT_ENV, 'utf8'); } catch { return null; }
+  const m = /^[ \t]*(?:export[ \t]+)?QA_PG_URL[ \t]*=[ \t]*(.*?)[ \t]*$/m.exec(text);
   if (!m) return null;
   const v = m[1]!.replace(/^(['"])(.*)\1$/, '$2').trim();
   return v === '' ? null : v;
 }
 
-/** The base URL: QA_PG_URL, else DATABASE_URL read from apps/api/.env. Throws a clear error when neither exists. Never logged. */
+/** The base URL: QA_PG_URL from the environment, else from the repo-root .env. Throws a clear error when neither exists. Never logged. */
 export function basePgUrl(): string {
   const fromEnv = process.env.QA_PG_URL;
   if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return fromEnv.trim();
-  const fromFile = urlFromApiEnv();
+  const fromFile = urlFromRootEnv();
   if (fromFile !== null) return fromFile;
-  throw new Error('pg-db: no Postgres URL; set QA_PG_URL or DATABASE_URL in apps/api/.env');
+  throw new Error('pg-db: no Postgres URL; set QA_PG_URL in the environment or the repo-root .env');
 }
 
 /** The base URL pointed at another database (query string, e.g. sslmode, kept). */

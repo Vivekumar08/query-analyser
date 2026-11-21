@@ -35,7 +35,7 @@ export const SUITE = { timeout: TEST_TIMEOUT_MS };
 export const available = await pgAvailable();
 if (!available.ok) {
   // eslint-disable-next-line no-console
-  console.warn(`[prisma compat] skipped: no reachable Postgres (${available.reason}). Set QA_PG_URL or apps/api/.env DATABASE_URL.`);
+  console.warn(`[prisma compat] skipped: no reachable Postgres (${available.reason}). Set QA_PG_URL (environment or repo-root .env).`);
 }
 
 export type Db = Awaited<ReturnType<typeof createThrowawayDb>>;

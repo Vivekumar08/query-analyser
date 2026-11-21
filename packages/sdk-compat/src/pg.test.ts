@@ -18,7 +18,7 @@ import { PGS, capture, itemsOf, sqlOf, sum, type PgItem } from './pg-harness.js'
 const available = await pgAvailable();
 if (!available.ok) {
   // eslint-disable-next-line no-console
-  console.warn(`[pg compat] skipped: no reachable Postgres (${available.reason}). Set QA_PG_URL or apps/api/.env DATABASE_URL.`);
+  console.warn(`[pg compat] skipped: no reachable Postgres (${available.reason}). Set QA_PG_URL (environment or repo-root .env).`);
 }
 
 const require = createRequire(import.meta.url);
