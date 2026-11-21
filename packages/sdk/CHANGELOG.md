@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.1
 
 - Prisma 6.1+ with the app's own tracing (engine path): on Node 20/22,
   statements are now labelled `orm: prisma` again. They were sent with no

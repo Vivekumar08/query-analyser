@@ -1,6 +1,6 @@
 {
   "name": "@vivekumar08/query-analyser",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Find your slow MongoDB and PostgreSQL queries. One line of setup.",
   "license": "MIT",
   "type": "module",
@@ -14,10 +14,31 @@
       "require": "./dist/index.cjs"
     }
   },
-  "files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"],
-  "engines": { "node": ">=20" },
-  "keywords": ["mongodb", "mongoose", "postgresql", "postgres", "pg", "prisma", "sql", "slow-query", "performance", "apm", "profiler"],
-  "publishConfig": { "access": "public" },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mongodb",
+    "mongoose",
+    "postgresql",
+    "postgres",
+    "pg",
+    "prisma",
+    "sql",
+    "slow-query",
+    "performance",
+    "apm",
+    "profiler"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
@@ -25,12 +46,25 @@
     "prepublishOnly": "pnpm build && pnpm typecheck && pnpm test"
   },
   "dependencies": {},
-  "peerDependencies": { "mongoose": ">=5.13 <10", "mongodb": ">=4 <8", "pg": ">=8.0 <9", "@prisma/client": ">=5.22 <8" },
+  "peerDependencies": {
+    "mongoose": ">=5.13 <10",
+    "mongodb": ">=4 <8",
+    "pg": ">=8.0 <9",
+    "@prisma/client": ">=5.22 <8"
+  },
   "peerDependenciesMeta": {
-    "mongoose": { "optional": true },
-    "mongodb": { "optional": true },
-    "pg": { "optional": true },
-    "@prisma/client": { "optional": true }
+    "mongoose": {
+      "optional": true
+    },
+    "mongodb": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "@prisma/client": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@query-analyser/contract": "workspace:*",
