@@ -3,6 +3,13 @@
   "version": "0.4.1",
   "description": "Find your slow MongoDB and PostgreSQL queries. One line of setup.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vivekumar08/query-analyser.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://github.com/Vivekumar08/query-analyser#readme",
+  "bugs": "https://github.com/Vivekumar08/query-analyser/issues",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
