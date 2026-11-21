@@ -336,7 +336,10 @@ export function wrapAppHelper(app: object): object {
         const rt = sqlRuntime();
         if (rt.sink != null) {
           const store: unknown = rt.als.getStore();
-          emitEngine(rt, statementsFromBatch(spans), labelsOf(isObject(store) ? (store as SqlFrame) : undefined));
+          // Engine spans only ever come from Prisma: with no operation frame (always so on Node 20/22,
+          // see OPERATION_FRAMES) keep orm 'prisma', as createEngineSpan does below.
+          const labels = labelsOf(isObject(store) ? (store as SqlFrame) : undefined) ?? ENGINE_LABELS;
+          emitEngine(rt, statementsFromBatch(spans), labels);
         }
       } catch { /* never reaches the app */ }
       return call('dispatchEngineSpans', [spans, ...rest]);
