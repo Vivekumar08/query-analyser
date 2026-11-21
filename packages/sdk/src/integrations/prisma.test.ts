@@ -8,6 +8,10 @@ import {
   PRISMA_HOOK, OWN_HELPER_KEY, WATCHED_KEYS, DISABLED_TRACEPARENT,
 } from './prisma.js';
 
+// These cases cover the AsyncContextFrame path (Node 24+), where operation spans open a frame.
+// Pin it so they also run on Node 20/22; prisma-no-acf.test.ts covers the path without it.
+vi.mock('../sql/async-context.js', () => ({ hasAsyncContextFrame: () => true }));
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const g = globalThis as Record<string, any>;

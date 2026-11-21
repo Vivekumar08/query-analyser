@@ -6,6 +6,7 @@ import { resolvePgClients } from '../../sdk/src/drivers.js';
 import { undoPgWraps } from '../../sdk/src/integrations/pg.js';
 import { pgCoversAdapter, undoPrismaHook } from '../../sdk/src/integrations/prisma.js';
 import { sqlRuntime } from '../../sdk/src/sql/context.js';
+import { hasAsyncContextFrame } from '../../sdk/src/sql/async-context.js';
 import { capture, itemsOf, sqlOf } from './pg-harness.js';
 import { FIXTURES, WORKLOAD, load, referenceCount, resolverAt, type Loaded } from './prisma-harness.js';
 import {
@@ -22,6 +23,11 @@ import {
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 registerPrismaHooks();
+
+// Prisma 7 model/operation labels need AsyncContextFrame (Node 24+). On Node 20/22 the SDK labels Prisma 7
+// statements from the SQL (table and verb), as on the 5/6 adapter path (CHANGELOG 0.4.0, Final ruling F2).
+const P7_OP_LABELS = hasAsyncContextFrame();
+const findUniqueLabel = P7_OP_LABELS ? 'findUnique' : 'select';
 
 describe.skipIf(!available.ok).each(FIXTURES)('$name adapter path', (fx) => {
   it(`loads Prisma ${fx.prisma} with the app's pg ${fx.pg}`, () => {
@@ -68,12 +74,13 @@ describe.skipIf(!available.ok).each(FIXTURES)('$name adapter path', (fx) => {
     const find = itemMatching(all, /"email" = \?/);
     const counts = all.filter((i) => /count\(\*\)/i.test(sqlOf(i)));
     expect(counts, all.map(sqlOf).join(' | ')).toHaveLength(2);
-    if (fx.major === 7) {
+    if (fx.major === 7 && P7_OP_LABELS) {
       expect(find).toMatchObject({ orm: 'prisma', model: 'User', operation: 'findUnique' });
       // $transaction([user.count, product.count]): both statements carry the first operation's label (documented).
       for (const c of counts) expect(c).toMatchObject({ orm: 'prisma', model: 'User', operation: 'count' });
     } else {
-      // Decision 5: no per-operation context on 5/6; the adapter's call shape gives orm prisma, the SQL the rest.
+      // Decision 5: no per-operation context on 5/6 (nor on 7 without AsyncContextFrame); the adapter's call
+      // shape gives orm prisma, the SQL the rest.
       expect(find).toMatchObject({ orm: 'prisma', model: 'User', operation: 'select' });
       for (const c of counts) expect(c).toMatchObject({ orm: 'prisma', operation: 'select' });
     }
@@ -142,7 +149,7 @@ describe.skipIf(!available.ok)('p710-private', SUITE, () => {
     await runWorkload(p);
     await a.flush();
     expect(total(items())).toBe(referenceCount(events));
-    expect(itemMatching(items(), /"email" = \? AND/)).toMatchObject({ orm: 'prisma', model: 'User', operation: 'findUnique' });
+    expect(itemMatching(items(), /"email" = \? AND/)).toMatchObject({ orm: 'prisma', model: 'User', operation: findUniqueLabel });
     expect(errors).toEqual([]);
   });
 });
@@ -177,7 +184,7 @@ describe.skipIf(!available.ok)("p710 with the app's helper reporting isEnabled()
     expect(total(items())).toBe(referenceCount(events));
     // No db_query spans (Prisma skips them when the helper is disabled), but `operation` spans still run
     // through the wrapped helper, so pg's statements carry the operation's labels.
-    expect(itemMatching(items(), /"email" = \? AND/)).toMatchObject({ orm: 'prisma', model: 'User', operation: 'findUnique' });
+    expect(itemMatching(items(), /"email" = \? AND/)).toMatchObject({ orm: 'prisma', model: 'User', operation: findUniqueLabel });
     expect(errors).toEqual([]);
   });
 
