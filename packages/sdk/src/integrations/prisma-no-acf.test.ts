@@ -44,4 +44,14 @@ describe('without AsyncContextFrame', () => {
     expect(st).toEqual({ kind: 'statement', op: null, claimed: false });
     expect(rec.events.map((e) => e.labels)).toEqual([{ orm: 'prisma', model: null, operation: null }]);
   });
+
+  it("6.1+ engine statements from dispatchEngineSpans keep orm 'prisma' with no operation frame", async () => {
+    const app = { dispatchEngineSpans: vi.fn() };
+    const h = wrapAppHelper(app) as any;
+    const spans = [{ id: 'q1', parentId: null, name: 'prisma:engine:db_query', startTime: [0, 0], endTime: [0, 4_000_000], attributes: { 'db.query.text': 'SELECT 9' } }];
+    h.dispatchEngineSpans(spans);
+    await tick();
+    expect(rec.events.map((e) => [e.text, e.labels])).toEqual([['SELECT 9', { orm: 'prisma', model: null, operation: null }]]);
+    expect(app.dispatchEngineSpans).toHaveBeenCalledWith(spans);
+  });
 });
