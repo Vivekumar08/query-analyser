@@ -1,0 +1,63 @@
+name: Release
+
+# Push a tag like v0.4.1 (matching packages/sdk/package.json "version") to
+# publish @vivekumar08/query-analyser to npm with provenance.
+# Requires the repository secret NPM_TOKEN (npm automation/granular token with
+# publish rights on the package).
+# Reminder: deploy the matching cloud API before publishing a version that
+# sends new wire fields.
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: npm
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: qa
+          POSTGRES_PASSWORD: qa
+          POSTGRES_DB: qa
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U qa"
+          --health-interval 5s
+          --health-retries 10
+    env:
+      QA_PG_URL: postgresql://qa:qa@localhost:5432/qa
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - name: Tag must match package version
+        run: |
+          v=$(node -p "require('./packages/sdk/package.json').version")
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match packages/sdk version $v"
+            exit 1
+          fi
+      - run: pnpm install --frozen-lockfile
+      - name: Prisma compat fixtures
+        run: pnpm --filter @query-analyser/sdk-compat prisma:setup
+      - name: Full suite (compat included)
+        run: pnpm build && pnpm typecheck && pnpm test
+      - name: Publish
+        working-directory: packages/sdk
+        # prepublishOnly re-runs build, typecheck and the SDK tests.
+        run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
